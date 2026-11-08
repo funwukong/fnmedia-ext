@@ -1,0 +1,9 @@
+# runner 镜像只需要 spider-runner/app；资产经挂载，不进构建上下文
+.git/
+.venv/
+__pycache__/
+*.pyc
+dist/
+state/
+.release/
+proxy/assets/guard/

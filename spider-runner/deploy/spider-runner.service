@@ -1,0 +1,30 @@
+[Unit]
+Description=fnmedia-ext unified spider runner (JVM / Node / Android sidecar)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 仓库部署目录（完整版）
+WorkingDirectory=/vol2/@appcenter/fnmedia-ext/repo/spider-runner/app
+Environment=PYTHONUNBUFFERED=1
+Environment=RUNNER_HOST=0.0.0.0
+Environment=RUNNER_PORT=9100
+Environment=CATVOD_ASSET=/vol2/@appcenter/fnmedia-ext/repo/proxy/assets/catvod
+Environment=DRPY_ASSET=/vol2/@appcenter/fnmedia-ext/repo/proxy/assets/drpy
+Environment=NODE_BIN=/var/apps/nodejs_v24/target/bin/node
+# Android bridge：redroid 容器把设备 9101 直映到 127.0.0.1:9110。
+# runner 不经过外网代理（android_bridge 模块内已强制 ProxyHandler({})）。
+Environment=ANDROID_BRIDGE_URL=http://127.0.0.1:9110
+# 空闲回收：JVM/Node 子进程空闲 30 分钟自动退出，下次请求自动重拉（最小内存）
+# JVM/Node 子进程默认常驻（0）；如要空闲回收改为秒数，如 1800
+Environment=SIDECAR_IDLE_SECONDS=0
+# JVM / Node 内存上限
+Environment=JVM_MAX_HEAP=256m
+Environment=NODE_MAX_OLD=192
+ExecStart=/vol2/@appcenter/fnmedia-ext/repo/.venv/bin/python -u server.py
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

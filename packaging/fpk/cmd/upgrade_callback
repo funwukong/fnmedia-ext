@@ -1,0 +1,25 @@
+#!/bin/bash
+# 升级落盘后：恢复 state，补齐 venv，重新渲染并启动接管服务。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+[ -n "${FNMEDIA_REPO_DIR}" ] || fnmedia_fail "应用文件缺失（deploy/install.sh 不存在）"
+
+BACKUP_DIR="${TRIM_PKGVAR:-/tmp}/upgrade-backup"
+if [ -f "${BACKUP_DIR}/state.tar.gz" ]; then
+  tar -xzf "${BACKUP_DIR}/state.tar.gz" -C "${FNMEDIA_REPO_DIR}" >> "${FNMEDIA_LOG}" 2>&1 \
+    || fnmedia_fail "恢复播放记录/资源缓存失败：${BACKUP_DIR}/state.tar.gz"
+fi
+
+cd "${FNMEDIA_REPO_DIR}" || fnmedia_fail "无法进入应用目录"
+if [ ! -x ".venv/bin/python" ]; then
+  python3 -m venv .venv >> "${FNMEDIA_LOG}" 2>&1 || fnmedia_fail "创建 venv 失败"
+  .venv/bin/pip install -q --upgrade pip >> "${FNMEDIA_LOG}" 2>&1 || true
+  .venv/bin/pip install -q fastapi uvicorn httpx >> "${FNMEDIA_LOG}" 2>&1 \
+    || fnmedia_fail "Python 依赖安装失败"
+fi
+bash deploy/install.sh >> "${FNMEDIA_LOG}" 2>&1 || {
+  tail -n 12 "${FNMEDIA_LOG}" >&2 || true
+  fnmedia_fail "升级后接管服务启动失败，详见 ${FNMEDIA_LOG}"
+}
+rm -rf "${BACKUP_DIR}"
+exit 0

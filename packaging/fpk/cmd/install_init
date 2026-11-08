@@ -1,0 +1,22 @@
+#!/bin/bash
+# 落盘前硬前置检查。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+
+# —— 免责声明确认（由 wizard/install 收集为环境变量）——
+# 未明确同意一律中止安装。兼容向导 checkbox 序列化出的多种取值：
+#   ["agree"] / agree / true / 1 / yes / on
+agree_raw="${wizard_agree_terms:-}"
+agree_ok=0
+case "${agree_raw}" in
+  *agree*|*true*|1|yes|on) agree_ok=1 ;;
+esac
+# 去掉空白与括号后的兜底判断
+_norm="$(printf '%s' "${agree_raw}" | tr -d '[]"[:space:]' | tr 'A-Z' 'a-z')"
+[ "${_norm}" = "agree" ] && agree_ok=1
+if [ "${agree_ok}" -ne 1 ]; then
+  fnmedia_fail "请先阅读并勾选同意《免责声明》后再安装。本插件仅供学习交流，本身不内置任何影视资源。"
+fi
+
+[ -S /var/run/trim_media.sock ] || fnmedia_fail "未检测到官方\"飞牛影视\"：请先安装并启动飞牛影视"
+command -v python3 >/dev/null 2>&1 || fnmedia_fail "需要 python3"
+exit 0

@@ -1,0 +1,41 @@
+# Runtime state and local private cache
+/state/
+/logs/
+*.log
+/state/pan_*.json
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Local tooling/build intermediates
+.tools/
+packaging/fpk/.build/
+dist/
+
+# Android 构建工具链（可再生 SDK/NDK，数百 MB，不入库；spider-runner 源码入库）
+/spider-runner/android/.buildtools/
+
+# Editor/OS
+.DS_Store
+.vscode/
+.idea/
+
+# Release binaries are published via GitHub Releases, not Git tree
+/release/*.fpk
+/release/*.sha256
+/release/*.sha256sum
+/.release/
+
+# 客户端安装包（仅本地分析，不入库）
+*.apk
+
+# 本机私有凭证/导入配置（不含在分发内）
+/proxy/catvod.local.json
+/proxy/assets/guard/imported.json
+
+# 论坛发布草稿（本地，不入库）
+/FORUM_POST*.md
+/FORUM_RELEASE_*.md
