@@ -123,6 +123,7 @@ sudo bash deploy/install.sh
 | `domain_heal_enabled` | 开 | 域名自愈（主域名失效时按 `source_domain_backups` 自动试备用域名） |
 | `metadata_enabled` | 开 | 收藏元数据补全（同名其他源补齐空字段，不改已有值） |
 | `related_enabled` | 开 | 详情页关联作品（详情下方挂 recommendations，同系列/同分类优先；字段名按官方详情嵌套相关推荐数组的公开观察推断，是否渲染以真机实测为准） |
+| `library_visible_users` | `{}` | 媒体库可见权限：{库 guid: [用户名, ...]}。某库没配或配空=全部用户可见；配了名单后只有名单里的用户能在 mediadb/list/sum 看到该库，直接打开库 guid 或进库列表时也被挡下。身份按各用户登录飞牛影视时的会话识别（借请求自带的 Authorization 向官方 user/info 查询，同一令牌 10 分钟缓存一次）；识别不到时受限库隐藏（fail-closed）。用户清单走官方 manager/user/list，取不到时管理页可手动填用户名。搜索与详情页暂不过滤（只管库的可见性）。 |
 | `guard_native_enabled` | 开 | 「🛡加固影视」聚合库 |
 | `guard_zone_enabled` | 关 | 每个加固源一张专区库卡 |
 | `t4_library_enabled` | — | T4 远程订阅源库（已接入：type=4 源导入后进入「T4 选片」聚合库，可搜可播；开关控制是否在媒体库中显示该库） |

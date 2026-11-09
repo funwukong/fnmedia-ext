@@ -68,6 +68,8 @@ from marks import marks
 from follow import follow_list
 import domain_heal as domain_heal_mod
 import metadata as metadata_mod
+import identity as identitymod
+import visibility as visibilitymod
 import updater
 from store import (store, make_guid, media_guid, video_guid, is_online_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
@@ -3039,6 +3041,57 @@ async def guard_native_tag_list(request: Request):
 # <<< PRIVATE:GUARD
 
 
+def _all_virtual_lib_guids() -> set[str]:
+    """当前所有注入的在线媒体库 guid（含兼容旧热门 guid）。"""
+    guids = set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
+    guids |= set(HOT_LIB_GUIDS.values()) | {HOT_LEGACY_GUID}
+    guids |= {standalone_lib_guid(s["id"]) for s in config.all_sources()}
+    if features.GUARD:
+        guids |= {guard_lib_guid(g["conf"]["key"]) for g in guard_libs_active()}
+        if guard_native_enabled():
+            guids.add(GUARD_NATIVE_GUID)
+    # >>> PRIVATE:CATVOD
+    try:
+        import xlib
+        for cat in _xlib_active_cats():
+            guids.add(xlib.lib_guid(cat["id"]))
+    except Exception:
+        pass
+    # <<< PRIVATE:CATVOD
+    if hgdj_enabled():
+        guids.add(hgdjmod.lib_guid())
+    # T4 选片库：与其它注入库一样进虚拟库集合，可被 library_visible_users 限制
+    guids.add(T4_LIB_GUID)
+    return guids
+
+
+def _canonical_lib_guid(guid: str) -> str:
+    """兼容旧热门 guid 映射到当前榜单库 guid；其余 guid 原样返回。"""
+    if guid == HOT_LEGACY_GUID:
+        return CHART_LIB_GUIDS["tv"]
+    if guid in HOT_GUID_CAT:
+        return CHART_LIB_GUIDS[HOT_GUID_CAT[guid]]
+    return guid
+
+
+async def _hidden_lib_guids(request: Request, guids) -> set[str]:
+    """一次身份查询，算出这批 guid 里当前用户看不到的。
+
+    没配任何限制时直接返回空集，不查身份、不产生额外上游请求。
+    """
+    cfg = config.get()
+    if not visibilitymod.restrictions_configured(cfg):
+        return set()
+    username = await identitymod.current_username(request)
+    return {g for g in guids
+            if not visibilitymod.is_visible(cfg, _canonical_lib_guid(g), username)}
+
+
+async def _lib_visible(request: Request, guid: str) -> bool:
+    """该请求用户能不能看到这个虚拟库。"""
+    return guid not in await _hidden_lib_guids(request, [guid])
+
+
 @app.get("/v/api/v1/mediadb/list")
 async def mediadb_list(request: Request):
     upstream = await forward_upstream(request)
@@ -3048,18 +3101,15 @@ async def mediadb_list(request: Request):
         return upstream
     payload = await _json_from_upstream(upstream)
     dbs = payload.get("data") if payload else None
-    vlib_guids = (set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
-                  | {standalone_lib_guid(s["id"]) for s in config.all_sources()}
-                  | {T4_LIB_GUID})
-    # >>> PRIVATE:GUARD
-    if features.GUARD:
-        vlib_guids |= {guard_lib_guid(g["conf"]["key"]) for g in guard_libs_active()}
-        if guard_native_enabled():
-            vlib_guids.add(GUARD_NATIVE_GUID)
-    # <<< PRIVATE:GUARD
+    vlib_guids = _all_virtual_lib_guids()
     # 官方该接口偶发鉴权/抖动失败（TV 端会整体“加载失败”）。只要拿到过有效列表，
     # 或本次列表为空，都用本地虚拟库补全；官方失败则只返回我们的虚拟库，不把错误透传给 App。
     if isinstance(dbs, list) and any(d.get("guid") in vlib_guids for d in dbs):
+        hidden = await _hidden_lib_guids(request, vlib_guids)
+        if hidden:
+            dbs = [d for d in dbs if d.get("guid") not in hidden]
+            payload["data"] = dbs
+            return JSONResponse(payload)
         return upstream
     if not isinstance(dbs, list):
         if not (payload and payload.get("code") == 0):
@@ -3248,6 +3298,12 @@ async def mediadb_list(request: Request):
             })
 
 
+        # —— 媒体库可见权限 ——
+        # 没配限制时 _hidden_lib_guids 直接返回空集，不查身份、不多一次请求。
+        hidden = await _hidden_lib_guids(request, vlib_guids)
+        if hidden:
+            inserts = [d for d in inserts if d["guid"] not in hidden]
+
         # —— 置顶控制 ——
         # 置顶库（pinned_libs）插到列表最前并给较大 sort_num；未置顶的虚拟库仍排在
         # 官方本地库之前，但置于置顶组之后。客户端按返回顺序/ sort_num 展示。
@@ -3287,6 +3343,11 @@ async def mdb_detail(guid: str, request: Request):
     网页版不调此接口，所以此前仅网页能打开虚拟库；这里为 8 个虚拟库返回与
     官方同构的库元数据，否则官方后端返回 code=-6，App 提示「此媒体库不存在」。
     """
+    # —— 媒体库可见权限 ——：无权看到的库按不存在处理，直接透传上游
+    # （官方回 code=-6），不暴露该库存在。T4 选片库也在虚拟库集合里，同样受限。
+    if guid in _all_virtual_lib_guids() and not await _lib_visible(request, guid):
+        return await forward_upstream(request)
+
     if guid == T4_LIB_GUID:
         return JSONResponse({"code": 0, "msg": "", "data": t4_browser.library(detail=True)})
     async def posters_for(items: list[str], n: int = 8) -> list[str]:
@@ -3545,6 +3606,19 @@ async def mediadb_sum(request: Request):
             total_added += n
     if total_added:
         payload["data"]["total"] = int(payload["data"].get("total", 0)) + total_added
+    # —— 媒体库可见权限 ——：无权看到的库不露计数（上游数据里若有也一并去掉）。
+    hidden = await _hidden_lib_guids(request, _all_virtual_lib_guids())
+    if hidden:
+        removed = 0
+        for g in hidden:
+            v = payload["data"].pop(g, None)
+            if isinstance(v, int):
+                removed += v
+        if removed and "total" in payload["data"]:
+            try:
+                payload["data"]["total"] = max(0, int(payload["data"]["total"]) - removed)
+            except (TypeError, ValueError):
+                pass
     return JSONResponse(payload)
 
 
@@ -3883,6 +3957,18 @@ async def item_list(request: Request):
         body = {}
     aguid = body.get("ancestor_guid") or body.get("parent_guid") or body.get("guid")
     client = _client_of(request)
+
+    # —— 媒体库可见权限 ——：直接打开无权看到的库时返回空列表（与超时/死站
+    # 的空列表形态一致），不暴露内容。没配限制时 _lib_visible 直接放行，
+    # 不多一次请求。加固聚合库的目录树文件夹也按该库计。T4 选片库根节点
+    # 同样受限（aguid 即 T4_LIB_GUID）；T4 内部节点 guid 不在虚拟库集合里，
+    # 按原逻辑继续分发。
+    _vis_guid = GUARD_NATIVE_GUID if _gn_folder_token(str(aguid or "")) else aguid
+    if _vis_guid and not await _lib_visible(request, _vis_guid) \
+            and _vis_guid in _all_virtual_lib_guids():
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "mdb_name": "", "mdb_category": "", "top_dir": "",
+            "dir": "", "total": 0, "list": [], "jump_list": None}})
 
     parent = body.get("parent_guid") or aguid
     if aguid == T4_LIB_GUID or parent == T4_LIB_GUID or t4_browser.node(parent):
@@ -8456,7 +8542,7 @@ async def ext_source_priority(request: Request):
 
 
 def _virtual_lib_list() -> list[dict]:
-    """供管理台展示的虚拟媒体库清单（热门四库 / 海量四库 / T4 选片），含开关与置顶态。"""
+    """供管理台展示的虚拟媒体库清单（全部注入库），含开关、置顶态与可见名单。"""
     out = []
     out.append({"guid": T4_LIB_GUID, "title": T4_LIB_TITLE,
                 "group": "t4", "enabled": bool(t4_browser.sources()),
@@ -8469,9 +8555,44 @@ def _virtual_lib_list() -> list[dict]:
         out.append({"guid": CATALOG_LIB_GUIDS[cat], "title": title,
                     "group": "catalog", "enabled": catalog_enabled() and catalog.available(cat),
                     "count": catalog.total(cat) if catalog.available(cat) else 0})
+    # 扩展资源独立库（命名与开关语义不动，只在这里多一行展示）
+    if catalogmod._welfare_on():
+        out.append({"guid": CATALOG_LIB_GUIDS[catalogmod.ADULT_CAT],
+                    "title": catalogmod.catalog_title(catalogmod.ADULT_CAT),
+                    "group": "catalog",
+                    "enabled": catalog.available(catalogmod.ADULT_CAT),
+                    "count": catalog.total(catalogmod.ADULT_CAT)
+                    if catalog.available(catalogmod.ADULT_CAT) else 0})
+    for s in standalone_sources_active():
+        out.append({"guid": standalone_lib_guid(s["id"]),
+                    "title": standalone_lib_name(s), "group": "standalone",
+                    "enabled": catalog.standalone_available(s["id"]), "count": 0})
+    if features.GUARD:
+        if guard_native_enabled():
+            out.append({"guid": GUARD_NATIVE_GUID, "title": GUARD_NATIVE_TITLE,
+                        "group": "guard", "enabled": True,
+                        "count": len(_gn_hot_rows())})
+        for g in guard_libs_active():
+            out.append({"guid": guard_lib_guid(g["conf"]["key"]),
+                        "title": guard_lib_name(g["conf"]), "group": "guard",
+                        "enabled": True, "count": 0})
+    # >>> PRIVATE:CATVOD
+    try:
+        import xlib
+        for cat in _xlib_active_cats():
+            out.append({"guid": xlib.lib_guid(cat["id"]), "title": cat["title"],
+                        "group": "xlib", "enabled": True, "count": 0})
+    except Exception:
+        pass
+    # <<< PRIVATE:CATVOD
+    if hgdj_enabled():
+        out.append({"guid": hgdjmod.lib_guid(), "title": hgdjmod.HGDJ_LIB_NAME,
+                    "group": "hgdj", "enabled": hgdjmod.total() > 0,
+                    "count": hgdjmod.total()})
     pinned = config.pinned_lib_guids()
     for d in out:
         d["pinned"] = d["guid"] in pinned
+        d["visible_users"] = config.lib_visible_users(d["guid"])
     return out
 
 
@@ -8491,6 +8612,29 @@ async def ext_lib_pin(request: Request):
     ok, msg = config.set_lib_pinned(guid, on)
     return {"code": 0 if ok else 400, "msg": msg,
             "data": {"pinned_libs": sorted(config.pinned_lib_guids())}}
+
+
+@app.get("/v/api/ext/users")
+async def ext_users(request: Request):
+    """飞牛账号清单（供管理页按库选用户）：调官方 manager/user/list。
+
+    失败（非管理员/接口不通）返回空清单，管理页回退到手动填用户名。
+    """
+    users = await identitymod.list_users(request)
+    if users is None:
+        return {"code": 0, "msg": "", "data": {"users": [], "source": "none"}}
+    return {"code": 0, "msg": "", "data": {"users": users, "source": "manager"}}
+
+
+@app.post("/v/api/ext/lib/visibility")
+async def ext_lib_visibility(request: Request):
+    body = await request.json()
+    guid = str(body.get("guid") or "")
+    users = body.get("users") or []
+    ok, msg = config.set_lib_visible_users(guid, users)
+    return {"code": 0 if ok else 400, "msg": msg,
+            "data": {"guid": guid,
+                     "visible_users": config.lib_visible_users(guid) if ok else []}}
 
 
 @app.post("/v/api/ext/hot/refresh")

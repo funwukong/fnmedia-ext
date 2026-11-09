@@ -270,7 +270,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <!-- ============ 虚拟媒体库 ============ -->
     <section class="page" id="page-library">
       <h2 class="page-title">虚拟媒体库</h2>
-      <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」。</p>
+      <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」，也可单独设置「仅哪些飞牛用户可见」（留空=全部用户）。</p>
 
       <div class="card">
         <div class="card-title">① 热门资源（各类目真实榜单）</div>
@@ -306,6 +306,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="primary small" onclick="saveCatCfg()">保存海量设置</button>
         </div>
         <div class="hint">海量库在分类路由建立后自动出现；也可在「资源站」页把某个站单独生成一张媒体库卡片。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">③ 其他注入库与可见权限</div>
+        <p class="card-sub">独立源库 / 加固 / 小雅 / 红果短剧。每张卡可单独设置仅哪些飞牛用户可见：用户名用逗号分隔，留空=全部用户可见。</p>
+        <div class="lib-grid" id="otherLibs"></div>
+        <datalist id="fnusers"></datalist>
+        <div class="hint">用户名从飞牛账号来（下拉可选，取不到时可直接手动输入）。身份按各用户登录飞牛影视时的会话识别；识别不到时该库保持全部可见，不会锁死。</div>
       </div>
 
       <div class="card">
@@ -1081,19 +1089,44 @@ function libCards(chartCounts,cats){
 
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
+let FNUSERS=[];
 async function loadLibs(){
   try{const r=await jget("/v/api/ext/libs");LIBS=(r.data&&r.data.libs)||[];
     if($("catEnabled"))$("catEnabled").checked=!!(r.data&&r.data.catalog_enabled);
   }catch(e){LIBS=[];}
+  await loadFnUsers();
+}
+async function loadFnUsers(){
+  try{const r=await jget("/v/api/ext/users");FNUSERS=(r.data&&r.data.users)||[];
+    const dl=$("fnusers");if(dl)dl.innerHTML=FNUSERS.map(u=>`<option value="${esc(u.username)}">`).join("");
+  }catch(e){FNUSERS=[];}
+}
+async function saveVis(guid,btn){
+  const card=btn.closest(".lib");const inp=card&&card.querySelector("[data-vis]");
+  const users=(inp?inp.value:"").split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+  try{
+    const r=await jpost("/v/api/ext/lib/visibility",{guid,users});
+    if(r.code===0){toast(users.length?("仅 "+users.join("、")+" 可见"):"已改为全部用户可见");
+      LIBS.forEach(x=>{if(x.guid===guid)x.visible_users=r.data.visible_users||users;});renderLibrary();}
+    else toast(r.msg||"保存失败","fail");
+  }catch(e){toast("保存失败","fail");}
 }
 function catKeyOf(title){
   if(/电影/.test(title))return "movie"; if(/剧/.test(title))return "tv";
   if(/动漫|番/.test(title))return "anime"; if(/综艺/.test(title))return "variety"; return "";
 }
 function libCardHtml(L,ic){
+  const grp={standalone:"独立源库",guard:"加固",xlib:"小雅",hgdj:"红果短剧"}[L.group]||"";
+  const sub=L.group==="t4"?(L.count+" 个源"):L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):(grp||"建库中…"));
+  const vis=(L.visible_users&&L.visible_users.length)?("仅 "+L.visible_users.map(esc).join("、")):"全部用户";
   return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
     <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
-      <div class="c">${L.group==="t4"?(L.count+" 个源"):L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):"建库中…")}</div></div>
+      <div class="c">${sub}</div>
+      <div class="c">👥 可见：${vis}</div>
+      <div style="display:flex;gap:6px;margin-top:4px">
+        <input type="text" list="fnusers" data-vis="${L.guid}" placeholder="用户名，逗号分隔；留空=全部用户" value="${esc((L.visible_users||[]).join("，"))}" style="flex:1;min-width:0"/>
+        <button class="btn sm" onclick="saveVis('${L.guid}',this)">保存</button>
+      </div></div>
     <label class="pin" title="在飞牛影视媒体库列表中置顶">
       <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
   </div>`;
@@ -1119,6 +1152,8 @@ function renderLibrary(){
   if(LIBS.length){
     $("hotLibs").innerHTML=LIBS.filter(x=>x.group==="hot").map(L=>libCardHtml(L,hotIc[catKeyOf(L.title)]||"🔥")).join("");
     $("catLibs").innerHTML=LIBS.filter(x=>x.group==="catalog").map(L=>libCardHtml(L,"🌐")).join("");
+    const other=LIBS.filter(x=>x.group!=="hot"&&x.group!=="catalog");
+    const og=$("otherLibs");if(og)og.innerHTML=other.length?other.map(L=>libCardHtml(L,{standalone:"📺",guard:"🛡",xlib:"💾",hgdj:"🍅"}[L.group]||"📚")).join(""):"<div class=\"muted sm\">暂无独立源库 / 加固 / 小雅 / 红果库。</div>";
   }else{
     $("hotLibs").innerHTML=[["movie","🎬","热门电影",c.movie||0],["tv","📺","热门剧集",c.tv||0],["anime","🌸","动漫新番",c.anime||0],["variety","🎤","热门综艺",c.variety||0]]
         .map(([k,ic,t,n])=>`<div class="lib"><div class="ic">${ic}</div><div><div class="t">${t}</div><div class="c">${n} 条</div></div></div>`).join("");
