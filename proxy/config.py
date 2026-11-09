@@ -151,6 +151,12 @@ DEFAULTS = {
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
     "hot_pages_per_source": 6,  # 每个资源站翻“最近更新”的页数（每页约20条）
     "hot_refresh_interval": 6 * 3600,
+    # —— 在线资源会话缓存 state/titles.json（issue #42：搜索越用越慢）——
+    # 该文件每次合并搜索结果都会落盘；机械盘/ARM 盒子写几十 MB 要数秒，直接拖慢搜索。
+    # 故同时给出「条数上限」和「字节上限」双重裁剪，并把落盘改为后台防抖异步写。
+    "titles_cache_max_entries": 4000,   # 最多保留多少条标题（超出丢最旧）
+    "titles_cache_max_mb": 4,          # 落盘文件 MB 硬上限（超出按最旧裁剪；0=不按字节限）
+    "titles_flush_debounce": 5,        # 落盘防抖秒数：脏后最多等这么久合并写一次（0=立即）
     # 源质量优先级：source_id -> 权重（越高越优先）。未列出的源取内省默认（见
     # providers.source_priority）。热门榜单点击搜源时按 (优先级, 直链数) 排序。
     "source_priority": {},
