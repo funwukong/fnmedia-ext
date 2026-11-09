@@ -9,7 +9,7 @@ import tvbox
 
 SITES = [
     {"name": "T4源A", "type": 4, "api": "http://t4.example/api", "ext": "x"},
-    {"name": "T4源A重复", "type": 4, "api": "http://t4.example/api"},
+    {"name": "T4源A重复", "type": 4, "api": "http://t4.example/api", "ext": "x"},
     {"name": "T4坏地址", "type": 4, "api": "ftp://t4.example/api"},
     {"name": "普通CMS", "type": 1, "api": "https://cms.example/api.php/provide/vod/at/json"},
 ]
@@ -17,14 +17,15 @@ SITES = [
 
 def test_type4_collected_not_skipped():
     groups = tvbox.classify_subscription(SITES)
-    # T4 源A（http）与 T4坏地址（ftp）都收录展示，ftp 的标 invalid，不进 skipped
-    assert len(groups["t4"]) == 2
+    # T4 源A（http）归一化进 t4 组（重复的同 api+ext 去重）；ftp 地址无法接入，
+    # 按上游行为进 skipped 并注明原因，不再以 invalid 占位收进 t4 组。
+    assert len(groups["t4"]) == 1
     assert groups["t4"][0]["name"] == "T4源A"
     assert groups["t4"][0]["api"] == "http://t4.example/api"
-    bad = [x for x in groups["t4"] if x["name"] == "T4坏地址"][0]
-    assert bad["invalid"] is True
-    # T4 不再进 skipped（之前是“不支持的类型 type=4”）
-    assert not any("T4" in s.get("name", "") for s in groups["skipped"])
+    assert groups["t4"][0]["kind"] == "t4"
+    bad = [s for s in groups["skipped"] if s.get("name") == "T4坏地址"]
+    assert len(bad) == 1
+    assert "http" in bad[0]["reason"]
     # 普通 CMS 不受影响
     assert len(groups["cms"]) == 1
 
