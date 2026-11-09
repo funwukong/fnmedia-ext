@@ -37,12 +37,17 @@ import client as clientmod
 import live as livemod
 import inject as inj
 import config as cfgmod
+import adfilter as adfilter_mod
 from config import config
 import hot as hotmod
 from hot import hot_cache
 import charts as chartmod
 from charts import chart_cache
+import hgdj as hgdjmod
 import catalog as catalogmod
+from catalog import catalog
+import catalog as catalogmod
+from catalog import catalog
 from catalog import catalog
 import history as histmod
 from history import history
@@ -177,6 +182,14 @@ def standalone_source_of(lib_guid: str) -> str | None:
         if standalone_lib_guid(s["id"]) == lib_guid:
             return s["id"]
     return None
+
+
+# HGDJ（红果短剧）：库根节点可收藏与否由 is_hgdj_series 判定；供 mediadb/mdb/item
+# 分支与 play_play 用。
+def hgdj_enabled() -> bool:
+    return hgdjmod.enabled()
+
+
 
 
 def standalone_sources_active() -> list[dict]:
@@ -1793,7 +1806,7 @@ def catalog_enabled() -> bool:
 
 
 def any_virtual_lib_enabled() -> bool:
-    if charts_enabled() or catalog_enabled():
+    if charts_enabled() or catalog_enabled() or hgdj_enabled():
         return True
     # >>> PRIVATE:GUARD
     try:
@@ -2138,6 +2151,10 @@ async def lifespan(app: FastAPI):
             app.state.update_task.cancel()
             await app.state.update_task
         except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            app.state.iptv_task.cancel()
+        except Exception:
             pass
         await app.state.up.aclose()
         await app.state.ext.aclose()
@@ -3165,6 +3182,21 @@ async def mediadb_list(request: Request):
         except Exception as exc:
             _log.warning("inject xlib libs failed: %s", exc)
         # <<< PRIVATE:CATVOD
+
+        # 6) 红果短剧伪媒体库（开关打开且已载入至少一条条目时展示；缺省关闭）
+        if hgdj_enabled() and hgdjmod.total() > 0:
+            ps = ["/v/api/v1/sys/img/" + q[1:]
+                  for q in hgdjmod.cached_posters(8)
+                  if q.startswith("/online/")]
+            inserts.append({
+                "guid": hgdjmod.lib_guid(),
+                "title": hgdjmod.HGDJ_LIB_NAME,
+                "poster": ps[0] if ps else "",
+                "posters": ps,
+                "category": "TV", "view_type": 0, "poster_type": 0,
+                "refresh_disabled": True,
+            })
+
         # —— 置顶控制 ——
         # 置顶库（pinned_libs）插到列表最前并给较大 sort_num；未置顶的虚拟库仍排在
         # 官方本地库之前，但置于置顶组之后。客户端按返回顺序/ sort_num 展示。
@@ -3246,6 +3278,25 @@ async def mdb_detail(guid: str, request: Request):
             "include_adult": False, "subtitle_lan": "zh-CN",
             "poster": posters[0] if posters else "",
             "poster_type": 0, "posters": posters,
+            "view_type": 0, "last_update_time": 0, "sort_num": 0,
+            "auto_progress_thumb": 0, "skip_filesize": 0,
+            "prefer_local_nfo": 0, "refresh_disabled": True,
+        }
+        return JSONResponse({"code": 0, "msg": "", "data": payload})
+
+
+    # 红果短剧伪媒体库元数据
+    if guid == hgdjmod.lib_guid() and hgdj_enabled():
+        covers = hgdjmod.cached_posters(12)
+        n = hgdjmod.total()
+        payload = {
+            "guid": guid,
+            "name": hgdjmod.HGDJ_LIB_NAME,
+            "category": "TV",
+            "dir_list": [], "lan": "zh-CN", "auto_scrap_subtitle": 0,
+            "include_adult": False, "subtitle_lan": "zh-CN",
+            "poster": covers[0] if covers else "",
+            "poster_type": 0, "posters": covers,
             "view_type": 0, "last_update_time": 0, "sort_num": 0,
             "auto_progress_thumb": 0, "skip_filesize": 0,
             "prefer_local_nfo": 0, "refresh_disabled": True,
@@ -3421,6 +3472,12 @@ async def mediadb_sum(request: Request):
     except Exception:
         pass
     # <<< PRIVATE:CATVOD
+    # 红果短剧计数（缺省关闭；未载入则为 0）
+    if hgdj_enabled():
+        n = hgdjmod.total()
+        if n:
+            payload["data"][hgdjmod.lib_guid()] = n
+            total_added += n
     if total_added:
         payload["data"]["total"] = int(payload["data"].get("total", 0)) + total_added
     return JSONResponse(payload)
@@ -3863,6 +3920,20 @@ async def item_list(request: Request):
                     "jump_list": None}})
     # <<< PRIVATE:CATVOD
 
+    # —— 红果短剧：库根 → 一季分类目录 → 频道/集墙（只读缓存，即时返回） ——
+    if aguid == hgdjmod.lib_guid() and hgdj_enabled():
+        page = max(1, int(body.get("page") or body.get("page_index") or 1))
+        page_size = max(1, min(int(body.get("page_size") or 22), 100))
+        order, total_n, pages = hgdjmod.browse_guids(page, page_size)
+        rows = []
+        for g in order:
+            rows.append(hgdjmod.series_card(g))
+        rows = clientmod.normalize_cards(rows, client)
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "mdb_name": hgdjmod.HGDJ_LIB_NAME, "mdb_category": "TV",
+            "top_dir": "", "dir": "", "total": total_n, "list": rows,
+            "jump_list": None}})
+
     # —— 单源独立媒体库：该源四类交错成一条最近更新流 ——
     sscope = standalone_source_of(aguid) if aguid else None
     if sscope is not None and \
@@ -3992,13 +4063,22 @@ async def search_list(request: Request):
             online = []
         except Exception:
             online = []
+    # 红果短剧搜索并入（仅查本地已缓存标题，不再打 upstream）
+    hgdj_online = []
+    if q and hgdj_enabled():
+        try:
+            hgdj_online = hgdjmod.search_items(q)
+        except Exception:
+            hgdj_online = []
+    if hgdj_online:
+        hgdj_online = clientmod.normalize_cards(hgdj_online, _client_of(request))
     # 在线片库更齐全，默认把在线结果排到前面；可在管理页关闭
     if online:
         online = clientmod.normalize_cards(online, _client_of(request))
     if config.get().get("online_first", True):
-        data["data"] = online + items
+        data["data"] = hgdj_online + online + items
     else:
-        data["data"] = items + online
+        data["data"] = items + online + hgdj_online
     return JSONResponse(data, status_code=200,
                         headers={"Content-Type": "application/json; charset=utf-8"})
 
@@ -4197,6 +4277,56 @@ async def item_detail(guid: str, request: Request):
         _apply_marks(data)
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(data, client)})
+    # ---------- 红果短剧：series / season / episode 详情 ----------
+    if hgdj_enabled() and hgdjmod.is_hgdj_series(guid):
+        rec = await hgdjmod.series_detail(guid)
+        if rec is None:
+            return JSONResponse({"code": 0, "msg": "", "data": {}})
+        covers = [rec.get("pic_cms") or ""] if rec.get("pic_cms") else []
+        n = len(rec.get("eps") or [])
+        if n == 0:
+            try:
+                n = int(rec.get("episode_cnt") or 0)
+            except (TypeError, ValueError):
+                n = 0
+        data = inj._base_item(
+            guid=guid, type="TV", title=rec.get("title", ""),
+            can_play=1, number_of_seasons=1, number_of_episodes=n,
+            local_number_of_episodes=n,
+            ancestor_guid=hgdjmod.lib_guid(), ancestor_name=hgdjmod.HGDJ_LIB_NAME,
+            ancestor_category="TV",
+            poster=covers[0] if covers else "", posters=covers,
+            overview=rec.get("overview", ""),
+            release_date="", air_date="", logic_type=0)
+        data["play_item_guid"] = guid
+        data["play_error"] = ""
+        data["poster_type"] = 0
+        data["video_guid"] = hgdjmod.media_guid_of(guid, 1) if n else ""
+        return JSONResponse({"code": 0, "msg": "",
+                             "data": clientmod.normalize_detail(data, client)})
+    if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        try:
+            sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
+            ep = int(ep)
+        except ValueError:
+            return await forward_upstream(request)
+        rec = await hgdjmod.series_detail(sg)
+        if rec is None:
+            return await forward_upstream(request)
+        eps = rec.get("eps") or []
+        e = next((x for x in eps if int(x.get("hgdj_ep", 0)) == ep), None)
+        title = (e.get("name") if e else f"第{ep}集") or f"第{ep}集"
+        data = inj._base_item(
+            guid=guid, type="Episode", title=title,
+            parent_guid=hgdjmod.season_guid_of(sg), parent_title="第 1 季",
+            tv_title=rec.get("title", ""), season_number=1, episode_number=ep,
+            number_of_seasons=1, number_of_episodes=len(eps),
+            local_number_of_episodes=len(eps), can_play=1,
+            media_guid=hgdjmod.media_guid_of(sg, ep),
+            video_guid="onv" + sg[2:][:29])
+        _apply_marks(data)
+        return JSONResponse({"code": 0, "msg": "",
+                             "data": clientmod.normalize_detail(data, client)})
     # 伪造的 Season / Episode 节点
     if store.get_episode(guid):
         ep = store.get_episode(guid)
@@ -4338,6 +4468,28 @@ async def stream_list(guid: str, request: Request):
         if xsl is not None:
             return JSONResponse({"code": 0, "msg": "", "data": xsl})
     # <<< PRIVATE:CATVOD
+    # 红果短剧 episode 线路：直链 play_link，cloud_storage_info 直连类型
+    if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        try:
+            sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
+            ep = int(ep)
+        except ValueError:
+            return await forward_upstream(request)
+        rec = await hgdjmod.series_detail(sg)
+        if rec is None:
+            return JSONResponse({"code": 0, "msg": "", "data": {}})
+        eps = rec.get("eps") or []
+        e = next((x for x in eps if int(x.get("hgdj_ep", 0)) == ep), None)
+        ep_title = (e.get("name") if e else f"第{ep}集") or f"第{ep}集"
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        sl = hgdjmod.synth_stream(guid, rec | {"hgdj_ep": ep}, headers)
+        quals = _qualities(None) if False else []
+        if quals:
+            sl["video_streams"][0]["resolution_type"] = quals[0]["resolution"]
+            sl["video_streams"][0]["bps"] = quals[0]["bitrate"]
+            sl["qualities"] = quals
+            sl["cloud_storage_info"] = None
+        return JSONResponse({"code": 0, "msg": "", "data": sl})
     ep = store.get_episode(guid)
     target = None
     if ep:
@@ -4410,6 +4562,10 @@ def _online_card_meta(guid: str) -> dict | None:
 def _is_online_item_guid(guid: str) -> bool:
     if not guid:
         return False
+    if hgdj_enabled() and hgdjmod.is_hgdj_series(guid):
+        return True
+    if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        return True
     if (guid in CATALOG_GUID_CAT or guid in CHART_GUID_CAT or is_hot_guid(guid)
             or standalone_source_of(guid) is not None):
         return False  # 媒体库根节点不可收藏
@@ -4615,6 +4771,10 @@ async def play_info(request: Request):
             return JSONResponse({"code": 0, "msg": "", "data": xinfo})
     # <<< PRIVATE:CATVOD
 
+    # 电视直播频道：play_link 直指本插件 HLS 代理（App/TV 端再经 media/range 302）
+
+    # <<< PRIVATE:CATVOD
+
     def _prewarm_from_info(info: dict):
         """点击播放即后台预热默认线路的播放列表，缩短首帧等待。"""
         try:
@@ -4626,6 +4786,21 @@ async def play_info(request: Request):
                 _warm_playlist(mg, picked, request)
         except Exception:
             pass
+
+    # 红果短剧 episode 播放信息：直链 play_link，MP4 wrapper
+    if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        try:
+            sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
+            ep = int(ep)
+        except ValueError:
+            return await forward_upstream(request)
+        rec = await hgdjmod.series_detail(sg)
+        if rec is None:
+            return JSONResponse({"code": 0, "msg": "", "data": {}})
+        headers = {k.lower(): v for k, v in request.headers.items()}
+        info = hgdjmod.synth_play(guid, rec | {"hgdj_ep": ep}, headers)
+        return JSONResponse({"code": 0, "msg": "",
+                             "data": clientmod.normalize_detail(info, client)})
 
     ep = store.get_episode(guid)
     rec = history.get(guid)
@@ -4871,6 +5046,20 @@ async def play_play(request: Request):
     import json
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
+    if hgdj_enabled() and hgdjmod.is_hgdj_media_guid(mg):
+        # HGDJ 云盘直连：play_link 已是绝对直链，直接回原值即可；播放器直连。
+        try:
+            sg, ep = mg[len("hgdj-mg:"):].rsplit(":", 1)
+            ep = int(ep)
+        except ValueError:
+            sg, ep = "", 0
+        rec = await hgdjmod.series_detail(sg) if sg else None
+        if rec:
+            headers = {k.lower(): v for k, v in request.headers.items()}
+            info = hgdjmod.synth_play(sg, rec | {"hgdj_ep": ep}, headers)
+            return JSONResponse({"code": 0, "msg": "",
+                                 "data": clientmod.normalize_detail(info, client)})
+        return JSONResponse({"code": 0, "msg": "", "data": {}})
     base_target = store.resolve_media_guid(mg)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
@@ -4920,6 +5109,25 @@ async def play_play(request: Request):
         "video_index": 0, "wrapper": wrapper,
         "non_fatal_errno": None, "video_encoder": "",
         "not_supported_resolution": "", "supported_highest_resolution": ""}})
+
+
+@app.get(f"{ONLINE_PREFIX}/hgdj/{{series_guid}}.mp4")
+async def hgdj_media_proxy(series_guid: str, request: Request):
+    """代理 HGDJ companion 播放流：GET /api/play/<sid>/<ep>，透传 Range。
+
+    注意：app 底层还有一个 /{mg} 通配符路由，会优先拦截以 "/" 开头的任意 mg。
+    这里显式用 /hgdj/{series_guid}.mp4，与 play_link 生成的一致。
+    """
+    try:
+        ep = int(request.query_params.get("ep", "1"))
+    except ValueError:
+        ep = 1
+    status, headers_out, gen = await hgdjmod.proxy_media(series_guid, ep,
+                                                          dict(request.headers))
+    if gen is None:
+        return Response("not found", status_code=status or 502)
+    return StreamingResponse(gen, status_code=status, media_type="video/mp4",
+                             headers=headers_out)
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/direct")
@@ -7393,6 +7601,12 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     want_badge = bool(pan_label) or health_grade is not None
     headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
+    # aimimang 同款：源站图床 → CDN 镜像（绕防盗链）
+    for dom, cdn in adfilter_mod.HOSTS_MIRROR:
+        if host == dom:
+            u = u.replace("://" + dom, "://" + cdn, 1)
+            host = cdn
+            break
     # 豆瓣图床需要带豆瓣 Referer，否则可能 403
     if host.endswith("doubanio.com") or host.endswith("douban.com") or \
             host.endswith("doubanio.viki.moe"):
