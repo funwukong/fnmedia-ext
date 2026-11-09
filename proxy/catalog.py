@@ -406,6 +406,13 @@ class Catalog:
                                   (CATS + ([ADULT_CAT] if _ext_lib_on() else [])))]
             for sid in warm_scopes:
                 asyncio.create_task(self.warm_standalone(sid))
+            # 4K 派生预热：源没有 4K 分类时，后台先翻电影页把 4K 片抄进
+            # uhd 密集列表——库卡才有海报、首次点开才有内容；只在 uhd
+            # 还是空的时候跑一次（密集列表在路由刷新时保留，不会反复跑）。
+            if (not self._routes.get(self._scope_key(AGG_SCOPE, "uhd"))
+                    and self._routes.get(self._scope_key(AGG_SCOPE, "movie"))
+                    and not self._dense.get(self._scope_key(AGG_SCOPE, "uhd"))):
+                asyncio.create_task(self.get_window("uhd", 0, 40))
         finally:
             self._refreshing = False
         return self.status()
@@ -491,8 +498,18 @@ class Catalog:
                 return 0
             return min(int(routes[0].get("pagecount") or 0), MAX_PAGES)
 
+    def dense_count(self, cat: str, scope: str = AGG_SCOPE) -> int:
+        """已实际找到并去重的条目数（密集列表长度）。"""
+        with self._lock:
+            return len(self._dense.get(self._scope_key(scope, cat)) or [])
+
     def total(self, cat: str, scope: str = AGG_SCOPE) -> int:
         # 用规范源页数估算 total；最后一页条数未知，前端以空页自然停止。
+        # 例外：4K 没有原生路由时是派生库，电影页数 × 20 是虚数——源备注里
+        # 没有 4K 信号时库是空的，却报几十条，前端会一直翻空页转圈；
+        # 只报实际找到的数，没找到就是 0。
+        if cat == "uhd" and not self._routes.get(self._scope_key(scope, cat)):
+            return self.dense_count(cat, scope)
         return self.pagecount(cat, scope) * PAGE_SIZE
 
     def routes_stale(self) -> bool:
@@ -558,6 +575,11 @@ class Catalog:
                     return data
                 self._page_cache.pop(key, None)
             fut = self._inflight.get(key)
+            if fut is not None and fut.get_loop() is not asyncio.get_running_loop():
+                # 旧事件循环残留的 future（循环已关闭、拉取任务已取消）：
+                # 丢弃重建，否则新循环里等一个永远不会完成的 future。
+                fut = None
+                self._inflight.pop(key, None)
         if fut is None:
             fut = asyncio.get_event_loop().create_future()
             with self._lock:
@@ -572,6 +594,12 @@ class Catalog:
                         self._page_cache[key] = (time.time(), briefs, ttl)
                     if not fut.done():
                         fut.set_result(briefs)
+                except asyncio.CancelledError:
+                    # 拉取任务被取消：先给等它的人一个空结果再重抛，
+                    # 别把 key 永远挂在 _inflight 让后来的人等死。
+                    if not fut.done():
+                        fut.set_result([])
+                    raise
                 except Exception:
                     if not fut.done():
                         fut.set_result([])
