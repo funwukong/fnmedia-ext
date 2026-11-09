@@ -125,7 +125,7 @@ sudo bash deploy/install.sh
 | `related_enabled` | 开 | 详情页关联作品（详情下方挂 recommendations，同系列/同分类优先；字段名按官方详情嵌套相关推荐数组的公开观察推断，是否渲染以真机实测为准） |
 | `guard_native_enabled` | 开 | 「🛡加固影视」聚合库 |
 | `guard_zone_enabled` | 关 | 每个加固源一张专区库卡 |
-| `t4_library_enabled` | — | T4 远程订阅源库（未实现：本 fork v0.2.39 没有 T4 协议接入，type=4 源导入时只收录展示、不能搜不能播；上游 v0.2.66 起才有「T4 选片」聚合库） |
+| `t4_library_enabled` | — | T4 远程订阅源库（已接入：type=4 源导入后进入「T4 选片」聚合库，可搜可播；开关控制是否在媒体库中显示该库） |
 
 ## 🔨 打包
 
