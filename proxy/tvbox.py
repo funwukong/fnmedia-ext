@@ -434,17 +434,24 @@ def classify_subscription(sites: list[dict], spider: str = "",
                由安卓运行时按各自 jar 加载
       drpy   : 远程 drpyS（type=3、api 为 http 的 drpy2 js），{name,api,ext}，
                由 Node sidecar 直接跑远程脚本
+      t4     : 远程 T4 源（type=4），{name,api,ext}，仅收录展示，本版本未接入
+               T4 协议，不能搜不能播
       skipped: [{name,reason}]
     """
     cms: list[dict] = []
     guard: list[dict] = []
     csp: list[dict] = []
     drpy: list[dict] = []
+    # T4 远程源（type=4）：服务端解析的远程订阅源，本 fork v0.2.39 未接入 T4
+    # 协议（上游 v0.2.66 起才有「T4 选片」聚合库），不能搜不能播；但不再静默
+    # 丢弃，单独成组返回，让管理页能显示出来。
+    t4: list[dict] = []
     skipped: list[dict] = []
     seen_cms: set[str] = set()
     seen_guard: set[str] = set()
     seen_csp: set[str] = set()
     seen_drpy: set[str] = set()
+    seen_t4: set[str] = set()
     count: dict[str, int] = {}
     skip_seen: set[str] = set()
     jar_url = _spider_jar_url(spider, base)
@@ -485,6 +492,17 @@ def classify_subscription(sites: list[dict], spider: str = "",
                 "searchable": s.get("searchable", 1),
                 "quickSearch": s.get("quickSearch", 0),
             })
+            continue
+
+        # 2.5) T4 远程源（type=4）：只收录展示，不走 CMS/爬虫流程。
+        # 地址不是 http(s) 也收录（标 invalid），别静默丢进 skipped 让人找不到。
+        if t == "4":
+            tk = api.lower()
+            if tk not in seen_t4:
+                seen_t4.add(tk)
+                t4.append({"name": name or api, "api": api,
+                           "ext": s.get("ext") or "",
+                           "invalid": not api.startswith(("http://", "https://"))})
             continue
 
         # 3) type=3 其它爬虫细分
@@ -553,7 +571,7 @@ def classify_subscription(sites: list[dict], spider: str = "",
         norm["transport"] = "json" if status == "add_json" else "xml"
         cms.append(norm)
 
-    return {"cms": cms, "guard": guard, "csp": csp, "drpy": drpy,
+    return {"cms": cms, "guard": guard, "csp": csp, "drpy": drpy, "t4": t4,
             "skipped": skipped, "jar_url": jar_url}
 
 

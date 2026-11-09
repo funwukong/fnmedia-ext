@@ -11,17 +11,88 @@ from pathlib import Path
 import features
 from providers import DEFAULT_SOURCES
 
+try:
+    from fnlog import get_logger
+except Exception:  # 独立运行 / 旧打包缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("config")
+
 _STATE = Path(__file__).resolve().parent.parent / "state" / "config.json"
 _LOCK = threading.RLock()
 
-# 噪音关键词：标题或备注命中则不注入（电影解说、预告、花絮、AI 漫剧等）
+# 配置版本号：升级时按版本做迁移（见 Config.load）。
+CONFIG_VERSION = 1
+# 每次保存前保留的旧配置备份份数。
+BACKUP_KEEP = 5
+
+
+def _backup_dir() -> Path:
+    return _STATE.parent / "backups"
+
+
+def _backup_config() -> Path | None:
+    """把当前 config.json 复制一份带时间戳的备份，只留最近 N 份。
+
+    由 _persist 在成功写入后调用，备份即“最近一次完好的配置”。"""
+    try:
+        if not _STATE.is_file():
+            return None
+        d = _backup_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        import datetime
+
+        ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dst = d / f"config-{ts}.json"
+        # 同一秒内多次保存不覆盖已有备份。
+        i = 1
+        while dst.exists():
+            dst = d / f"config-{ts}-{i}.json"
+            i += 1
+        dst.write_bytes(_STATE.read_bytes())
+        for old in sorted(d.glob("config-*.json"))[: -BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return dst
+    except Exception as e:
+        _log.warning("config backup failed: %s: %s", type(e).__name__, e)
+        return None
+
+
+def _restore_from_backup() -> dict | None:
+    """主配置损坏时按时间倒序尝试备份，返回第一个能解析的备份内容。"""
+    try:
+        backups = sorted(_backup_dir().glob("config-*.json"), reverse=True)
+    except Exception:
+        return None
+    for b in backups:
+        try:
+            j = json.loads(b.read_text(encoding="utf-8"))
+            if isinstance(j, dict):
+                _log.error("config corrupted, restored from backup: %s", b.name)
+                return j
+        except Exception:
+            continue
+    return None
+
+# 噪音关键词：标题或备注命中则不注入（电影解说、预告、花絮等）。
+# P2：AI漫剧 / 漫剧 / 动态漫画已是正式分类（catalog.ai_comic），不再当噪音过滤。
 JUNK_KEYWORDS = [
     "电影解说", "影视解说", "解说", "预告片", "预告", "花絮", "抢先", "枪版",
-    "AI漫剧", "漫剧", "动态漫画", "彩蛋", "删减", "片场", "开机", "特辑",
+    "彩蛋", "删减", "片场", "开机", "特辑",
 ]
 
 DEFAULTS = {
+    "config_version": CONFIG_VERSION,
     "sources": [dict(s) for s in DEFAULT_SOURCES],
+    # T4 远程源（type=4）：导入订阅时收录的展示清单 [{name, api, ext}]。
+    # 本 fork 未接入 T4 协议，不能搜不能播，只显示；上游 v0.2.66 起才有 T4 选片库。
+    "t4_sources": [],
     # 被删除的内置源 id（自定义源删除时直接从 sources 移除）
     "removed_ids": [],
     "max_per_keyword": 12,
@@ -49,9 +120,9 @@ DEFAULTS = {
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
     "catalog_library_enabled": True,
-    # 福利（成人）扩展库独立开关：开启后，已被源标记为「扩展分类(adult)」的
+    # 扩展（成人）资源库独立开关：开启后，已被源标记为「扩展分类(adult)」的
     # 源才把 ADULT_CAT 纳入浏览。默认关闭：不建路由、不抓取、不显示。
-    "welfare_library_enabled": False,
+    "ext_library_enabled": False,
     # 是否把每个启用的 TVBox 加固源（csp_*Guard，如比特/糯米/花花）生成为一张
     # 独立“专区媒体库”卡片。默认关闭：加固源只作为播放时可切换的线路/搜索源，
     # 不在媒体库列表里产生空库。需要专区墙时可在管理页打开。
@@ -87,6 +158,19 @@ DEFAULTS = {
     # 插件仅充当客户端，本机服务缺省监听 127.0.0.1:18098。
     "hgdj_enabled": False,
     "hgdj_url": "http://127.0.0.1:18098",
+    # ---- P2 开关 ----
+    # 追剧提醒：开启后，收藏的剧集数变多时在管理页 / _ext/follow 提醒。
+    "follow_enabled": True,
+    # 源健康自动降级：开启后，连续失败 3 次的源在 15 分钟冷却窗内被搜索跳过。
+    "source_health_enabled": True,
+    # 域名自愈：开启后，资源站主域名失效时按备用域名列表自动试下一个。
+    # 每个源的备用域名：source_id -> [域名/URL/JSON {"host": "..."}]，默认空。
+    "domain_heal_enabled": True,
+    "source_domain_backups": {},
+    # 元数据补全：开启后，详情缺失的年份/地区/简介/海报用同名其他源的条目补齐。
+    # 不接任何外部元数据接口；TMDB 需要用户自己填 key（留空=不用）。
+    "metadata_enabled": True,
+    "tmdb_api_key": "",
 }
 
 # 已废弃、需从旧配置里清除的键
@@ -142,12 +226,25 @@ class Config:
             # >>> PRIVATE:GUARD
             self._sync_guard_defaults()
             # <<< PRIVATE:GUARD
+            self._restored_from_backup = False
             try:
                 j = json.loads(_STATE.read_text(encoding="utf-8"))
-            except Exception:
+                if not isinstance(j, dict):
+                    raise ValueError("config root is not an object")
+            except FileNotFoundError:
                 j = {}
+            except Exception as e:
+                # 主配置损坏：先试备份，备份也坏才退回默认值，绝不静默丢配置。
+                _log.error("config corrupted (%s: %s), trying backups",
+                           type(e).__name__, e)
+                j = _restore_from_backup() or {}
+                self._restored_from_backup = bool(j)
+                if not j:
+                    _log.error("no usable config backup, falling back to defaults")
             cfg = json.loads(json.dumps(DEFAULTS))  # deep copy
             cfg.update(j)
+            # 旧配置没有版本号时补 1，后续升级按版本号迁移。
+            cfg.setdefault("config_version", CONFIG_VERSION)
             for k in list(cfg.keys()):
                 if k in _DEPRECATED:
                     cfg.pop(k, None)
@@ -232,11 +329,12 @@ class Config:
                 j.update({k: cfg[k] for k in
                           ("hot_limit", "hot_per_source", "hot_pages_per_source")})
                 try:
-                    _STATE.write_text(
-                        json.dumps(j, ensure_ascii=False, indent=2),
-                        encoding="utf-8")
-                except Exception:
-                    pass
+                    # 走 _persist：先备份、再写临时文件 + 原子 rename。
+                    # cfg 已含合并后的 sources 与迁移后的 hot_* 值，直接持久化它。
+                    self._persist(cfg)
+                except Exception as e:
+                    _log.warning("config migration persist failed: %s: %s",
+                                 type(e).__name__, e)
             if not cfg.get("admin_token"):
                 import secrets
                 cfg["admin_token"] = secrets.token_hex(8)
@@ -282,6 +380,9 @@ class Config:
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                        encoding="utf-8")
         tmp.replace(_STATE)
+        # 成功写入后再备份：备份 = 最近一次已知的完好配置，
+        # 主配置日后被外部写坏时可直接恢复到它。
+        _backup_config()
         self._cfg = cfg
         self._mtime = _STATE.stat().st_mtime
 

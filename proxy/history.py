@@ -107,6 +107,26 @@ class History:
             self._flush_locked(force=True)
             return [dict(r) for r in self._rec.values()]
 
+    def continue_watching(self, limit: int = 20) -> list[dict]:
+        """P2 继续观看列表：未看完（进度 <95%）的记录，按最近观看倒序。
+
+        每条带 progress（0~1）、ts、duration，供飞牛“继续观看”库卡直接用；
+        已看完的（>=95%）不进列表，由 resume_episode 负责“下一集”。
+        """
+        with _LOCK:
+            out = []
+            for r in self._rec.values():
+                if self._finished(r):
+                    continue
+                dur = int(r.get("duration", 0) or 0)
+                ts = int(r.get("ts", 0) or 0)
+                out.append({
+                    **dict(r),
+                    "progress": round(ts / dur, 3) if dur else 0.0,
+                })
+            out.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
+            return out[:max(1, int(limit))]
+
     def resume_episode(self, ep_guids: list[str]) -> tuple[str | None, int]:
         """给定一部剧按顺序的全部集 guid，决定"该播哪一集"。
 

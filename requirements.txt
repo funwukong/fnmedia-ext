@@ -1,4 +1,6 @@
-fastapi
-uvicorn
-httpx
-wasmtime>=49,<50
+# 直接依赖（已锁版本，2026-11-09 在 Python 3.12.3 上验证通过）。
+# 完整传递依赖见 requirements.lock；升级时先改这里，再重新生成 lock。
+fastapi==0.162.2
+uvicorn==0.54.0
+httpx==0.28.1
+wasmtime==49.0.0

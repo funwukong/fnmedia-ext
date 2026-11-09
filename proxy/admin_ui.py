@@ -309,20 +309,21 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">🔞 福利资源（独立开关）</div>
+        <div class="card-title">🔞 扩展资源（独立开关）</div>
         <p class="card-sub">仅在已勾选「扩展分类」的资源站里浏览成人向片库。默认关闭：完全不建路由、不抓取、不显示。</p>
         <label class="switch-row">
-          <input type="checkbox" id="welfareEnabled"/>
-          <span>启用福利资源库
+          <input type="checkbox" id="extLibEnabled"/>
+          <span>启用扩展资源库
             <span class="sub">需配合「资源站」页的扩展分类标记才生效</span></span>
         </label>
         <div class="btn-row">
-          <button class="primary small" onclick="saveWelfareCfg()">保存福利设置</button>
+          <button class="primary small" onclick="saveExtLibCfg()">保存扩展设置</button>
         </div>
       </div>
     </section>
 
     <!-- ============ 片源质量 ============ -->
+
     <section class="page" id="page-quality">
       <h2 class="page-title">片源质量优先级</h2>
       <p class="page-desc">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
@@ -377,6 +378,12 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           「🔞」= 把该独立库标记为限制级（18+）：与主库隔离、不进全局搜索，开启需二次确认；
           <!-- <<< PRIVATE:ADULT -->
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">📡 T4 远程源 <span class="badge" id="t4Count"></span></div>
+        <div class="hint">导入订阅时识别到的 type=4 远程源。当前版本（v0.2.39）未接入 T4 协议：只显示，不能搜不能播；想用它需要把上游 v0.2.66 的 T4 支持移植过来。重新导入含 T4 的订阅会自动追加到这里。</div>
+        <div id="t4Rows" style="margin-top:8px"><div class="muted sm">暂无 T4 源：去「导入订阅」导一次含 type=4 的订阅。</div></div>
       </div>
 
       <div class="card">
@@ -689,6 +696,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="card-title">🎬 fnmedia-ext · 飞牛影视在线扩展</div>
         <p class="card-sub">在原生搜索 / 媒体库注入在线影视并直接调用飞牛原生播放器播放。</p>
         <div class="stack sm muted">
+          <div>开发作者：<a href="https://github.com/funwukong/fnmedia-ext" target="_blank" rel="noopener">funwukong</a></div>
+        </div>
+        <div class="stack sm muted">
           <div>· 热门资源：豆瓣真实榜单四库，点击搜源、优先高质量源播放。</div>
           <div>· 海量片库：苹果 CMS 分类深翻，跨源聚合成海量四库与单源独立库。</div>
           <!-- >>> PRIVATE:GUARD -->
@@ -729,7 +739,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <div><b>3. 版权归原权利人：</b>第三方接口返回内容的版权归原权利人所有。本项目不依附、不代表任何内容提供方，不对任何第三方内容的合法性、准确性、可用性负责；如涉及版权问题，请联系内容实际提供方处理。</div>
           <div><b>4. 仅供学习交流：</b>本工具仅供学习、研究与个人合法播放自有或已获授权内容使用，<b>不得用于商业用途，不得下载、录制、再传播任何侵权内容</b>。请遵守你所在地的法律法规。</div>
           <div><b>5. 风险与责任：</b>第三方接口可能失效、变更或包含不当内容；使用过程中产生的流量、账号、费用与一切法律责任均由<b>使用者本人</b>承担，与本工具作者无关。请合法、自律使用，并妥善管理设备与访问权限，避免 18 周岁以下人员接触不适宜内容。</div>
-          <div><b>6. 侵权处理：</b>如任何权利人认为本工具的某项技术实现涉及其合法权益，可通过项目仓库 Issue 联系作者，核实后将及时处理。</div>
+          <div><b>6. 侵权处理：</b>如任何权利人认为本工具的某项技术实现涉及其合法权益，可通过<a href="https://github.com/funwukong/fnmedia-ext" target="_blank" rel="noopener">项目仓库</a> Issue 联系作者 funwukong，核实后将及时处理。</div>
         </div>
       </div>
     </section>
@@ -1087,7 +1097,7 @@ function renderLibrary(){
   if(!STATUS)return;
   $("hotEnabled").checked=CFG.hot_library_enabled!==false;
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
-  if($("welfareEnabled"))$("welfareEnabled").checked=CFG.welfare_library_enabled===true;
+  if($("extLibEnabled"))$("extLibEnabled").checked=CFG.ext_library_enabled===true;
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
@@ -1120,10 +1130,10 @@ async function saveCatCfg(){
   if(r.code===0){Object.assign(CFG,body);toast("海量四库设置已保存");await loadLibs();renderLibrary();}
   else toast(r.msg||"保存失败","fail");
 }
-async function saveWelfareCfg(){
-  const body={welfare_library_enabled:$("welfareEnabled").checked};
+async function saveExtLibCfg(){
+  const body={ext_library_enabled:$("extLibEnabled").checked};
   const r=await jpost("/v/api/ext/config",body);
-  if(r.code===0){Object.assign(CFG,body);toast(body.welfare_library_enabled?"已启用福利资源库":"已关闭福利资源库");}
+  if(r.code===0){Object.assign(CFG,body);toast(body.ext_library_enabled?"已启用扩展资源库":"已关闭扩展资源库");}
   else toast(r.msg||"保存失败","fail");
 }
 async function refreshHot(){
@@ -1213,6 +1223,13 @@ function renderSources(){
     tr.querySelector("[data-test]").addEventListener("click",()=>testOne(id,tr));
     tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
   });
+  // T4 远程源清单（导入订阅时持久化到配置，当前版本只显示、不接入）
+  const t4=CFG.t4_sources||[];
+  $("t4Count").textContent=t4.length?(t4.length+" 个"):"";
+  $("t4Rows").innerHTML=t4.length?t4.map(x=>{
+    const bad=x.invalid?'<span class="tag warn">地址无效</span>':'<span class="tag warn">T4·未接入</span>';
+    return `<div class="subrow"><span><b>${esc(x.name||x.api||"")}</b><br><span class="meta">${esc(x.api||"")}</span></span>${bad}</div>`;
+  }).join(""):'<div class="muted sm">暂无 T4 源：去「导入订阅」导一次含 type=4 的订阅。</div>';
 }
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
@@ -1491,6 +1508,15 @@ function renderSubResult(d){
     h+='<div class="muted sm" style="padding:4px 2px">脚本若 401/下载失败，可在下方「已导入的远程 JS 爬虫」处重试。</div></div>';
   }
   if(dr && dr.error){h+='<div class="hint" style="color:var(--danger)">远程JS导入失败：'+esc(dr.error)+'</div>';}
+  // T4 远程源：只收录展示，本版本未接入 T4 协议（不能搜不能播）
+  const t4=d.t4||{};
+  if(t4 && (t4.items||[]).length){
+    h+='<div class="subgrp"><div class="subgrp-t">📡 T4 远程源　'+t4.items.length+' 个（仅展示，当前版本未接入 T4 协议，不能搜不能播）</div>';
+    t4.items.forEach(it=>{
+      h+='<div class="subrow"><span>'+esc(it.name||it.api)+'</span><span class="tag warn">T4·未接入</span></div>';
+    });
+    h+='<div class="muted sm" style="padding:4px 2px">T4 选片库是上游 v0.2.66 起的新功能（服务端解析），本 fork v0.2.39 还没有；想用它需要把上游 T4 支持移植过来。</div></div>';
+  }
   // 跳过
   if(skips.length){
     h+='<details class="subgrp" style="margin-top:8px"><summary class="subgrp-t" style="cursor:pointer">⏭️ 跳过 '+ (d.skipped||skips.length) +' 个（网盘/直播/无法识别/探测失败）</summary>';

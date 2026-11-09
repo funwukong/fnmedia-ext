@@ -18,6 +18,21 @@ import httpx
 
 import features
 
+try:
+    from fnlog import get_logger
+except Exception:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("providers")
+
+try:
+    import sourcehealth as _health
+except Exception:
+    _health = None  # type: ignore
+
 # 2026-10-17 国内直连实测（搜索+m3u8 直链可达性）。403/404 多为走 Clash 代理所致。
 DEFAULT_SOURCES: list[dict] = [
     {"id": "baofeng", "name": "暴风资源", "api": "https://bfzyapi.com/api.php/provide/vod/at/json", "enabled": True},
@@ -304,16 +319,32 @@ def _site_root(api: str) -> str:
 
 async def search_source(client: httpx.AsyncClient, source: dict,
                         keyword: str) -> list[OnlineTitle]:
+    # P2 源健康自动降级：连续失败 3 次的源在 15 分钟冷却窗内直接跳过，
+    # 不再每次都等超时拖慢整体搜索；冷却过后自动放行一次试探。
+    if _health is not None and not _health.usable(source.get("id", "")):
+        _log.info("source skipped (dead cooldown): id=%s", source.get("id"))
+        return []
     params = {"ac": "detail", "wd": keyword}
+    _t0 = time.monotonic()
     try:
         r = await client.get(source["api"], params=params,
                              headers={"User-Agent": "Mozilla/5.0"},
                              timeout=HTTP_TIMEOUT)
         if r.status_code != 200:
+            _log.warning("source search failed: id=%s status=%s elapsed=%.2fs",
+                         source.get("id"), r.status_code, time.monotonic() - _t0)
+            if _health is not None:
+                _health.record(source.get("id", ""), False, time.monotonic() - _t0)
             return []
         j = r.json()
-    except Exception:
+    except Exception as e:
+        _log.warning("source search failed: id=%s error=%s elapsed=%.2fs",
+                     source.get("id"), type(e).__name__, time.monotonic() - _t0)
+        if _health is not None:
+            _health.record(source.get("id", ""), False, time.monotonic() - _t0)
         return []
+    if _health is not None:
+        _health.record(source.get("id", ""), True, time.monotonic() - _t0)
     if not isinstance(j, dict) or j.get("code") not in (1, "1"):
         return []
     out = []

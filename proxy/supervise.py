@@ -30,8 +30,24 @@ PY = BASE / ".venv/bin/python"
 OFFICIAL = "trim-media"
 
 
+try:
+    from fnlog import get_logger, setup_logging
+except Exception:  # 独立运行缺少 fnlog 时退回 print，不影响接管
+    def get_logger(name):  # type: ignore
+        import logging as _l
+        return _l.getLogger(f"fnmedia.{name}")
+
+    def setup_logging(*a, **k):  # type: ignore
+        pass
+
+_log = get_logger("supervise")
+
+
 def log(m):
+    # 保留 print：systemd journal / 应用中心日志仍能直接看到接管过程，
+    # 同时记一份分级日志供文件轮转。
     print(f"[fnmedia] {m}", flush=True)
+    _log.info("%s", m)
 
 
 def peer(path):
@@ -100,6 +116,7 @@ def health_ok(staged, timeout=20):
 
 
 def main():
+    setup_logging()
     STATE.mkdir(parents=True, exist_ok=True)
     # 预检：target 必须官方；upstream 不得存活
     ok, pid, exe = is_official(TARGET)

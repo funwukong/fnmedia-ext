@@ -39,6 +39,11 @@ CATALOG_CATEGORIES = [
     ("documentary", "🎞纪录片", "Movie"),
     ("uhd", "📽4K影视", "Movie"),
     ("shortdrama", "📱热门短剧", "TV"),
+    # P2 新增：海外电视剧、AI漫剧，跟随海量主开关，不设独立开关。
+    ("overseas", "🌍海外剧集", "TV"),
+    ("ai_comic", "🤖AI漫剧", "Mix"),
+    # P2 追加：TED学习，跟随海量主开关，不设独立开关。
+    ("ted", "🎓TED学习", "Mix"),
 ]
 
 # 跨源聚合的“海量四库”使用的保留作用域 id；单源独立库作用域为其 source id。
@@ -50,16 +55,31 @@ _ANIME_KW = ("动漫", "动画", "番剧", "卡通")
 _VARIETY_KW = ("综艺", "真人秀", "脱口秀", "娱乐")
 _DOC_KW = ("纪录片", "纪录", "记录", "纪实")
 _UHD_KW = ("4k", "杜比视界", "dolby", "uhd", "超高清", "蓝光", "bluray")
+# 片名级 4K 判定（标题/备注里的画质信号）：比分类名多认 2160 与 HDR。
+# 注意不含“超清”——太多源把所有片都标超清，放进来 4K 库就等于全库。
+_UHD_TITLE_KW = _UHD_KW + ("2160", "hdr")
+
+
+def is_uhd_title(title: str, remarks: str) -> bool:
+    """片名/备注是否带 4K 画质信号（4K/2160/UHD/杜比/HDR/蓝光/超高清）。"""
+    s = f"{title or ''} {remarks or ''}".lower()
+    return any(k in s for k in _UHD_TITLE_KW)
 _SHORT_KW = ("短剧", "微短剧", "剧场")
-# 成人向（福利）分类名：显式导向 ADULT 扩展分类，绝不落入常规电影/剧集类。
+# P2 新增：AI漫剧（先于 _EXCLUDE_KW 判定，见 classify），海外剧（先于普通剧集判定）。
+_AI_COMIC_KW = ("AI漫剧", "AI动漫", "AI漫画", "动态漫画", "漫剧")
+# P2 追加：TED学习（大小写不敏感，用小写匹配，见 classify）。
+_TED_KW = ("ted", "ted演讲", "tedx", "ted-ed", "ted演讲")
+_OVERSEAS_KW = ("海外剧", "美剧", "英剧", "韩剧", "日剧", "泰剧",
+                "港台剧", "欧美剧", "海外电视剧")
+# 成人向分类名：显式导向 ADULT 扩展分类，绝不落入常规电影/剧集类。
 # 硬红线（_REDLINE_KW）在 is_redline 中先于本表拦截，任何开关都不放行。
-_ADULT_KW = ("福利", "伦理", "情色", "午夜", "写真", "里番", "成人")
+_ADULT_KW = ("伦理", "情色", "午夜", "写真", "里番", "成人")
 # 电影：电影/影片/各类型“XX片”且非剧非动漫；剧：电视/连续剧/美剧/国产剧…
 _MOVIE_KW = ("电影", "影片")
 _TV_KW = ("电视", "连续剧", "剧集", "美剧", "英剧", "韩剧", "日剧", "泰剧",
           "国产剧", "港台剧", "海外剧", "番剧")
-# 明确排除的脏类（伦理/福利/资讯/解说/预告/体育/短剧等）
-_EXCLUDE_KW = ("理论", "福利", "写真", "午夜", "解说", "预告",
+# 明确排除的脏类（伦理/资讯/解说/预告/体育/短剧等）
+_EXCLUDE_KW = ("理论", "写真", "午夜", "解说", "预告",
                "花絮", "资讯", "新闻", "体育", "赛事", "漫剧", "AI",
                "演员", "音乐", "MV")
 
@@ -84,19 +104,19 @@ except Exception:  # 兜底：独立运行/剥离异常时按公开（关闭）�
     features = None
 
 
-def _welfare_on() -> bool:
-    """福利（成人）扩展库独立开关（管理页可调，默认关）。
+def _ext_lib_on() -> bool:
+    """扩展（成人）资源库独立开关（管理页可调，默认关）。
 
     与构建期 features.ADULT（是否编译进本包的能力）是两个维度：
     - features.ADULT=False：完整能力未编译，任何开关都不放行；
-    - welfare_library_enabled=False：独立开关关闭，不建路由、不抓取、不显示。
+    - ext_library_enabled=False：独立开关关闭，不建路由、不抓取、不显示。
     开启后还需该源显式勾选「扩展分类」(source.adult=true) 才会实际建库。
     """
     if not getattr(features, "ADULT", False):
         return False
     try:
         from config import config as _cfg
-        return bool(_cfg.get().get("welfare_library_enabled", False))
+        return bool(_cfg.get().get("ext_library_enabled", False))
     except Exception:
         return False
 
@@ -113,7 +133,7 @@ def is_redline(*texts: str) -> bool:
 
 def catalog_title(cat: str) -> str:
     if cat == ADULT_CAT:
-        return "🔞福利资源"
+        return "🔞扩展资源"
     for c, title, _ in CATALOG_CATEGORIES:
         if c == cat:
             return title
@@ -132,8 +152,20 @@ def catalog_mdb(cat: str) -> str:
 def classify(name: str) -> str | None:
     n = (name or "").strip()
     nl = n.lower()
-    if not n or any(k in n for k in _EXCLUDE_KW):
+    if not n:
         return None
+    # P2：AI漫剧先于脏类排除判定——“漫剧 / AI”曾在 _EXCLUDE_KW 里，
+    # 现在是正式分类，不再当噪音丢掉。
+    if any(k in n for k in _AI_COMIC_KW):
+        return "ai_comic"
+    # P2 追加：TED学习（小写匹配，TED / Ted / TEDx 都认）。
+    if any(k in nl for k in _TED_KW):
+        return "ted"
+    if any(k in n for k in _EXCLUDE_KW):
+        return None
+    # P2：海外剧先于普通剧集判定——美剧/韩剧/日剧等不再混进“海量剧集”。
+    if any(k in n for k in _OVERSEAS_KW):
+        return "overseas"
     if any(k in n for k in _ANIME_KW):
         return "anime"
     if any(k in n for k in _VARIETY_KW):
@@ -168,12 +200,12 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
     cat = classify(n)
     if cat:
         return cat
-    if not _welfare_on():
+    if not _ext_lib_on():
         return None
     if any(k in n for k in _NEUTRAL_KW):
         return None
-    # 福利/伦理等成人向类目：独立开关打开即收编进 ADULT 池（无需逐源标记），
-    # 这样福利库卡"打开开关就有内容"；硬红线已在函数开头拦截。
+    # 伦理等成人向类目：独立开关打开即收编进 ADULT 池（无需逐源标记），
+    # 这样扩展库卡"打开开关就有内容"；硬红线已在函数开头拦截。
     if any(k in n for k in _ADULT_KW):
         return ADULT_CAT
     # 其余未归类扩展分类：仍需该源显式勾选扩展分类才纳入
@@ -319,9 +351,9 @@ class Catalog:
 
             def routes_for_scope(scope: str) -> dict[str, list[dict]]:
                 out: dict[str, list[dict]] = {}
-                # 福利扩展分类由 welfare_library_enabled 独立开关控制：
+                # 扩展分类由 ext_library_enabled 独立开关控制：
                 # 开关开 → 聚合与单源独立库都纳入 ADULT 池；开关关 → 一律不建。
-                cats = CATS + ([ADULT_CAT] if _welfare_on() else [])
+                cats = CATS + ([ADULT_CAT] if _ext_lib_on() else [])
                 for cat in cats:
                     if scope == AGG_SCOPE:
                         rs = [probed[(cat, sid)] for (c2, sid) in probed if c2 == cat]
@@ -371,7 +403,7 @@ class Catalog:
                 self._updated = time.time()
             warm_scopes = [sid for sid in self.standalone_scopes()
                            if any(self.available(c, sid) for c in
-                                  (CATS + ([ADULT_CAT] if _welfare_on() else [])))]
+                                  (CATS + ([ADULT_CAT] if _ext_lib_on() else [])))]
             for sid in warm_scopes:
                 asyncio.create_task(self.warm_standalone(sid))
         finally:
@@ -433,13 +465,28 @@ class Catalog:
                     } for cat, _, _ in CATALOG_CATEGORIES},
             }
 
+    def _uhd_fallback_routes(self, scope: str) -> list[dict]:
+        """4K 回退路由：源没有“4K”分类名时，借电影分类的路由翻页，
+        再由 _briefs_from_vods 按片名画质信号过滤出真 4K。"""
+        with self._lock:
+            return list(self._routes.get(self._scope_key(scope, "movie")) or [])
+
     def available(self, cat: str, scope: str = AGG_SCOPE) -> bool:
         with self._lock:
-            return bool(self._routes.get(self._scope_key(scope, cat)))
+            if self._routes.get(self._scope_key(scope, cat)):
+                return True
+            # 4K：没有 4K 分类名、但有电影路由时也可派生；或已从浏览中抄到 4K 片。
+            if cat == "uhd":
+                if self._routes.get(self._scope_key(scope, "movie")):
+                    return True
+                return bool(self._dense.get(self._scope_key(scope, "uhd")))
+            return False
 
     def pagecount(self, cat: str, scope: str = AGG_SCOPE) -> int:
         with self._lock:
             routes = self._routes.get(self._scope_key(scope, cat)) or []
+            if not routes and cat == "uhd":
+                routes = self._routes.get(self._scope_key(scope, "movie")) or []
             if not routes:
                 return 0
             return min(int(routes[0].get("pagecount") or 0), MAX_PAGES)
@@ -460,6 +507,9 @@ class Catalog:
         dense = self._dense.setdefault(sk, [])
         pg = self._scanned_page.get(sk, 0) + 1
         empty_streak = 0
+        # 4K 回退是借电影页过滤，4K 片稀疏时连续多页都可能 0 新增，
+        # 空页容忍放宽到 10 页，别翻两页就断。
+        streak_limit = 10 if cat == "uhd" else 3
         while len(dense) < need_count and pg <= pc:
             rows = await self.get_page(cat, pg, scope)
             added = 0
@@ -476,7 +526,7 @@ class Catalog:
             else:
                 # 连续多页空（超时/末页）才停止，容忍慢源的偶发抖动
                 empty_streak += 1
-                if empty_streak >= 3:
+                if empty_streak >= streak_limit:
                     self._scanned_page[sk] = pg
                     break
                 pg += 1
@@ -578,6 +628,9 @@ class Catalog:
             loose = (scope != AGG_SCOPE and bool(source.get("loose_filter")))
             if not loose and _cfg.is_junk(t.title, t.remarks):
                 continue
+            # 4K 库只收带画质信号的片（见 _load_page 的 uhd 回退路由）。
+            if cat == "uhd" and not is_uhd_title(t.title, t.remarks):
+                continue
             briefs.append({
                 "guid": make_guid(t),
                 "online_id": t.online_id, "title": t.title,
@@ -590,12 +643,30 @@ class Catalog:
                 "catalog_cat": cat, "catalog_scope": scope,
                 "catalog_source": route["source_id"],
             })
+        # 派生 4K：浏览电影/剧集等分类时，带 4K 画质信号的片顺手抄一份进
+        # 同作用域的 uhd 密集列表——源分类名里没有“4K”时 4K 库也能有内容。
+        if cat != "uhd" and briefs:
+            uhd_sk = self._scope_key(scope, "uhd")
+            uhd_seen = self._seen_guids.setdefault(uhd_sk, set())
+            uhd_dense = self._dense.setdefault(uhd_sk, [])
+            for b in briefs:
+                if b["guid"] in uhd_seen:
+                    continue
+                if not is_uhd_title(b["title"], b["remarks"]):
+                    continue
+                uhd_seen.add(b["guid"])
+                uhd_dense.append({**b, "catalog_cat": "uhd"})
+            self._dense_count[uhd_sk] = len(uhd_dense)
         return briefs
 
     async def _load_page(self, scope: str, cat: str, page: int) -> list[dict]:
         from store import store
         with self._lock:
             routes = list(self._routes.get(self._scope_key(scope, cat)) or [])
+        if not routes and cat == "uhd":
+            # 源没有“4K”分类名：借电影分类翻页，片名画质信号过滤在
+            # _briefs_from_vods 里做（cat 仍是 uhd，只留真 4K）。
+            routes = self._uhd_fallback_routes(scope)
         if scope == AGG_SCOPE:
             routes = routes[:4]
         if not routes:
@@ -666,7 +737,7 @@ class Catalog:
         """建库后后台预热独立库各分类首页，缓解慢源首屏空白。"""
         try:
             src = self._source_by_id(scope)
-            pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+            pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
             await asyncio.gather(
                 *[self.get_page(c, 1, scope) for c in pool
                   if self.available(c, scope)],
@@ -708,7 +779,7 @@ class Catalog:
         再按排名轮次合并去重，最后按全局 offset 切片。
         """
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+        pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
         cats = [c for c in pool if self.available(c, scope)]
         if not cats:
             return [], 0
@@ -738,7 +809,7 @@ class Catalog:
 
     def standalone_available(self, scope: str) -> bool:
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+        pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
         return any(self.available(c, scope) for c in pool)
 
 

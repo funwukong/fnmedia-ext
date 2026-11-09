@@ -35,7 +35,7 @@ try:
 except Exception:  # pragma: no cover
     features = None
 
-REPO_SLUG = "yujian0815/fnmedia-ext"
+REPO_SLUG = "funwukong/fnmedia-ext"
 API_BASE = f"https://api.github.com/repos/{REPO_SLUG}/releases"
 # 检查结果缓存时长（秒）：避免频繁打 GitHub，也让管理页打开即时。
 CHECK_TTL = 30 * 60

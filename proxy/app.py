@@ -31,11 +31,16 @@ from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
                                StreamingResponse)
 
 import features
+# 构建戳（打包时由 build.sh 生成 proxy/build_info.py；源码树里没有时为开发版）
+try:
+    import build_info as _build_info
+    BUILD_LABEL = getattr(_build_info, "BUILD_LABEL", "dev")
+except Exception:  # noqa: BLE001
+    BUILD_LABEL = "dev"
 import providers
 import sourcehealth
 import client as clientmod
 import live as livemod
-import iptv as iptvmod
 import inject as inj
 import config as cfgmod
 import adfilter as adfilter_mod
@@ -54,6 +59,10 @@ import history as histmod
 from history import history
 import marks as marksmod
 from marks import marks
+# P2：追剧提醒 / 域名自愈 / 元数据补全
+from follow import follow_list
+import domain_heal as domain_heal_mod
+import metadata as metadata_mod
 import updater
 from store import (store, make_guid, media_guid, video_guid, is_online_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
@@ -161,7 +170,13 @@ CATALOG_LIB_GUIDS: dict[str, str] = {
     "documentary": "155f2305c2cbc76c85f981ef31cc192f",
     "uhd":         "262ce51312d7e72020514db5fd5f63e9",
     "shortdrama":  "037ed7c6df4a9deb8d815c823fd15f79",
-    # 福利资源独立库（md5("fnmedia-welfare-lib")）：独立开关 welfare_library_enabled
+    # P2 新增：guid 由固定串 md5 派生，保持稳定（与上方注释的生成方式一致）。
+    # md5("fnmedia-catalog-lib:overseas") / md5("fnmedia-catalog-lib:ai_comic")
+    # md5("fnmedia-catalog-lib:ted")
+    "overseas":    "c2fe61ae4d3adc87756a253cb108066e",
+    "ai_comic":    "6784f423ff4be5af4fe60cde6c8da303",
+    "ted":         "34883d4af44ca4a5539cb38827158294",
+    # 扩展资源独立库（md5("fnmedia-welfare-lib")，GUID 种子保持不变）：独立开关 ext_library_enabled
     # 控制是否建库/显示，反查 cat = catalog.ADULT_CAT，走同一条海量深翻链路。
     "adult":       "411515e17c85709cf1966697b7b2c58e",
 }
@@ -191,13 +206,6 @@ def hgdj_enabled() -> bool:
     return hgdjmod.enabled()
 
 
-# —— 电视直播（IPTV）虚拟库：内置聚合 + 自定义订阅，频道测活，HLS 代理 ——
-# guid 形态与反解全部在 iptv 模块（fnmedia-live:*/fnmedia-livemg:*）。
-def live_enabled() -> bool:
-    try:
-        return iptvmod.enabled() and iptvmod.total_channels() > 0
-    except Exception:  # noqa: BLE001
-        return False
 
 
 
@@ -1816,7 +1824,7 @@ def catalog_enabled() -> bool:
 
 
 def any_virtual_lib_enabled() -> bool:
-    if charts_enabled() or catalog_enabled() or hgdj_enabled() or live_enabled():
+    if charts_enabled() or catalog_enabled() or hgdj_enabled():
         return True
     # >>> PRIVATE:GUARD
     try:
@@ -2082,9 +2090,6 @@ async def lifespan(app: FastAPI):
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
 
-    # 电视直播：订阅解析 + 频道测活后台循环（绝不阻塞浏览接口）
-    app.state.iptv_task = asyncio.create_task(iptvmod.worker(app.state.ext))
-
     # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
     async def _health_flush_loop():
         while True:
@@ -2152,10 +2157,6 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception):
             pass
         try:
-            await app.state.iptv_task
-        except (asyncio.CancelledError, Exception):
-            pass
-        try:
             app.state.health_task.cancel()
         except Exception:
             pass
@@ -2168,10 +2169,6 @@ async def lifespan(app: FastAPI):
             app.state.update_task.cancel()
             await app.state.update_task
         except (asyncio.CancelledError, Exception):
-            pass
-        try:
-            app.state.iptv_task.cancel()
-        except Exception:
             pass
         await app.state.up.aclose()
         await app.state.ext.aclose()
@@ -2219,8 +2216,9 @@ async def _hot_worker(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 import logging
-_log = logging.getLogger("fnmedia")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+from fnlog import get_logger, setup_logging
+setup_logging()  # P0：级别由 FNMEDIA_LOG_LEVEL 控制，默认 INFO；另写 state/logs/ 轮转文件
+_log = get_logger("app")
 # 关闭 httpx/httpcore 每条请求一行的 INFO 噪音（建库/资源站轮询会刷爆日志）；
 # 保留我们自己在 uvicorn/fnmedia logger 中打印的访问日志。
 for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
@@ -3020,8 +3018,6 @@ async def mediadb_list(request: Request):
     dbs = payload.get("data") if payload else None
     vlib_guids = (set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
                   | {standalone_lib_guid(s["id"]) for s in config.all_sources()})
-    if live_enabled():
-        vlib_guids.add(iptvmod.lib_guid())
     # >>> PRIVATE:GUARD
     if features.GUARD:
         vlib_guids |= {guard_lib_guid(g["conf"]["key"]) for g in guard_libs_active()}
@@ -3082,10 +3078,10 @@ async def mediadb_list(request: Request):
                     "category": catalogmod.catalog_mdb(cat),
                     "view_type": 0, "poster_type": 0, "refresh_disabled": True,
                 })
-        # 2b) 福利资源独立库：只受 welfare_library_enabled 独立开关控制
-        # （打开开关即收编各源的福利/伦理类目，无需逐源标记）；开关关闭时
+        # 2b) 扩展资源独立库：只受 ext_library_enabled 独立开关控制
+        # （打开开关即收编各源的伦理类目，无需逐源标记）；开关关闭时
         # 不建路由、不抓取、不显示。海报同样走 sys/img 前缀。
-        if catalogmod._welfare_on() and catalog.available(catalogmod.ADULT_CAT):
+        if catalogmod._ext_lib_on() and catalog.available(catalogmod.ADULT_CAT):
             ps = [inj._poster(p) for p in
                   catalog.cached_page_posters(catalogmod.ADULT_CAT, 8)]
             ps = ["/v/api/v1/sys/img/" + q[1:]
@@ -3216,20 +3212,6 @@ async def mediadb_list(request: Request):
                 "refresh_disabled": True,
             })
 
-        # —— 电视直播（IPTV）库：频道解析缓存就绪时展示；封面用台标。
-        if live_enabled():
-            try:
-                ps = [inj._poster(p) for p in iptvmod.lib_posters(8)]
-                inserts.append({
-                    "guid": iptvmod.lib_guid(),
-                    "title": "📺 电视直播",
-                    "poster": ps[0] if ps else "",
-                    "posters": ps,
-                    "category": "Mix", "view_type": 0, "poster_type": 0,
-                    "refresh_disabled": True,
-                })
-            except Exception:  # noqa: BLE001
-                pass
 
         # —— 置顶控制 ——
         # 置顶库（pinned_libs）插到列表最前并给较大 sort_num；未置顶的虚拟库仍排在
@@ -3250,9 +3232,16 @@ async def mediadb_list(request: Request):
             payload["code"] = 0
             payload["msg"] = ""
         payload["data"] = dbs
+        # TV 诊断：记录是哪端、注入了几个虚拟库、上游状态。TV 端“有时不显示”
+        # 时看这条日志就能区分：是上游失败、注入抛错，还是 TV 根本没调到这里。
+        _log.info("mediadb/list client=%s inserted=%d upstream_code=%s total=%d",
+                  _client_of(request).kind, len(inserts),
+                  payload.get("code") if isinstance(payload, dict) else "?",
+                  len(dbs))
         return JSONResponse(payload)
     except Exception as exc:
-        _log.warning("inject virtual mediadb failed: %s", exc)
+        _log.warning("inject virtual mediadb failed: client=%s err=%s",
+                     _client_of(request).kind, exc)
         return upstream
 
 
@@ -3337,22 +3326,6 @@ async def mdb_detail(guid: str, request: Request):
         }
         return JSONResponse({"code": 0, "msg": "", "data": payload})
 
-    # 电视直播（IPTV）库
-    if guid == iptvmod.lib_guid() and live_enabled():
-        try:
-            ps = [inj._poster(p) for p in iptvmod.lib_posters(8)]
-        except Exception:  # noqa: BLE001
-            ps = []
-        payload = {
-            "guid": guid, "name": "📺 电视直播", "category": "Mix",
-            "dir_list": [], "lan": "zh-CN", "auto_scrap_subtitle": 0,
-            "include_adult": False, "subtitle_lan": "zh-CN",
-            "poster": ps[0] if ps else "", "poster_type": 0, "posters": ps,
-            "view_type": 0, "last_update_time": 0, "sort_num": 0,
-            "auto_progress_thumb": 0, "skip_filesize": 0,
-            "prefer_local_nfo": 0, "refresh_disabled": True,
-        }
-        return JSONResponse({"code": 0, "msg": "", "data": payload})
 
     # 单源独立媒体库
     sscope = standalone_source_of(guid)
@@ -3489,8 +3462,8 @@ async def mediadb_sum(request: Request):
                 if n:
                     payload["data"][CATALOG_LIB_GUIDS[cat]] = n
                     total_added += n
-    # 福利独立开关自己的计数（独立于海量主开关）
-    if catalogmod._welfare_on() and catalog.available(catalogmod.ADULT_CAT):
+    # 扩展库独立开关自己的计数（独立于海量主开关）
+    if catalogmod._ext_lib_on() and catalog.available(catalogmod.ADULT_CAT):
         n = catalog.total(catalogmod.ADULT_CAT)
         if n:
             payload["data"][CATALOG_LIB_GUIDS[catalogmod.ADULT_CAT]] = n
@@ -3499,7 +3472,7 @@ async def mediadb_sum(request: Request):
         scope = s["id"]
         if catalog.standalone_available(scope):
             pool = list(catalogmod.CATALOG_CATEGORIES)
-            if catalogmod._welfare_on() and s.get("adult"):
+            if catalogmod._ext_lib_on() and s.get("adult"):
                 pool = pool + [(catalogmod.ADULT_CAT, "", "")]
             n = sum(catalog.total(c, scope) for c, _, _ in pool)
             if n:
@@ -3529,15 +3502,6 @@ async def mediadb_sum(request: Request):
         if n:
             payload["data"][hgdjmod.lib_guid()] = n
             total_added += n
-    # 电视直播库计数（频道数）
-    if live_enabled():
-        try:
-            n = iptvmod.total_channels()
-            if n:
-                payload["data"][iptvmod.lib_guid()] = n
-                total_added += n
-        except Exception:  # noqa: BLE001
-            pass
     if total_added:
         payload["data"]["total"] = int(payload["data"].get("total", 0)) + total_added
     return JSONResponse(payload)
@@ -3994,72 +3958,6 @@ async def item_list(request: Request):
             "top_dir": "", "dir": "", "total": total_n, "list": rows,
             "jump_list": None}})
 
-    # —— 电视直播（IPTV）：库根 → 分类文件夹；分类 → 频道海报墙 ——
-    # 只读解析缓存与测活结果，绝不联网，浏览接口零等待。
-    if live_enabled():
-        _live_parent = str(body.get("parent_guid") or body.get("dir") or "")
-        _live_group = None
-        for _g in (_live_parent, aguid):
-            _live_group = iptvmod.cat_guid_group(_g or "")
-            if _live_group is not None:
-                break
-        if _live_group is not None:
-            # 分类内频道墙（同名频道已合并，多线路在 stream/list 里选）
-            _chs = iptvmod.groups_of(iptvmod.channels_cached()).get(
-                _live_group) or []
-            _page = max(1, int(body.get("page") or body.get("page_index") or 1))
-            _psize = max(1, min(int(body.get("page_size") or 60), 100))
-            _off = (int(body["offset"]) if body.get("offset") is not None
-                    else (_page - 1) * _psize)
-            _off = max(0, min(_off, len(_chs)))
-            _win = _chs[_off:_off + _psize]
-            _cg = iptvmod.cat_guid(_live_group)
-            rows = []
-            for ch in _win:
-                chash = iptvmod.ch_hash(ch["key"])
-                row = inj._base_item(
-                    guid=iptvmod.ch_guid(ch["key"]), type="Movie",
-                    title=ch["n"], can_play=1,
-                    poster=inj._poster(ch.get("logo") or ""),
-                    parent_guid=_cg, parent_title=_live_group,
-                    ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
-                    ancestor_category="Mix", season_number=0, episode_number=0,
-                    number_of_seasons=0, number_of_episodes=max(1, len(ch["urls"])),
-                    file_name=ch["n"])
-                row["media_guid"] = iptvmod.media_guid_of(chash, 0)
-                row["video_guid"] = iptvmod.video_guid_of(chash, 0)
-                _apply_marks(row)
-                rows.append(row)
-            rows = clientmod.normalize_cards(rows, client)
-            return JSONResponse({"code": 0, "msg": "", "data": {
-                "mdb_name": _live_group, "mdb_category": "Mix", "top_dir": "",
-                "dir": _cg, "total": len(_chs), "list": rows,
-                "jump_list": None}})
-        if aguid == iptvmod.lib_guid():
-            # 库根：每个分组一个可下钻文件夹
-            _groups = iptvmod.groups_of(iptvmod.channels_cached())
-            rows = []
-            for gname in sorted(_groups.keys(), key=lambda s: "\\uffff" if s == "其他" else s):
-                chs = _groups[gname]
-                poster = ""
-                for ch in chs:
-                    if ch.get("logo"):
-                        poster = inj._poster(ch["logo"])
-                        break
-                row = inj._base_item(
-                    guid=iptvmod.cat_guid(gname), type="Directory",
-                    title="📡 " + gname, can_play=0, poster=poster,
-                    ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
-                    ancestor_category="Mix", number_of_episodes=len(chs),
-                    local_number_of_episodes=len(chs))
-                row["parent_guid"] = ""
-                row["overview"] = f"{len(chs)} 个频道"
-                rows.append(row)
-            rows = clientmod.normalize_cards(rows, client)
-            return JSONResponse({"code": 0, "msg": "", "data": {
-                "mdb_name": "📺 电视直播", "mdb_category": "Mix",
-                "top_dir": "", "dir": "", "total": len(rows), "list": rows,
-                "jump_list": None}})
 
     # —— 单源独立媒体库：该源四类交错成一条最近更新流 ——
     sscope = standalone_source_of(aguid) if aguid else None
@@ -4100,9 +3998,9 @@ async def item_list(request: Request):
     if ccat is not None:
         mdb_name = catalogmod.catalog_title(ccat)
         mdb_cat = catalogmod.catalog_mdb(ccat)
-        # 福利库走独立开关（不受海量主开关影响）；其余分类随海量主开关。
+        # 扩展库走独立开关（不受海量主开关影响）；其余分类随海量主开关。
         if ccat == catalogmod.ADULT_CAT:
-            _cat_gate = catalogmod._welfare_on() and catalog.available(ccat)
+            _cat_gate = catalogmod._ext_lib_on() and catalog.available(ccat)
         else:
             _cat_gate = catalog_enabled() and catalog.available(ccat)
         if not _cat_gate:
@@ -4221,7 +4119,7 @@ async def item_detail(guid: str, request: Request):
             any(s["id"] == sscope for s in standalone_sources_active()):
         src = next((s for s in config.all_sources() if s["id"] == sscope), {})
         _pool = list(catalogmod.CATALOG_CATEGORIES)
-        if catalogmod._welfare_on() and src.get("adult"):
+        if catalogmod._ext_lib_on() and src.get("adult"):
             _pool = _pool + [(catalogmod.ADULT_CAT, "", "")]
         n = sum(catalog.total(c, sscope) for c, _, _ in _pool)
         data = inj._base_item(
@@ -4232,26 +4130,6 @@ async def item_detail(guid: str, request: Request):
         data["play_item_guid"] = ""
         data["play_error"] = ""
         return JSONResponse({"code": 0, "msg": "", "data": data})
-    # 电视直播频道详情
-    if live_enabled():
-        ch = iptvmod.ch_by_guid(guid)
-        if ch:
-            chash = iptvmod.ch_hash(ch["key"])
-            srcs = sorted({(u.get("src") or "") for u in ch["urls"]})
-            data = inj._base_item(
-                guid=guid, type="Movie", title=ch["n"], can_play=1,
-                poster=inj._poster(ch.get("logo") or ""),
-                parent_guid=iptvmod.cat_guid(ch.get("g") or "其他"),
-                parent_title=ch.get("g") or "其他",
-                ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
-                ancestor_category="Mix", season_number=0, episode_number=0,
-                number_of_seasons=0, number_of_episodes=max(1, len(ch["urls"])),
-                file_name=ch["n"])
-            data["media_guid"] = iptvmod.media_guid_of(chash, 0)
-            data["video_guid"] = iptvmod.video_guid_of(chash, 0)
-            data["overview"] = (f"{len(ch['urls'])} 条线路 · "
-                                + ("来源：" + "、".join(srcs[:4]) if srcs else "内置聚合"))
-            return JSONResponse({"code": 0, "msg": "", "data": data})
     # TVBox 加固源专区库根节点
     # >>> PRIVATE:GUARD
     if features.GUARD:
@@ -4637,65 +4515,6 @@ async def stream_list(guid: str, request: Request):
             sl["qualities"] = quals
             sl["cloud_storage_info"] = None
         return JSONResponse({"code": 0, "msg": "", "data": sl})
-    # 电视直播频道：每条线路一个 video_stream，默认线路 0
-    if live_enabled():
-        ch = iptvmod.ch_by_guid(guid)
-        if ch:
-            chash = iptvmod.ch_hash(ch["key"])
-            urls = iptvmod.alive_urls(ch)
-            mg0 = iptvmod.media_guid_of(chash, 0)
-            vg0 = iptvmod.video_guid_of(chash, 0)
-            streams = []
-            for i, u in enumerate(urls):
-                streams.append({
-                    "media_guid": iptvmod.media_guid_of(chash, i),
-                    "title": u.get("src") or f"线路{i + 1}", "guid": iptvmod.video_guid_of(chash, i),
-                    "resolution_type": "1080p", "color_range_type": "SDR",
-                    "codec_name": "h264", "codec_type": "video",
-                    "color_range": "tv", "profile": "High", "index": i,
-                    "width": 1920, "height": 1080, "coded_width": 0,
-                    "coded_height": 0, "display_aspect_ratio": "16:9",
-                    "pix_fmt": "yuv420p", "level": "40", "color_space": "",
-                    "color_transfers": "", "color_primaries": "",
-                    "duration": 0, "dv_profile": 0, "refs": 1,
-                    "r_frame_rate": "25 fps", "avg_frame_rate": "25 fps",
-                    "bits_per_raw_sample": "8", "bps": 0, "progressive": 1,
-                    "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
-                    "update_time": 0, "rotation": 0, "ext1": 0,
-                    "is_bluray": False,
-                })
-            if not streams:
-                streams.append({
-                    "media_guid": mg0, "title": ch["n"], "guid": vg0,
-                    "resolution_type": "1080p", "color_range_type": "SDR",
-                    "codec_name": "h264", "codec_type": "video",
-                    "color_range": "tv", "profile": "High", "index": 0,
-                    "width": 1920, "height": 1080, "coded_width": 0,
-                    "coded_height": 0, "display_aspect_ratio": "16:9",
-                    "pix_fmt": "yuv420p", "level": "40", "color_space": "",
-                    "color_transfers": "", "color_primaries": "",
-                    "duration": 0, "dv_profile": 0, "refs": 1,
-                    "r_frame_rate": "25 fps", "avg_frame_rate": "25 fps",
-                    "bits_per_raw_sample": "8", "bps": 0, "progressive": 1,
-                    "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
-                    "update_time": 0, "rotation": 0, "ext1": 0,
-                    "is_bluray": False,
-                })
-            sl = {
-                "files": [{
-                    "guid": mg0, "path": f"直播/{ch['n']}.m3u8",
-                    "file_name": f"{ch['n']}.m3u8",
-                    "size": 0, "timestamp": 0, "type": 1, "sort_num": 0,
-                    "can_play": 1, "play_error": "", "create_time": 0,
-                    "update_time": 0, "parent_fv_guid": "",
-                    "progress_thumb_hash_dir": "",
-                }],
-                "video_streams": streams,
-                "audio_streams": [], "subtitle_streams": [],
-                "play_link": f"{iptvmod.PROXY_BASE}/{chash}/0/index.m3u8",
-                "qualities": [], "cloud_storage_info": None,
-            }
-            return JSONResponse({"code": 0, "msg": "", "data": sl})
     ep = store.get_episode(guid)
     target = None
     if ep:
@@ -4772,8 +4591,6 @@ def _is_online_item_guid(guid: str) -> bool:
         return True
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
         return True
-    if iptvmod.is_live_mg(guid):
-        return True
     if (guid in CATALOG_GUID_CAT or guid in CHART_GUID_CAT or is_hot_guid(guid)
             or standalone_source_of(guid) is not None):
         return False  # 媒体库根节点不可收藏
@@ -4786,6 +4603,16 @@ def _is_online_item_guid(guid: str) -> bool:
 
 def _apply_marks(row: dict) -> dict:
     g = row.get("guid", "")
+    # 列表渲染时顺手把元信息补进收藏记录：收藏夹不再只认 store 缓存，
+    # 标题被清掉/重启后仍能凭收藏时存下的元信息显示。
+    if g and (marks.is_favorite(g) or marks.is_watched(g)):
+        marks.remember_meta(g, {
+            "title": (row.get("title") or "").replace("【在线】", "").split(" ·")[0],
+            "type": row.get("type", ""), "poster": row.get("poster", ""),
+            "year": (row.get("release_date") or "")[:4],
+            "remarks": "", "ancestor_guid": row.get("ancestor_guid", ""),
+            "ancestor_name": row.get("ancestor_name", ""),
+        })
     if marks.is_favorite(g):
         row["is_favorite"] = 1
     if marks.is_watched(g):
@@ -4799,6 +4626,16 @@ def _apply_marks(row: dict) -> dict:
 
 def _mark_extra(guid: str) -> dict:
     meta = _online_card_meta(guid) or {}
+    # 集节点收藏：用所属剧集的标题/海报当收藏元信息，否则收藏夹里只有 guid。
+    if not meta.get("title"):
+        ep = store.get_episode(guid) or {}
+        parent = store.get_title_by_guid(ep.get("online_guid", "")) or {}
+        if parent:
+            meta = {"title": inj._f(parent, "title"),
+                    "type": inj.fnos_type(parent),
+                    "poster": inj._f(parent, "poster"),
+                    "year": inj._f(parent, "year"),
+                    "remarks": inj._f(parent, "remarks")}
     return {
         "title": meta.get("title", ""), "type": meta.get("type", ""),
         "poster": meta.get("poster", ""), "year": meta.get("year", ""),
@@ -4880,7 +4717,47 @@ def _favorite_card(rec: dict) -> dict | None:
             return None
         row = chart_card(meta)
     else:
-        return None  # 剧集子节点 / 已失效条目暂不在收藏夹展示
+        # 兜底（P2 修复）：store 缓存丢了 / 重启后 / 收藏的是集节点时，
+        # 原来这里直接 return None，整条收藏在收藏夹里消失。
+        # 先找集节点的所属剧集，再用收藏时存下的元信息建卡。
+        ep = store.get_episode(guid) or {}
+        parent = store.get_title_by_guid(ep.get("online_guid", "")) or {}
+        if parent:
+            row = inj.search_item(parent)
+            row["title"] = inj._f(parent, "title") + (
+                f" ·{inj._f(parent, 'remarks')}" if inj._f(parent, "remarks") else "")
+        else:
+            title = (rec.get("title") or "").strip()
+            if not title:
+                return None  # 实在没有任何可显示的信息才丢弃
+            typ = (rec.get("type") or "Movie")
+            typ = "TV" if typ in ("TV", "Mix", "Episode") else "Movie"
+            row = {
+                "guid": guid, "video_guid": video_guid(guid),
+                "path": "", "runtime": 0, "lan": "zh-CN", "imdb_id": "",
+                "trim_id": "", "tv_title": "", "parent_guid": "",
+                "parent_title": "", "title": inj.ONLINE_TAG + title + (
+                    f" ·{rec.get('remarks')}" if rec.get("remarks") else ""),
+                "type": typ, "genres": [],
+                "poster": inj._poster(rec.get("poster") or ""),
+                "poster_width": 0, "poster_height": 0,
+                "is_favorite": 0, "watched": 0, "watched_ts": 0,
+                "vote_average": "0",
+                "media_stream": {"resolutions": None, "audio_type": None,
+                                 "color_range_type": None},
+                "release_date": rec.get("year", "") or "",
+                "season_number": 0, "episode_number": 0,
+                "air_date": rec.get("year", "") or "",
+                "number_of_seasons": 1 if typ == "TV" else 0,
+                "number_of_episodes": 0,
+                "local_number_of_seasons": 0, "local_number_of_episodes": 0,
+                "status": "在线",
+                "overview": "",
+                "ancestor_guid": rec.get("ancestor_guid", "") or "",
+                "ancestor_name": rec.get("ancestor_name", "") or "🌐在线资源",
+                "ancestor_category": typ, "ts": 0, "duration": 0,
+                "single_child_guid": "", "file_name": "",
+            }
     _apply_marks(row)
     return row
 
@@ -4979,34 +4856,6 @@ async def play_info(request: Request):
             return JSONResponse({"code": 0, "msg": "", "data": xinfo})
     # <<< PRIVATE:CATVOD
 
-    # 电视直播频道：play_link 直指本插件 HLS 代理
-    if live_enabled() and guid:
-        ch = iptvmod.ch_by_guid(guid)
-        if ch:
-            chash = iptvmod.ch_hash(ch["key"])
-            mg = iptvmod.media_guid_of(chash, 0)
-            info = {
-                "grand_guid": "", "guid": guid,
-                "parent_guid": iptvmod.cat_guid(ch.get("g") or "其他"),
-                "play_config": None, "ts": 0, "type": "Movie",
-                "video_guid": iptvmod.video_guid_of(chash, 0),
-                "audio_guid": "", "subtitle_guid": "",
-                "media_guid": mg,
-                "play_link": f"{iptvmod.PROXY_BASE}/{chash}/0/index.m3u8",
-                "item": {
-                    "guid": guid, "type": "Movie", "title": ch["n"],
-                    "can_play": 1, "play_error": "",
-                    "season_number": 0, "episode_number": 0,
-                    "parent_guid": "",
-                    "posters": inj._poster(ch.get("logo") or ""),
-                    "backdrops": inj._poster(ch.get("logo") or ""),
-                    "number_of_episodes": max(1, len(ch["urls"])),
-                    "number_of_seasons": 0,
-                },
-                "direct_link_audio_index": -1,
-            }
-            return JSONResponse({"code": 0, "msg": "",
-                                 "data": clientmod.normalize_detail(info, client)})
 
     def _prewarm_from_info(info: dict):
         """点击播放即后台预热默认线路的播放列表，缩短首帧等待。"""
@@ -5227,13 +5076,6 @@ async def media_range(mg: str, request: Request):
             return RedirectResponse(_xlib_play_link(sg, idx), status_code=302,
                                     headers={"Cache-Control": "no-store"})
     # <<< PRIVATE:CATVOD
-    # 电视直播：fnmedia-livemg:<chash>:<idx> 直接反解，302 到本插件 HLS 代理
-    _live_mg = iptvmod.parse_media_guid(mg)
-    if _live_mg:
-        chash, idx = _live_mg
-        return RedirectResponse(
-            f"{iptvmod.PROXY_BASE}/{chash}/{idx}/index.m3u8",
-            status_code=302, headers={"Cache-Control": "no-store"})
     target = store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
     if not target and chart_g:
@@ -5257,29 +5099,6 @@ async def media_range(mg: str, request: Request):
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
 
 
-# ------------------------------------------------------- 电视直播（IPTV）HLS 代理
-@app.get(f"{iptvmod.PROXY_BASE}/{{chash}}/{{idx}}/index.m3u8")
-async def live_playlist(chash: str, idx: int, request: Request):
-    """拉源清单并把分片改写为本地 seg 端点。"""
-    body = await iptvmod.proxy_playlist(request.app.state.ext, chash, idx)
-    if body is None:
-        return JSONResponse({"code": -1, "msg": "频道不可用", "data": None},
-                            status_code=404)
-    return Response(body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-store"})
-
-
-@app.get(f"{iptvmod.PROXY_BASE}/{{chash}}/{{idx}}/seg")
-async def live_segment(chash: str, idx: int, request: Request):
-    """分片/KEY/直连流：流式直通（带该线路 UA/Referer）。"""
-    u = request.query_params.get("u", "")
-    range_h = request.headers.get("range", "")
-    resp = await iptvmod.proxy_segment(request.app.state.ext, chash, idx, u,
-                                       range_h)
-    if resp is None:
-        return JSONResponse({"code": -1, "msg": "分片不可用", "data": None},
-                            status_code=404)
-    return resp
 
 
 def _guess_wrapper(target: dict) -> tuple[str, bool]:
@@ -5325,9 +5144,6 @@ async def play_play(request: Request):
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(info, client)})
         return JSONResponse({"code": 0, "msg": "", "data": {}})
-    # 电视直播 mg：直接反解为瞬时 HLS 返回（真正拉源延后到 index.m3u8 代理）
-    if iptvmod.is_live_mg(mg):
-        return _instant_play_response(mg, body.get("video_guid", ""))
     base_target = store.resolve_media_guid(mg)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
@@ -8068,42 +7884,6 @@ async def ext_live_clear(request: Request):
 
 
 # ------------------------------------------------------- 电视直播（IPTV）管理 API
-@app.get("/v/api/ext/iptv/conf")
-async def iptv_conf(request: Request):
-    return {"code": 0, "msg": "", "data": iptvmod.conf_payload()}
-
-
-@app.post("/v/api/ext/iptv/conf")
-async def iptv_conf_set(request: Request):
-    import json
-    body = json.loads(await request.body() or b"{}")
-    conf = iptvmod.load_conf()
-    if "enabled" in body:
-        conf["enabled"] = bool(body["enabled"])
-    if isinstance(body.get("subs"), list):
-        conf["subs"] = body["subs"]
-    iptvmod.save_conf(conf)
-    return {"code": 0, "msg": "", "data": iptvmod.conf_payload()}
-
-
-@app.get("/v/api/ext/iptv/channels")
-async def iptv_channels(request: Request):
-    kw = request.query_params.get("keyword", "")
-    group = request.query_params.get("group", "")
-    limit = int(request.query_params.get("limit", "200"))
-    return {"code": 0, "msg": "", "data": iptvmod.list_channels(kw, group, limit)}
-
-
-@app.post("/v/api/ext/iptv/refresh")
-async def iptv_refresh(request: Request):
-    res = await iptvmod.refresh(request.app.state.ext, force=True)
-    await iptvmod.check_once(request.app.state.ext)
-    return {"code": 0, "msg": "", "data": res}
-
-
-@app.get("/v/api/ext/iptv/check")
-async def iptv_check(request: Request):
-    return {"code": 0, "msg": "", "data": iptvmod.check_summary()}
 
 
 @app.get("/v/api/ext/status")
@@ -8112,12 +7892,104 @@ async def ext_status(request: Request):
     priorities = {s["id"]: providers.source_priority(s, overrides)
                   for s in config.all_sources()}
     return {"ok": True,
+            "build": BUILD_LABEL,
             "config": {k: v for k, v in config.get().items() if k != "admin_token"},
             "source_priority": priorities,
             "cached_titles": len(store._titles),
             "hot": hot_cache.status(),
             "charts": chart_cache.status(),
             "catalog": catalog.status()}
+
+
+# --------------------------------------------------------------- P2：继续观看 / 追剧 / 源健康 / 收藏元数据
+@app.get("/v/api/ext/continue")
+async def ext_continue(request: Request, limit: int = 20):
+    """继续观看：未看完的记录，按最近观看倒序，带 progress。"""
+    return {"code": 0, "msg": "", "data": history.continue_watching(limit=limit)}
+
+
+@app.get("/v/api/ext/follow")
+async def ext_follow_list(request: Request):
+    if not config.get().get("follow_enabled", True):
+        return {"code": 0, "msg": "", "data": []}
+    return {"code": 0, "msg": "", "data": follow_list.list()}
+
+
+@app.post("/v/api/ext/follow")
+async def ext_follow_set(request: Request):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    guid, title = (body.get("guid") or ""), (body.get("title") or "")
+    if body.get("action") == "unfollow":
+        return {"code": 0, "msg": "", "data": follow_list.unfollow(guid)}
+    if not guid:
+        return {"code": 1, "msg": "guid required", "data": False}
+    return {"code": 0, "msg": "", "data": follow_list.follow(
+        guid, title, int(body.get("episodes", 0) or 0))}
+
+
+@app.post("/v/api/ext/follow/check")
+async def ext_follow_check(request: Request):
+    """追剧提醒：body {counts: {guid: 当前总集数}}，返回有更新的条目。"""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    counts = body.get("counts") or {}
+    return {"code": 0, "msg": "", "data": follow_list.check_updates(
+        {str(k): int(v) for k, v in counts.items()})}
+
+
+@app.get("/v/api/ext/source-health")
+async def ext_source_health(request: Request):
+    """源健康快照：成功率 / 延迟 / 连续失败 / 死亡冷却，供管理页标红降级源。"""
+    return {"code": 0, "msg": "", "data": sourcehealth.snapshot()}
+
+
+@app.post("/v/api/ext/source-health/reset")
+async def ext_source_health_reset(request: Request):
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    sourcehealth.reset(body.get("key") or None)
+    return {"code": 0, "msg": "", "data": True}
+
+
+@app.post("/v/api/ext/source/heal")
+async def ext_source_heal(request: Request):
+    """域名自愈：对一个源依次试备用域名，返回第一个返回正常内容的 API 地址。"""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    sid = body.get("id") or ""
+    src = next((s for s in config.all_sources() if s.get("id") == sid), None)
+    if not src:
+        return {"code": 1, "msg": "source not found", "data": None}
+    backups = (config.get().get("source_domain_backups") or {}).get(sid, [])
+    import httpx as _httpx
+
+    def _fetch(url: str):
+        with _httpx.Client(timeout=12, verify=False, trust_env=False) as c:
+            r = c.get(url, headers={"User-Agent": "Mozilla/5.0"})
+            return r.status_code, r.text
+
+    healed = domain_heal_mod.heal(src["api"], ext=body.get("ext", ""),
+                                  backups=backups, fetch=_fetch)
+    return {"code": 0, "msg": "", "data": healed}
+
+
+@app.post("/v/api/ext/favorite/enrich")
+async def ext_favorite_enrich(request: Request):
+    """收藏元数据补全：用同名其他源的条目补齐收藏记录的空字段，不改已有值。"""
+    if not config.get().get("metadata_enabled", True):
+        return {"code": 0, "msg": "", "data": marks.favorite_records()}
+    recs = marks.favorite_records()
+    # 候选：当前已缓存的全部标题 brief。
+    cands = []
+    try:
+        cands = [dict(b) for b in store._titles.values()] if hasattr(store, "_titles") else []
+    except Exception:
+        cands = []
+    out = []
+    for r in recs:
+        brief = {"title": r.get("title", ""), "year": r.get("year", ""),
+                 "area": "", "score": "", "overview": "", "poster": r.get("poster", ""),
+                 "actor": "", "director": ""}
+        out.append({**r, **{k: v for k, v in metadata_mod.enrich_brief(brief, cands).items()
+                            if k in ("year", "area", "score", "overview", "poster") and v}})
+    return {"code": 0, "msg": "", "data": out}
 
 
 # --------------------------------------------------------------- 版本更新
@@ -8231,7 +8103,7 @@ async def ext_set_config(request: Request):
         "hot_library_enabled", "hot_library_title", "hot_limit",
         "hot_per_source", "hot_pages_per_source", "hot_refresh_interval",
         "catalog_library_enabled",
-        "welfare_library_enabled",
+        "ext_library_enabled",
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
@@ -8279,9 +8151,9 @@ async def ext_set_config(request: Request):
         patch["sources"] = list(cur.values())
     config.save(patch)
     _search_cache.clear()
-    if sources_changed or "welfare_library_enabled" in patch:
-        # 福利独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
-        # 否则打开开关后福利库卡要等下次路由过期才出现。
+    if sources_changed or "ext_library_enabled" in patch:
+        # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
+        # 否则打开开关后扩展库卡要等下次路由过期才出现。
         _schedule_routes_refresh()
     return {"code": 0, "msg": "saved"}
 
@@ -8331,7 +8203,7 @@ async def ext_junk_keywords(request: Request):
 def _schedule_routes_refresh():
     async def _run_after_current():
         # 刷新进行中时不能丢事件：连续“关→开”切换若把“开”丢掉，
-        # 关状态的重建会先落地且再无重建，福利库卡永远回不来。
+        # 关状态的重建会先落地且再无重建，扩展库卡永远回不来。
         # 等当前这轮结束再按最新配置补跑一次（refresh_routes 自身有重入保护）。
         waited = 0
         while catalog._refreshing and waited < 180:
@@ -8623,6 +8495,18 @@ async def ext_import_subscription(request: Request):
         _log.info("merge ad rules failed", exc_info=True)
 
     groups = tvboxmod.classify_subscription(raw_sites, _spider, _base)
+    # T4 远程源：持久化到配置，管理页「资源站」里一直能看到（不只是导入结果那一下）。
+    try:
+        _t4_new = groups.get("t4", []) or []
+        if _t4_new:
+            _old_t4 = config.get().get("t4_sources") or []
+            _seen = {str(x.get("api", "")).lower() for x in _old_t4}
+            _add = [x for x in _t4_new
+                    if str(x.get("api", "")).lower() not in _seen]
+            if _add:
+                config.save({"t4_sources": (_old_t4 + _add)[:200]})
+    except Exception:  # noqa: BLE001
+        pass
     cms_cands = groups["cms"]
     guard_sites = groups["guard"]
     csp_items = groups.get("csp", [])
@@ -8789,6 +8673,10 @@ async def ext_import_subscription(request: Request):
         "guard": guard_report,
         "csp": csp_report,
         "drpy": drpy_report,
+        # T4 远程源：仅收录展示，本版本未接入 T4 协议（上游 v0.2.66 起才有
+        # 「T4 选片」聚合库），不能搜不能播。
+        "t4": {"items": groups.get("t4", []),
+               "note": "当前版本未接入 T4 协议，仅展示；想搜想播需移植上游 T4 支持"},
         "runtime": runtime,
         "skipped": len(skipped),
         "skipped_detail": skipped[:60],

@@ -28,6 +28,7 @@ mkdir -p "${STAGE}/app/repo" "${STAGE}/app/ui"
 rsync -a --delete \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
+  --exclude='.tools/' --exclude='.pytest_cache/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \
   --exclude='/proxy/assets/guard/guard.jar' \
@@ -73,6 +74,15 @@ if [ "${PUBLIC}" -eq 1 ] && [ -f "${STAGE}/app/repo/tools/public_strip.py" ]; th
   rm -rf "${STAGE}/app/repo/tools"
   rmdir "${STAGE}/app/repo/proxy/assets" 2>/dev/null || true
 fi
+
+# 构建戳：让运行中的包能在管理页自报身份（所有构建同为 v0.2.39 时，
+# 否则用户无法区分新旧包，也就无法确认一次升级到底生没生效）。
+BUILD_SHA="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
+BUILD_TIME="$(date '+%Y-%m-%d %H:%M')"
+printf '"""构建期生成：管理页自报构建身份用（勿手改）。"""\nBUILD_TIME = %s\nBUILD_SHA = %s\nBUILD_LABEL = f"v%s {BUILD_TIME} {BUILD_SHA}"\n' \
+  "'${BUILD_TIME}'" "'${BUILD_SHA}'" "${VERSION}" \
+  > "${STAGE}/app/repo/proxy/build_info.py"
+echo "[fpk] 构建戳: ${VERSION} ${BUILD_TIME} ${BUILD_SHA}"
 
 MANIFEST_VER="$(echo "${VERSION}" | sed -E 's/([0-9]+\.[0-9]+\.[0-9]+).*/\1/')"
 sed "s/@VERSION@/${MANIFEST_VER}/" "${FPK_DIR}/manifest.in" > "${STAGE}/manifest"
