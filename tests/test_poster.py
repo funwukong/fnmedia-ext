@@ -117,6 +117,42 @@ def test_serve_online_poster_failure_returns_jpeg_fallback():
     assert b"<svg" not in r.body
 
 
+def test_poster_url_has_v2_prefix():
+    """缓存破坏：卡片海报地址带 v2 前缀，App 按新地址重新拉图，丢弃旧版
+    SVG 占位缓存（旧地址命中旧缓存→解码失败→灰色胶片图标）。"""
+    p = inject._poster(IMG_URL)
+    assert p.startswith("/v/api/v1/sys/img/online/v2/")
+    assert p.endswith(".jpg")
+    # /online/ 短地址输入同样进 v2
+    p2 = inject._poster("/online/abc123.jpg")
+    assert p2 == "/v/api/v1/sys/img/online/v2/abc123.jpg"
+    assert inject._poster("") == ""
+
+
+def test_serve_v2_prefixed_token_returns_image_and_legacy_still_works():
+    """带 v2 前缀的请求正常出图；剥掉前缀后的旧版地址同样正常出图。"""
+    fake = _FakeExt([_Resp()])
+    with patch.object(appmod, "_poster_cache_read", return_value=None), \
+            patch.object(appmod, "_poster_cache_write",
+                         side_effect=lambda u, b: None):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
+    assert r.status_code == 200
+    assert r.media_type == "image/jpeg"
+    assert r.body == JPEG
+    assert _tok().startswith("v2/")  # 本测试确实走了 v2 前缀路径
+
+    legacy = _tok()[len("v2/"):]
+    fake2 = _FakeExt([_Resp()])
+    with patch.object(appmod, "_poster_cache_read", return_value=None), \
+            patch.object(appmod, "_poster_cache_write",
+                         side_effect=lambda u, b: None):
+        r2 = asyncio.run(appmod._serve_online_poster(
+            legacy, _fake_request(fake2)))
+    assert r2.status_code == 200
+    assert r2.body == JPEG
+
+
 def test_prefetch_poster_urls_includes_catalog():
     class _Charts:
         def items(self, cat):

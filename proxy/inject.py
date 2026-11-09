@@ -9,7 +9,10 @@ import t4
 from store import (make_guid, media_guid, video_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
-_IMG_PREFIX = "/v/api/v1/sys/img/online/"
+# v2 前缀：缓存破坏。旧版占位图是 App 解不了的 SVG，App 按稳定 token URL
+# 缓存了旧结果（解码失败→灰色胶片图标）；v2 让地址变化，App 重新拉图。
+# 服务端解 token 前剥掉 v2/ 前缀，旧版无前缀地址仍兼容。
+_IMG_PREFIX = "/v/api/v1/sys/img/online/v2/"
 
 
 def _poster(url: str) -> str:

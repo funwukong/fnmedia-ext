@@ -133,10 +133,19 @@ DEFAULTS = {
     "guard_native_enabled": True,
     # 置顶的虚拟媒体库 guid 集合（打开=在飞牛影视媒体库列表置顶，关闭=普通顺序）。
     "pinned_libs": [],
-    # 媒体库可见权限：{库 guid: [用户名, ...]}。某库没配或配空列表=全部用户
-    # 可见（默认）；配了非空名单后只有名单里的用户能看到该库。用户名以官方
-    # user/info 返回的为准；身份识别不到时受限库隐藏（fail-closed）。
-    "library_visible_users": {},
+    # 虚拟媒体库显隐/排序/子账号授权（上游 vlibs 设计，按稳定库键 key 配置，
+    # 与 guid 解耦）。lib_hidden：管理员隐藏的库键；lib_order：虚拟库自定义
+    # 顺序；lib_placement：front/back/after；lib_anchor：after 的锚点本地库
+    # guid；lib_acl：{用户 guid: [允许的库键，含 "__online__" 标记]}；
+    # acl_default_visible/acl_default_online：未配置账号的默认（True=可见，
+    # 上游 fail-open 默认；改 False 则未配置账号默认看不到虚拟库/在线搜索）。
+    "lib_hidden": [],
+    "lib_order": [],
+    "lib_placement": "front",
+    "lib_anchor": "",
+    "lib_acl": {},
+    "acl_default_visible": True,
+    "acl_default_online": True,
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
@@ -181,7 +190,7 @@ DEFAULTS = {
 }
 
 # 已废弃、需从旧配置里清除的键
-_DEPRECATED = {"public_base", "strm_root"}
+_DEPRECATED = {"public_base", "strm_root", "library_visible_users"}
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
@@ -509,32 +518,6 @@ class Config:
             else:
                 cur = [g for g in cur if g != guid]
             cfg["pinned_libs"] = cur
-            self._persist(cfg)
-            return True, "ok"
-
-    def lib_visible_users(self, guid: str) -> list[str]:
-        """某库允许的用户名列表；空列表表示不限制（全部可见）。"""
-        from visibility import allowed_users_for
-        with _LOCK:
-            users = allowed_users_for(self.get(), guid)
-            return list(users) if users else []
-
-    def set_lib_visible_users(self, guid: str, users) -> tuple[bool, str]:
-        """设置某库的可见用户名单；空列表=取消限制（全部可见）。"""
-        from visibility import normalize_users
-        if not isinstance(guid, str) or not guid:
-            return False, "guid 非法"
-        clean = normalize_users(users)
-        with _LOCK:
-            cfg = self.get()
-            mapping = cfg.get("library_visible_users")
-            if not isinstance(mapping, dict):
-                mapping = {}
-            if clean:
-                mapping[guid] = clean
-            else:
-                mapping.pop(guid, None)
-            cfg["library_visible_users"] = mapping
             self._persist(cfg)
             return True, "ok"
 

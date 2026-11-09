@@ -270,7 +270,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <!-- ============ 虚拟媒体库 ============ -->
     <section class="page" id="page-library">
       <h2 class="page-title">虚拟媒体库</h2>
-      <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」，也可单独设置「仅哪些飞牛用户可见」（留空=全部用户）。</p>
+      <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」「隐藏」，虚拟库的显示顺序与相对本地库的位置可调；子账号能看哪些库在下方「子账号可见权限」里按人勾选。</p>
 
       <div class="card">
         <div class="card-title">① 热门资源（各类目真实榜单）</div>
@@ -309,11 +309,49 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">③ 其他注入库与可见权限</div>
-        <p class="card-sub">独立源库 / 加固 / 小雅 / 红果短剧。每张卡可单独设置仅哪些飞牛用户可见：用户名用逗号分隔，留空=全部用户可见。</p>
+        <div class="card-title">③ 其他注入库</div>
+        <p class="card-sub">独立源库 / 加固 / 小雅 / 红果短剧。每张卡可单独置顶或隐藏（隐藏后所有账号都看不到）。</p>
         <div class="lib-grid" id="otherLibs"></div>
-        <datalist id="fnusers"></datalist>
-        <div class="hint">用户名从飞牛账号来（下拉可选，取不到时可直接手动输入）。身份按各用户登录飞牛影视时的会话识别；识别不到时该库保持全部可见，不会锁死。</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">④ 虚拟库位置与排序</div>
+        <p class="card-sub">虚拟库在飞牛影视媒体库列表里的相对位置与相互顺序。选「插到本地库之后」时需再选一座本地库作锚点（本地库列表从飞牛读取，读不到时该选项不可用）。</p>
+        <label class="field" style="max-width:280px">
+          <span>虚拟库相对本地库的位置</span>
+          <select id="libPlacement">
+            <option value="front">排在本地库之前</option>
+            <option value="back">排在本地库之后</option>
+            <option value="after">插到指定本地库之后</option>
+          </select>
+        </label>
+        <label class="field" style="max-width:280px">
+          <span>锚点本地库（仅“插到指定本地库之后”时生效）</span>
+          <select id="libAnchor"><option value="">— 未选择 —</option></select>
+        </label>
+        <div class="hint">顺序调整：每张库卡上的 ↑ ↓ 按钮会即时保存新顺序。</div>
+        <div class="btn-row">
+          <button class="primary small" onclick="savePlacement()">保存位置</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">⑤ 子账号可见权限</div>
+        <p class="card-sub">按飞牛账号勾选能看到的虚拟库；不勾选任何人表示该账号看不到任何虚拟库，点「恢复默认」取消该账号的限制。账号从飞牛官方数据库读取（只读），识别不到会话的账号按下方默认处理。</p>
+        <label class="switch-row">
+          <input type="checkbox" id="aclDefVis"/>
+          <span>未设置过权限的账号默认能看到虚拟库
+            <span class="sub">关掉后，未设置权限的账号默认看不到虚拟库；管理员始终可见，识别不到会话时按此开关处理</span></span>
+        </label>
+        <label class="switch-row">
+          <input type="checkbox" id="aclDefOnline"/>
+          <span>未设置过权限的账号默认能用在线搜索
+            <span class="sub">关掉后，未设置权限的账号搜不到在线片源（只搜本地库）</span></span>
+        </label>
+        <div class="btn-row">
+          <button class="primary small" onclick="saveAclDefaults()">保存默认权限</button>
+        </div>
+        <div id="acctList" style="margin-top:10px"></div>
       </div>
 
       <div class="card">
@@ -1089,27 +1127,121 @@ function libCards(chartCounts,cats){
 
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
-let FNUSERS=[];
+let ACCOUNTS=[];
+let ACLDEF={visible:true,online:true};
+let LIBPLACE="front",LIBANCHOR="",LIBORDER=[];
 async function loadLibs(){
   try{const r=await jget("/v/api/ext/libs");LIBS=(r.data&&r.data.libs)||[];
+    LIBPLACE=(r.data&&r.data.placement)||"front";
+    LIBANCHOR=(r.data&&r.data.anchor)||"";
+    LIBORDER=(r.data&&r.data.order)||[];
     if($("catEnabled"))$("catEnabled").checked=!!(r.data&&r.data.catalog_enabled);
   }catch(e){LIBS=[];}
-  await loadFnUsers();
+  await loadAccounts();
+  await loadLocalLibs();
 }
-async function loadFnUsers(){
-  try{const r=await jget("/v/api/ext/users");FNUSERS=(r.data&&r.data.users)||[];
-    const dl=$("fnusers");if(dl)dl.innerHTML=FNUSERS.map(u=>`<option value="${esc(u.username)}">`).join("");
-  }catch(e){FNUSERS=[];}
+async function loadAccounts(){
+  try{const r=await jget("/v/api/ext/accounts");
+    ACCOUNTS=(r.data&&r.data.accounts)||[];
+    ACLDEF={visible:r.data&&r.data.acl_default_visible!==false,
+            online:r.data&&r.data.acl_default_online!==false};
+    if($("aclDefVis"))$("aclDefVis").checked=ACLDEF.visible;
+    if($("aclDefOnline"))$("aclDefOnline").checked=ACLDEF.online;
+  }catch(e){ACCOUNTS=[];}
+  renderAccounts();
 }
-async function saveVis(guid,btn){
-  const card=btn.closest(".lib");const inp=card&&card.querySelector("[data-vis]");
-  const users=(inp?inp.value:"").split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+async function loadLocalLibs(){
+  try{const r=await jget("/v/api/ext/local-libs");
+    const sel=$("libAnchor");if(!sel)return;
+    const cur=sel.value||LIBANCHOR;
+    sel.innerHTML=`<option value="">— 未选择 —</option>`+((r.data&&r.data.libs)||[])
+      .map(l=>`<option value="${esc(l.guid)}">${esc(l.name||l.guid)}</option>`).join("");
+    sel.value=cur;
+  }catch(e){}
+}
+function libOrderKeys(){
+  const keys=LIBS.map(x=>x.key);
+  const ordered=LIBORDER.filter(k=>keys.includes(k));
+  keys.forEach(k=>{if(!ordered.includes(k))ordered.push(k);});
+  return ordered;
+}
+async function toggleHide(key,el){
   try{
-    const r=await jpost("/v/api/ext/lib/visibility",{guid,users});
-    if(r.code===0){toast(users.length?("仅 "+users.join("、")+" 可见"):"已改为全部用户可见");
-      LIBS.forEach(x=>{if(x.guid===guid)x.visible_users=r.data.visible_users||users;});renderLibrary();}
+    const r=await jpost("/v/api/ext/lib/visibility",{key,hidden:el.checked});
+    if(r.code===0){toast(el.checked?"已隐藏（所有账号都看不到）":"已恢复显示");
+      LIBS.forEach(x=>{if(x.key===key)x.hidden=el.checked;});renderLibrary();}
+    else{el.checked=!el.checked;toast(r.msg||"设置失败","fail");}
+  }catch(e){el.checked=!el.checked;toast("设置失败","fail");}
+}
+async function moveLib(key,dir){
+  const keys=libOrderKeys();
+  const i=keys.indexOf(key);const j=i+dir;
+  if(i<0||j<0||j>=keys.length)return;
+  [keys[i],keys[j]]=[keys[j],keys[i]];
+  try{
+    const r=await jpost("/v/api/ext/lib/order",{order:keys});
+    if(r.code===0){LIBORDER=keys;toast("顺序已保存");renderLibrary();}
     else toast(r.msg||"保存失败","fail");
   }catch(e){toast("保存失败","fail");}
+}
+async function savePlacement(){
+  const placement=$("libPlacement")?$("libPlacement").value:"front";
+  const anchor=$("libAnchor")?$("libAnchor").value:"";
+  try{
+    const r=await jpost("/v/api/ext/lib/order",{order:libOrderKeys(),placement,anchor});
+    if(r.code===0){LIBPLACE=placement;LIBANCHOR=anchor;toast("位置已保存");}
+    else toast(r.msg||"保存失败","fail");
+  }catch(e){toast("保存失败","fail");}
+}
+async function saveAcl(guid,btn){
+  const card=btn.closest("[data-acct]");if(!card)return;
+  const allow=[...card.querySelectorAll("input[data-libkey]:checked")].map(x=>x.getAttribute("data-libkey"));
+  const on=card.querySelector("input[data-online]");
+  if(on&&on.checked)allow.push("__online__");
+  try{
+    const r=await jpost("/v/api/ext/account/acl",{guid,allow});
+    if(r.code===0){toast("已保存该账号的可见库");
+      ACCOUNTS.forEach(a=>{if(a.guid===guid){a.allowed=allow;a.configured=true;}});renderAccounts();}
+    else toast(r.msg||"保存失败","fail");
+  }catch(e){toast("保存失败","fail");}
+}
+async function resetAcl(guid,btn){
+  try{
+    const r=await jpost("/v/api/ext/account/acl",{guid,allow:null});
+    if(r.code===0){toast("已恢复默认（按默认权限处理）");
+      ACCOUNTS.forEach(a=>{if(a.guid===guid){a.allowed=null;a.configured=false;}});renderAccounts();}
+    else toast(r.msg||"保存失败","fail");
+  }catch(e){toast("保存失败","fail");}
+}
+async function saveAclDefaults(){
+  const body={acl_default_visible:$("aclDefVis")?$("aclDefVis").checked:true,
+    acl_default_online:$("aclDefOnline")?$("aclDefOnline").checked:true};
+  try{
+    const r=await jpost("/v/api/ext/account/defaults",body);
+    if(r.code===0){ACLDEF={visible:body.acl_default_visible,online:body.acl_default_online};toast("默认权限已保存");}
+    else toast(r.msg||"保存失败","fail");
+  }catch(e){toast("保存失败","fail");}
+}
+function renderAccounts(){
+  const box=$("acctList");if(!box)return;
+  if(!ACCOUNTS.length){box.innerHTML=`<div class="muted sm">账号加载中…（若一直为空，说明 NAS 上 trim.media 的数据库目录不可读）。</div>`;return;}
+  box.innerHTML=ACCOUNTS.map(a=>{
+    const libs=LIBS.map(L=>{
+      const checked=a.allowed===null?true:a.allowed.includes(L.key);
+      return `<label style="display:inline-flex;gap:4px;align-items:center;margin:2px 8px 2px 0;font-size:13px">
+        <input type="checkbox" data-libkey="${esc(L.key)}" ${checked?"checked":""}/> ${esc(L.title)}</label>`;
+    }).join("");
+    const onChecked=a.allowed===null?ACLDEF.online:a.allowed.includes("__online__");
+    return `<div class="lib" data-acct="${esc(a.guid)}" style="margin-bottom:8px">
+      <div style="flex:1;min-width:0"><div class="t">${esc(a.username||a.guid)}${a.is_admin?" <span class=\"muted sm\">管理员</span>":""}
+        ${a.configured?"":" <span class=\"muted sm\">未设置，按默认</span>"}</div>
+      <div style="margin-top:4px">${libs||"<span class=\"muted sm\">暂无虚拟库</span>"}</div>
+      <div style="margin-top:6px"><label style="font-size:13px"><input type="checkbox" data-online="${esc(a.guid)}" ${onChecked?"checked":""}/> 允许在线搜索</label></div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn sm primary" onclick="saveAcl('${esc(a.guid)}',this)">保存该账号</button>
+        <button class="btn sm" onclick="resetAcl('${esc(a.guid)}',this)">恢复默认</button>
+      </div></div></div>`;
+  }).join("");
 }
 function catKeyOf(title){
   if(/电影/.test(title))return "movie"; if(/剧/.test(title))return "tv";
@@ -1118,17 +1250,19 @@ function catKeyOf(title){
 function libCardHtml(L,ic){
   const grp={standalone:"独立源库",guard:"加固",xlib:"小雅",hgdj:"红果短剧"}[L.group]||"";
   const sub=L.group==="t4"?(L.count+" 个源"):L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):(grp||"建库中…"));
-  const vis=(L.visible_users&&L.visible_users.length)?("仅 "+L.visible_users.map(esc).join("、")):"全部用户";
   return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
-    <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
+    <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}${L.hidden?" <span class=\"muted sm\">已隐藏</span>":""}</div>
       <div class="c">${sub}</div>
-      <div class="c">👥 可见：${vis}</div>
-      <div style="display:flex;gap:6px;margin-top:4px">
-        <input type="text" list="fnusers" data-vis="${L.guid}" placeholder="用户名，逗号分隔；留空=全部用户" value="${esc((L.visible_users||[]).join("，"))}" style="flex:1;min-width:0"/>
-        <button class="btn sm" onclick="saveVis('${L.guid}',this)">保存</button>
+      <div style="display:flex;gap:4px;margin-top:4px;flex-wrap:wrap">
+        <button class="btn sm" onclick="moveLib('${esc(L.key)}',-1)" title="上移">↑</button>
+        <button class="btn sm" onclick="moveLib('${esc(L.key)}',1)" title="下移">↓</button>
       </div></div>
-    <label class="pin" title="在飞牛影视媒体库列表中置顶">
-      <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
+    <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end">
+      <label class="pin" title="在飞牛影视媒体库列表中置顶">
+        <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
+      <label class="pin" title="隐藏后所有账号都看不到这张库">
+        <input type="checkbox" ${L.hidden?"checked":""} onchange="toggleHide('${esc(L.key)}',this)"/>隐藏</label>
+    </div>
   </div>`;
 }
 async function togglePin(guid,el){
@@ -1164,6 +1298,9 @@ function renderLibrary(){
   $("hotStatus").textContent=(STATUS.charts&&STATUS.charts.refreshing?"正在后台刷新榜单…":"最近刷新："+fmtTs(STATUS.charts&&STATUS.charts.updated_at))
     +` · 数据源 ${(STATUS.charts&&STATUS.charts.provider_ok)||0}/${(STATUS.charts&&STATUS.charts.provider_total)||0}`
     +(STATUS.charts&&STATUS.charts.last_error?(" · "+STATUS.charts.last_error):"");
+  if($("libPlacement"))$("libPlacement").value=LIBPLACE;
+  if($("libAnchor")&&LIBANCHOR)$("libAnchor").value=LIBANCHOR;
+  renderAccounts();
 }
 function fmtTs(ts){if(!ts)return"尚未刷新";const d=new Date(ts*1000),p=n=>String(n).padStart(2,"0");
   return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;}
