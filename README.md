@@ -70,6 +70,7 @@ sudo bash deploy/install.sh
 | `source_health_enabled` | 开 | 源健康自动降级（连续失败 3 次，冷却 15 分钟内搜索跳过） |
 | `domain_heal_enabled` | 开 | 域名自愈（主域名失效时按 `source_domain_backups` 自动试备用域名） |
 | `metadata_enabled` | 开 | 收藏元数据补全（同名其他源补齐空字段，不改已有值） |
+| `related_enabled` | 开 | 详情页关联作品（详情下方挂 recommendations，同系列/同分类优先；字段名按官方详情嵌套相关推荐数组的公开观察推断，是否渲染以真机实测为准） |
 | `guard_native_enabled` | 开 | 「🛡加固影视」聚合库 |
 | `guard_zone_enabled` | 关 | 每个加固源一张专区库卡 |
 | `t4_library_enabled` | — | T4 远程订阅源库（未实现：本 fork v0.2.39 没有 T4 协议接入，type=4 源导入时只收录展示、不能搜不能播；上游 v0.2.66 起才有「T4 选片」聚合库） |

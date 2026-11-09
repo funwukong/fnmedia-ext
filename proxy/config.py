@@ -170,6 +170,8 @@ DEFAULTS = {
     # 元数据补全：开启后，详情缺失的年份/地区/简介/海报用同名其他源的条目补齐。
     # 不接任何外部元数据接口；TMDB 需要用户自己填 key（留空=不用）。
     "metadata_enabled": True,
+    # 关联作品：开启后，详情页下方挂 recommendations 关联作品（同系列/同分类优先）。
+    "related_enabled": True,
     "tmdb_api_key": "",
 }
 

@@ -4275,6 +4275,7 @@ async def item_detail(guid: str, request: Request):
                 data["vote_average"] = str(meta["rating"])
             if meta.get("desc") and not data.get("overview"):
                 data["overview"] = meta["desc"]
+            _attach_related(data, bound)
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(data, client)})
         cat = meta.get("cat", "tv")
@@ -4386,6 +4387,7 @@ async def item_detail(guid: str, request: Request):
         return await forward_upstream(request)
     data = inj.detail_item(brief)
     _apply_marks(data)
+    _attach_related(data, brief)
     return JSONResponse({"code": 0, "msg": "",
                          "data": clientmod.normalize_detail(data, client)})
 
@@ -4622,6 +4624,27 @@ def _apply_marks(row: dict) -> dict:
         if ts:
             row["watched_ts"] = int(ts)
     return row
+
+
+def _attach_related(data: dict, brief: dict) -> None:
+    """详情页下方挂关联作品（recommendations 字段）。
+
+    只用 store 里已收录的片（用户浏览过的分类/搜索结果），不调外部接口。
+    字段名按“官方详情响应常嵌套相关推荐数组”的公开观察推断，未在官方
+    文档里核实；客户端是否渲染以真机实测为准。关掉 related_enabled 即停用。
+    """
+    try:
+        if not config.get().get("related_enabled", True):
+            return
+    except Exception:
+        return
+    try:
+        from related import related_for
+        items = related_for(brief, store._titles.values())
+    except Exception:
+        return
+    if items:
+        data["recommendations"] = [inj.search_item(b) for b in items]
 
 
 def _mark_extra(guid: str) -> dict:
