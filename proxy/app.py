@@ -2306,6 +2306,11 @@ async def lifespan(app: FastAPI):
         await t4_media.metadata.close()
         await app.state.up.aclose()
         await app.state.ext.aclose()
+        # 关闭前把防抖未落盘的在线资源缓存同步写一次（issue #42 异步落盘配套）
+        try:
+            await asyncio.to_thread(store.close)
+        except Exception:
+            pass
 
 
 async def _hot_worker(app: FastAPI):
@@ -2370,7 +2375,27 @@ def _diagnostic_query(request: Request) -> str:
 @app.middleware("http")
 async def _access(request: Request, call_next):
     started = time.monotonic()
-    resp = await call_next(request)
+    # 在线播放历史按飞牛账号分区（issue #5）：为本次请求设置当前用户上下文。
+    # fnusers 带 30s 缓存，识别失败/无 token 落到全局分区，行为同旧版。
+    # 前缀在上游四项之外另加 fork 自有读历史的两条路由（stream/list 续播、
+    # ext/continue 继续观看），否则这两处会读不到已分区用户的进度。
+    _hist_tokens = None
+    try:
+        if request.url.path.startswith(("/v/api/v1/play/", "/v/api/v1/item/",
+                                        "/v/api/v1/play", "/v/media/online",
+                                        "/v/api/v1/stream/list",
+                                        "/v/api/ext/continue")):
+            _u = fnusersmod.resolve(request)
+            if _u.get("known"):
+                _hist_tokens = histmod.set_current_user(
+                    _u.get("guid"), bool(_u.get("is_admin")))
+    except Exception:
+        _hist_tokens = None
+    try:
+        resp = await call_next(request)
+    finally:
+        if _hist_tokens is not None:
+            histmod.reset_current_user(_hist_tokens)
     p = request.url.path
     if "/api/" in p or p.startswith(ONLINE_PREFIX) or p.startswith("/v/media"):
         query = _diagnostic_query(request)
@@ -5338,7 +5363,10 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
     if inj.is_tv(brief):
         ep_guids = store.tv_episode_guids(guid, regular_only=True)
         if ep_guids:
-            target_eg, resume_ts = history.resume_episode(ep_guids)
+            # T4 远程剧集采用“回看最近交互”语义；普通 CMS 保持按集序续播
+            t4_rewatch = brief.get("locator", {}).get("kind") == "t4"
+            target_eg, resume_ts = history.resume_episode(
+                ep_guids, latest_interaction=t4_rewatch)
             if target_eg:
                 ep = store.get_episode(target_eg)
                 if ep:

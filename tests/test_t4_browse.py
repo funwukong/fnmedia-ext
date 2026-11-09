@@ -121,9 +121,9 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(managed["guid"], t4_browser.LIB_GUID)
         self.assertFalse(managed["enabled"])
 
-    async def test_t4_detail_flushes_synchronously_in_fork(self):
-        # fork 适配：本 fork 的 Store 没有 _schedule_flush（防抖写盘是
-        # 上游另一分支的机制）；replace_t4_detail 经 _flush_locked 同步落盘。
+    async def test_t4_detail_visible_after_replace(self):
+        # 移植注：自上游 v0.2.52 防抖落盘搬入后，replace_t4_detail 只做
+        # _schedule_flush（后台异步写），不再同步落盘；本用例只断言内存可见。
         title = t4.map_title({"vod_id": "flush", "vod_name": "Flush",
                               "vod_play_from": "A", "vod_play_url": "第1集$a1"},
                              self.source, detail=True)
