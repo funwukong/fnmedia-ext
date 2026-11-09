@@ -18,10 +18,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import json
 import re
+from pathlib import Path
 from urllib.parse import urljoin
 
 import httpx
@@ -669,4 +671,24 @@ async def load_fantaiying():
         except Exception as exc:  # noqa: BLE001
             last = exc
     raise RuntimeError(f"内置饭太硬订阅所有镜像均不可达：{last}")
+
+
+# 内置「轻量猫源」：随包的纯苹果CMS(type=1)订阅，无 jar/爬虫/网盘，零运行时。
+# 与饭太硬（重爬虫、依赖安卓运行时）互补，低配机器/lite 包也能直接用。
+_CAT_LITE_FILE = Path(__file__).resolve().parent / "assets" / "cat_lite.json"
+
+
+def load_cat_lite_sync() -> tuple[list, str, str, str]:
+    """同步读取随包轻量猫源配置。返回 (sites, spider, base, used)。"""
+    cfg = json.loads(_CAT_LITE_FILE.read_text(encoding="utf-8"))
+    sites = [s for s in (cfg.get("sites") or []) if isinstance(s, dict)]
+    return sites, str(cfg.get("spider") or ""), "", "builtin:cat_lite"
+
+
+async def load_cat_lite():
+    """加载内置「轻量猫源」（本地文件，不走网络，不依赖任何运行时）。
+
+    返回 (sites, spider, base, used_url)。
+    """
+    return await asyncio.to_thread(load_cat_lite_sync)
 
