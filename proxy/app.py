@@ -39,6 +39,11 @@ except Exception:  # noqa: BLE001
     BUILD_LABEL = "dev"
 import providers
 import sourcehealth
+# 上游 v0.2.68/69 移植：本片线路预测（linepredict）+ 榜单绑定持久化（chartbind）。
+# 冻结适配：预测线只作竞速优先种子，绝不替代竞速、不改写最快线记忆（见 _race_candidates /
+# _remember_fast）；持久化绑定只作起播种子，恢复后仍走竞速（见 _persist_chart_binding）。
+import linepredict
+import chartbind
 import t4
 from t4_service import T4Service
 from t4_media import T4Media
@@ -1923,6 +1928,106 @@ def chart_card(item: dict) -> dict:
     }
 
 
+def prewarm_persist_mode() -> bool:
+    """预热方式开关：
+    True  = 方案B 持久化（绑定结果落盘，重启直接恢复，少重新搜源）；
+    False = 方案A 实时（重启后启动任务现场 resolve，默认）。"""
+    return str(config.get().get("prewarm_mode", "realtime")) == "persist"
+
+
+def _persist_chart_binding(guid: str, bound: dict) -> None:
+    """方案B：把榜单绑定结果落盘（仅持久化模式）。失败静默，不影响播放。
+
+    落盘的绑定只作起播种子（让起播更快找到候选线），不绕过竞速：恢复后起播
+    仍走 _ensure_playable → _race_fastest 竞速流程。
+    """
+    try:
+        if prewarm_persist_mode() and guid and bound:
+            chartbind.bind_store.remember(guid, bound)
+    except Exception:
+        pass
+
+
+def _restore_chart_bindings() -> int:
+    """方案B：启动时从磁盘恢复榜单绑定到 store（返回恢复条数）。
+
+    过期绑定也恢复进内存（避免冷点），但播放链若发现死链仍会重新 resolve；
+    同时后台预热会对失效片刷新。
+    """
+    try:
+        if not prewarm_persist_mode():
+            return 0
+        restored = 0
+        for cat, _t, _g in chartmod.CHART_CATEGORIES:
+            for it in chart_cache.items(cat):
+                guid = it.get("guid")
+                if not guid or store.get_title_by_guid(guid):
+                    continue
+                brief = chartbind.bind_store.get(guid)
+                if not brief:
+                    continue
+                if not _chart_binding_matches(guid, brief):
+                    chartbind.bind_store.forget(guid)
+                    continue
+                b = dict(brief)
+                b["guid"] = guid  # 确保挂到榜单卡片 guid
+                try:
+                    store.remember_merged([b])
+                    restored += 1
+                except Exception:
+                    pass
+        return restored
+    except Exception:
+        return 0
+
+
+_CHART_VARIANT_SUFFIX_RE = re.compile(
+    r"^(?:(?:普通话|国语|粤语|英语|日语|韩语|中字|中英双字|中文字幕|"
+    r"hd|高清|超清|蓝光|完整版|未删减|正片)+)$", re.I)
+
+
+def _chart_title_rank(item: dict, brief: dict) -> int:
+    """榜单→资源站片名相关度：完整同名最优先，其次仅允许语言/清晰度后缀。
+    不能沿用任意包含匹配，否则《突如其来》会错绑《突如其来的假期》。（上游原样）"""
+    want = _norm_title(item.get("title", ""))
+    name = _norm_title(brief.get("title", ""))
+    if not want or not name:
+        return 99
+    want_year = str(item.get("year") or "")
+    brief_year = str(brief.get("year") or "")
+    if want_year and brief_year and want_year != brief_year:
+        return 99
+    if name == want:
+        return 0
+    if name.startswith(want):
+        suffix = name[len(want):]
+        if suffix and _CHART_VARIANT_SUFFIX_RE.fullmatch(suffix):
+            return 1
+    tokens = [_norm_title(t) for t in re.split(r"[\s]+", item.get("title", ""))
+              if _norm_title(t)]
+    if len(tokens) > 1 and all(tok in name for tok in tokens):
+        return 2
+    return 99
+
+
+def _chart_binding_matches(guid: str, brief: dict | None) -> bool:
+    item = chart_cache.get_guid(guid)
+    return bool(item and brief and _chart_title_rank(item, brief) < 99)
+
+
+def _drop_chart_binding(guid: str) -> None:
+    """废弃已落盘的错误榜单绑定，并同步清理内存播放索引。"""
+    try:
+        with store._lock:
+            store._titles.pop(guid, None)
+            store._orig.pop(guid, None)
+            store._dirty = True
+            store._rebuild_index()
+        chartbind.bind_store.forget(guid)
+    except Exception:
+        pass
+
+
 def start_resolve_chart(guid: str) -> asyncio.Future | None:
     """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。"""
     existing = store.get_title_by_guid(guid)
@@ -1966,6 +2071,7 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
                                   "rating": item.get("rating", 0)}
                 _chart_resolved[guid] = bound
                 store.remember_merged([bound])
+                _persist_chart_binding(guid, bound)
                 _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
                 _CHART_FAILED_TS.pop(guid, None)
             else:
@@ -2101,6 +2207,22 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
+
+    # 方案B（上游 v0.2.69 chartbind）：persist 模式下从磁盘恢复榜单绑定（线路），
+    # 重启后热门片无需重新全网搜源。恢复的绑定只作起播种子，起播仍走竞速。
+    # （fork 的 ChartCache 在 import 时已从 state/charts.json 读盘，无需再 load。）
+    try:
+        _n = _restore_chart_bindings()
+        if _n:
+            _log.info("chart bindings restored on startup: %d", _n)
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("chart binding restore failed: %s", exc)
+    # 方案B：同时恢复冠军线记忆（重启即秒播，不用现建播放清单）
+    try:
+        if prewarm_persist_mode():
+            linepredict.set_persist(True)
+    except Exception:  # noqa: BLE001
+        pass
 
     # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
     async def _health_flush_loop():
@@ -7174,17 +7296,34 @@ def _episode_key(picked: dict) -> str:
     return f'{picked.get("online_guid", "")}|{int(picked.get("index", 0) or 0)}'
 
 
-def _remember_fast(picked: dict, line: str) -> None:
+def _remember_fast(picked: dict, line: str, latency: float | None = None) -> None:
+    """记下竞速实测最快线（_LINE_FAST，turbo 实测结果为准）。
+
+    冻结：只有竞速胜者能写 _LINE_FAST；预测结果绝不写这里。
+    另把实测胜者同步给本片预测缓存（单向：turbo 实测 → linepredict，供下次
+    竞速作优先种子；linepredict 绝不反向写 _LINE_FAST）。
+    """
     if not line:
         return
     _LINE_FAST[_episode_key(picked)] = (time.time(), line)
     if len(_LINE_FAST) > 1000:
         for k in list(_LINE_FAST)[:500]:
             _LINE_FAST.pop(k, None)
+    try:
+        linepredict.remember(
+            _episode_key(picked), line,
+            float(latency) if latency is not None else 0.0)
+    except Exception:
+        pass
 
 
 def remembered_fast_line(picked: dict) -> str | None:
-    """该集上一次竞速选出的最快线（未过期、且当前未被标记为坏线）。"""
+    """该集上一次竞速选出的最快线（未过期、且当前未被标记为坏线）。
+
+    冻结：只读 turbo 竞速记忆 _LINE_FAST。刻意不搬上游的 linepredict.fastest
+    回落——预测线只能作竞速候选排序种子（见 _race_candidates），绝不能不经
+    竞速就被当作最快线复用。
+    """
     rec = _LINE_FAST.get(_episode_key(picked))
     if not rec:
         return None
@@ -7251,6 +7390,16 @@ def _race_candidates(picked: dict) -> list[dict]:
     cands = _episode_candidates(picked)
     default = store.best_line(picked.get("online_guid", ""))
     fast = remembered_fast_line(picked)
+    # 冻结适配（上游 linepredict 的降级形态）：预测线只作竞速优先种子——在吞吐
+    # 打分相同、且非上次竞速最快线时排前一位。竞速仍全量跑（first-success wins
+    # 不变），吞吐打分仍是第一排序键，预测线不进 _LINE_FAST、不替代竞速结果。
+    # 上游的 _predict_order_lines（预测线直接置顶）刻意不搬。
+    pred = None
+    try:
+        if bool(config.get().get("linepredict_enabled", True)):
+            pred = linepredict.fastest(_episode_key(picked))
+    except Exception:
+        pred = None
     cands = [c for c in cands if not _line_is_bad(c)] or cands
     try:
         n = int(config.get().get("line_fastest_max", 6))
@@ -7261,6 +7410,7 @@ def _race_candidates(picked: dict) -> list[dict]:
     def rank(c: dict) -> tuple:
         return (-round(_line_score(c), 1),           # 实测/先验吞吐高的线优先
                 c["line"] != fast if fast else True,
+                c["line"] != pred if pred else True,
                 c["line"] != default if default else True)
 
     cands.sort(key=rank)
@@ -7291,7 +7441,7 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
 
     async def finish(winner: dict, wlat: float, n_ok: int) -> dict:
         """选定胜者后：记最快线 + 预热改写后的播放列表（main 取流零额外抓取）。"""
-        _remember_fast(picked, winner["line"])
+        _remember_fast(picked, winner["line"], wlat)
         if re.search(r"\.m3u8(\?|$)", winner.get("url", "").split("?", 1)[0], re.I):
             mg = getattr(request.state, "_play_mg", "") if hasattr(request, "state") else ""
             if mg:
@@ -8733,6 +8883,7 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
+        "prewarm_mode",
         "update_proxy",
     }
     # >>> PRIVATE:CATVOD
@@ -8742,6 +8893,9 @@ async def ext_set_config(request: Request):
     allowed.update({"guard_zone_enabled", "guard_native_enabled"})
     # <<< PRIVATE:GUARD
     patch = {k: v for k, v in body.items() if k in allowed}
+    if "prewarm_mode" in patch:
+        # 只允许两种预热方式，非法值回退默认 realtime（方案A）
+        patch["prewarm_mode"] = "persist" if str(patch["prewarm_mode"]) == "persist" else "realtime"
     if "hot_library_title" in patch:
         patch["hot_library_title"] = str(patch["hot_library_title"]).strip()[:20] or HOT_DEFAULT_TITLE
     if "hot_limit" in patch:
@@ -8777,6 +8931,12 @@ async def ext_set_config(request: Request):
         patch["sources"] = list(cur.values())
     config.save(patch)
     _search_cache.clear()
+    # 方案B 开关切换：即时启用/停用冠军线记忆持久化
+    if "prewarm_mode" in patch:
+        try:
+            linepredict.set_persist(patch["prewarm_mode"] == "persist")
+        except Exception:
+            pass
     if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
         # 否则打开开关后扩展库卡要等下次路由过期才出现。
@@ -9660,6 +9820,48 @@ async def source_health_reset(request: Request):
     except Exception:
         body = {}
     sourcehealth.reset((body or {}).get("key"))
+    return JSONResponse({"code": 0})
+
+
+# ---------------- 本片线路预测（linepredict）：海报预热→本片最快线→秒播 ----------------
+# 上游 v0.2.68/69 移植。冻结适配：reset 只清预测缓存，不动 _LINE_FAST（turbo 最快线
+# 记忆）；状态里的 chart_bindings 为 chartbind 持久化绑定计数。
+@app.get("/v/api/ext/linepredict")
+async def linepredict_status():
+    """返回当前已预测的本片最快线数与在途预热数（调试/管理页用）。"""
+    return JSONResponse({"code": 0, "data": {
+        "remembered": linepredict.count(),
+        "inflight": linepredict.inflight_count(),
+        "recent": [dict(r, title=(store.get_title_by_guid(r.get("og", "")) or {}
+                                  ).get("title", r.get("og", "")[:12]))
+                   for r in linepredict.snapshot(40)],
+        "config": {
+            "enabled": bool(config.get().get("linepredict_enabled", True)),
+            "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
+            "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
+            "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
+            "chart_bindings": chartbind.bind_store.status()}}})
+
+
+@app.post("/v/api/ext/linepredict/config")
+async def linepredict_config(request: Request):
+    body = await request.json()
+    patch = {}
+    if "enabled" in body:
+        patch["linepredict_enabled"] = bool(body["enabled"])
+    if "max_lines" in body:
+        try:
+            patch["linepredict_max_lines"] = min(3, max(1, int(body["max_lines"])))
+        except (TypeError, ValueError):
+            pass
+    if patch:
+        config.save(patch)
+    return JSONResponse({"code": 0, "data": patch})
+
+
+@app.post("/v/api/ext/linepredict/reset")
+async def linepredict_reset():
+    linepredict.reset()
     return JSONResponse({"code": 0})
 
 

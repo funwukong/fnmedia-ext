@@ -116,6 +116,17 @@ DEFAULTS = {
     "line_fastest_timeout": 4.0,
     # 默认线（高质量源）领先优势（秒）：它在该优势内返回就算赢，避免无谓抖动
     "line_fastest_prefer": 0.25,
+    # —— 本片线路预测（linepredict）：浏览海报时对首屏影片的少数候选线做轻量探活，
+    # 预测出本片最快线并记忆，点播放零竞速秒播；取代旧的全局源测速 speedbench ——
+    # 是否在海报/搜索列表阶段对可见影片做轻量预热
+    "linepredict_enabled": True,
+    # 每张海报最多探测的候选线数（只探最可能起播的前几条，避免压源站）
+    "linepredict_max_lines": 3,
+    # 预热结果记忆时长（分钟）
+    "linepredict_ttl_min": 30,
+    # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
+    # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
+    "prewarm_mode": "realtime",
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
