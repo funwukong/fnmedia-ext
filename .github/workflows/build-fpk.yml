@@ -1,0 +1,88 @@
+name: build-fpk
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      public:
+        description: 同时产出公开构建(经 tools/public_strip.py 剥离私有特性)
+        type: boolean
+        default: false
+      publish:
+        description: 手动触发时也发布 Release(以 VERSION 文件建 tag)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FNPACK_URL: https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
+
+jobs:
+  full:
+    name: 完整构建(full)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 fnpack
+        run: |
+          mkdir -p .tools
+          curl -fsSL -o .tools/fnpack "$FNPACK_URL"
+          chmod +x .tools/fnpack
+
+      - name: 打包(完整构建)
+        run: bash packaging/fpk/build.sh --fnpack "$PWD/.tools/fnpack"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-full
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-v$(head -n1 VERSION | tr -d '[:space:]')}"
+          gh release create "$TAG" dist/* \
+            --title "fnmedia-ext ${TAG#v}" --generate-notes \
+            || gh release upload "$TAG" dist/* --clobber
+
+  public:
+    name: 公开构建(public)
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'push' || inputs.public == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 fnpack
+        run: |
+          mkdir -p .tools
+          curl -fsSL -o .tools/fnpack "$FNPACK_URL"
+          chmod +x .tools/fnpack
+
+      - name: 打包(公开构建,剥离私有特性)
+        run: bash packaging/fpk/build.sh --public --fnpack "$PWD/.tools/fnpack"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-public
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release(公开包)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-v$(head -n1 VERSION | tr -d '[:space:]')}"
+          gh release create "$TAG" dist/* \
+            --title "fnmedia-ext ${TAG#v}" --generate-notes \
+            || gh release upload "$TAG" dist/* --clobber
