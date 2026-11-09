@@ -83,6 +83,10 @@ DEFAULTS = {
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
     "ad_filter_dynamic": True,
+    # 红果短剧（HGDJ）伪媒体库：由本机 HGDJ 服务提供元数据/播放流，
+    # 插件仅充当客户端，本机服务缺省监听 127.0.0.1:18098。
+    "hgdj_enabled": False,
+    "hgdj_url": "http://127.0.0.1:18098",
 }
 
 # 已废弃、需从旧配置里清除的键
