@@ -391,7 +391,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
       <div class="card">
         <div class="card-title">📡 T4 远程源 <span class="badge" id="t4Count"></span></div>
-        <div class="hint">导入订阅时识别到的 type=4 远程源。当前版本（v0.2.39）未接入 T4 协议：只显示，不能搜不能播；想用它需要把上游 v0.2.66 的 T4 支持移植过来。重新导入含 T4 的订阅会自动追加到这里。</div>
+        <div class="hint">导入订阅时识别到的 type=4 远程源，已接入 T4 协议：在「T4 选片」媒体库中可搜可播。重新导入含 T4 的订阅会自动追加到这里；T4 源统一走选片库，不设独立媒体库。</div>
         <div id="t4Rows" style="margin-top:8px"><div class="muted sm">暂无 T4 源：去「导入订阅」导一次含 type=4 的订阅。</div></div>
       </div>
 
@@ -780,7 +780,10 @@ const FEAT_DDUO=true,FEAT_ADULT=true;
 function toast(m,kind){const t=$("toast");t.textContent=m;t.className="show "+(kind==="fail"?"fail":"ok");
   clearTimeout(window._tt);window._tt=setTimeout(()=>t.className="",2200);}
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
-async function jget(p){const r=await fetch(p);if(!r.ok)throw new Error(p+" "+r.status);return r.json();}
+async function jget(p,timeoutMs){const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(),timeoutMs||15000);
+  try{const r=await fetch(p,{signal:ctrl.signal});if(!r.ok)throw new Error(p+" "+r.status);return r.json();}
+  finally{clearTimeout(t);}}
 async function jpost(p,b){const r=await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},
   body:JSON.stringify(b||{})});return r.json();}
 
@@ -1240,11 +1243,11 @@ function renderSources(){
     tr.querySelector("[data-test]").addEventListener("click",()=>testOne(id,tr));
     tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
   });
-  // T4 远程源清单（导入订阅时持久化到配置，当前版本只显示、不接入）
-  const t4=CFG.t4_sources||[];
+  // T4 远程源清单（已接入：进 sources 且 kind=t4，在 T4 选片库中可搜可播）
+  const t4=(CFG.sources||[]).filter(s=>s.kind==="t4");
   $("t4Count").textContent=t4.length?(t4.length+" 个"):"";
   $("t4Rows").innerHTML=t4.length?t4.map(x=>{
-    const bad=x.invalid?'<span class="tag warn">地址无效</span>':'<span class="tag warn">T4·未接入</span>';
+    const bad=x.invalid?'<span class="tag warn">地址无效</span>':'<span class="tag">T4</span>';
     return `<div class="subrow"><span><b>${esc(x.name||x.api||"")}</b><br><span class="meta">${esc(x.api||"")}</span></span>${bad}</div>`;
   }).join(""):'<div class="muted sm">暂无 T4 源：去「导入订阅」导一次含 type=4 的订阅。</div>';
 }
@@ -1530,15 +1533,6 @@ function renderSubResult(d){
     h+='<div class="muted sm" style="padding:4px 2px">脚本若 401/下载失败，可在下方「已导入的远程 JS 爬虫」处重试。</div></div>';
   }
   if(dr && dr.error){h+='<div class="hint" style="color:var(--danger)">远程JS导入失败：'+esc(dr.error)+'</div>';}
-  // T4 远程源：只收录展示，本版本未接入 T4 协议（不能搜不能播）
-  const t4=d.t4||{};
-  if(t4 && (t4.items||[]).length){
-    h+='<div class="subgrp"><div class="subgrp-t">📡 T4 远程源　'+t4.items.length+' 个（仅展示，当前版本未接入 T4 协议，不能搜不能播）</div>';
-    t4.items.forEach(it=>{
-      h+='<div class="subrow"><span>'+esc(it.name||it.api)+'</span><span class="tag warn">T4·未接入</span></div>';
-    });
-    h+='<div class="muted sm" style="padding:4px 2px">T4 选片库是上游 v0.2.66 起的新功能（服务端解析），本 fork v0.2.39 还没有；想用它需要把上游 T4 支持移植过来。</div></div>';
-  }
   // 跳过
   if(skips.length){
     h+='<details class="subgrp" style="margin-top:8px"><summary class="subgrp-t" style="cursor:pointer">⏭️ 跳过 '+ (d.skipped||skips.length) +' 个（网盘/直播/无法识别/探测失败）</summary>';
@@ -2168,7 +2162,16 @@ async function loadStatus(){
   PRIO=STATUS.source_priority||{};
 }
 async function init(){
-  await loadStatus();
+  // 首个请求若在插件重启窗口内发出可能一直挂起（旧版无超时、无重试，
+  // 页面会永远停在“检测中…”）：15 秒超时，失败重试 3 次，仍失败才报未接管。
+  let lastErr=null;
+  for(let i=0;i<3;i++){
+    try{await loadStatus();lastErr=null;break;}
+    catch(e){lastErr=e;const gs=$("globalState");
+      gs.textContent="检测中…（重试 "+(i+1)+"/3）";
+      await new Promise(r=>setTimeout(r,1000));}
+  }
+  if(lastErr)throw lastErr;
   KWS=Array.isArray(CFG.junk_keywords)?CFG.junk_keywords.slice():[];
   $("maxn").value=CFG.max_per_keyword;
   $("junk").checked=CFG.filter_junk;
