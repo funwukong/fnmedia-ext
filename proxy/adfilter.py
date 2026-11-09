@@ -30,6 +30,19 @@ _STATE_DIR = Path(__file__).resolve().parent.parent / "state"
 _RULES_FILE = _STATE_DIR / "ad_rules.json"   # 订阅合并来的去广告规则
 _ENABLE_KEY = "ad_filter_enabled"            # 总开关存 config.json
 
+# 片源方标注的固定广告时长（秒）。DISCONTINUITY 分组后，若主体媒体块 >= MIN_MAIN_DUR
+# 且某非主体块总时长命中任一固定广告时长（容差 0.05s），则整块剔除（不拆分片）。
+KNOWN_AD_DURS = {5.48, 5.32, 4.00, 0.56, 3.36, 5.0, 4.5}
+_AD_TOL = 0.05
+MIN_MAIN_DUR = 60.0
+
+# 源站图床 -> CDN 镜像（绕防盗链）。图片 URL 含 dom 则替换成 cdn。
+HOSTS_MIRROR = [
+    ("img1.wsyzy.org", "fan.cloudflare.182682.xyz"),
+    ("fiizvfck.top", "fan.cloudflare.182682.xyz"),
+    ("images.67c6c7a.com", "fan.cloudflare.182682.xyz"),
+]
+
 _lock = threading.RLock()
 
 # ---- 内置启发式 ----------------------------------------------------------
@@ -382,6 +395,12 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
         has_kw = any(kw in url_blob for kw in _AD_URL_HINTS)
         if has_kw:
             score += 3
+
+        # aimimang 同款：片源方标注的固定广告时长。若主体块够长且某非主体块
+        # 总时长命中 KNOWN_AD_DURS（容差 0.05s），整块剔除。
+        if main_dur_med >= MIN_MAIN_DUR and any(abs(total - v) < _AD_TOL
+                                                for v in KNOWN_AD_DURS):
+            score += 5
 
         if (has_kw and _ad_like_duration(total)) or score >= 4:
             drop.update(blk)
