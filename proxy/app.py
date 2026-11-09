@@ -8010,21 +8010,70 @@ def _decode_poster_tok(tok: str) -> tuple[str, str, int | None]:
     return url, pan_label, grade
 
 
+# 海报占位图（JPEG，150x225 渐变 + 播放标）：App/TV 原生图片加载器解不了 SVG，
+# 旧的 SVG fallback 在 App 端会显示为空白；改成光栅 JPEG 后失败时至少能看到占位。
+_POSTER_FALLBACK_JPEG_B64 = (
+    "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"
+)
+
+
 def _poster_fallback() -> Response:
+    """海报抓取失败时的占位图：返回 JPEG（非 SVG）。
+
+    旧版返回 SVG；浏览器能渲染，但 App/TV 原生图片加载器解不了 SVG，
+    失败时 App 端直接显示空白。JPEG 各端都能解，至少能看到占位图。
+    """
+    try:
+        import base64 as _b64
+        data = _b64.b64decode(_POSTER_FALLBACK_JPEG_B64)
+        if data[:2] == b"\xff\xd8":
+            return Response(data, media_type="image/jpeg",
+                            headers={"Cache-Control": "max-age=3600"})
+    except Exception:  # noqa: BLE001
+        pass
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
-  <defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-    <stop offset="0" stop-color="#1f6feb"/><stop offset="1" stop-color="#7c3aed"/>
-  </linearGradient></defs>
-  <rect width="300" height="450" fill="url(#g)"/>
+  <rect width="300" height="450" fill="#1f6feb"/>
   <circle cx="150" cy="180" r="58" fill="rgba(255,255,255,.18)"/>
   <polygon points="132,145 132,215 192,180" fill="#fff" opacity=".92"/>
   <text x="150" y="285" text-anchor="middle" fill="#fff" font-family="sans-serif"
     font-size="26" font-weight="700">在线影视</text>
-  <text x="150" y="322" text-anchor="middle" fill="rgba(255,255,255,.72)"
-    font-family="sans-serif" font-size="15">fnmedia-ext</text>
 </svg>"""
     return Response(svg, media_type="image/svg+xml; charset=utf-8",
                     headers={"Cache-Control": "max-age=3600"})
+
+
+def _poster_fetch_headers(url: str) -> dict:
+    """海报上游抓取请求头：UA + 豆瓣 Referer（其余图床不带 Referer）。"""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    host = urllib.parse.urlsplit(url).netloc.lower()
+    # 豆瓣图床需要带豆瓣 Referer，否则可能 403
+    if host.endswith("doubanio.com") or host.endswith("douban.com") or \
+            host.endswith("doubanio.viki.moe"):
+        headers["Referer"] = "https://movie.douban.com/"
+    return headers
+
+
+async def _poster_upstream_get(request: Request, url: str):
+    """带重试抓一张上游海报；返回 httpx 响应，网络失败返回 None。
+
+    先用常规头重试 3 次；若返回 403（图床防盗链），再带图床自身 origin
+    作 Referer 重试一次——多数防盗链只认同源 Referer。
+    """
+    try:
+        r = await ext_get_retry(request, url,
+                                headers=_poster_fetch_headers(url))
+    except Exception:  # noqa: BLE001
+        return None
+    if r is not None and r.status_code == 403:
+        host = urllib.parse.urlsplit(url).netloc.lower()
+        scheme = urllib.parse.urlsplit(url).scheme or "https"
+        headers = _poster_fetch_headers(url)
+        headers["Referer"] = f"{scheme}://{host}/"
+        try:
+            r = await ext_get_retry(request, url, headers=headers)
+        except Exception:  # noqa: BLE001
+            return None
+    return r
 
 
 async def _serve_online_poster(tok_path: str, request: Request) -> Response:
@@ -8040,7 +8089,6 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     if not u.startswith("http"):
         return _poster_fallback()
     want_badge = bool(pan_label) or health_grade is not None
-    headers = {"User-Agent": "Mozilla/5.0"}
     host = urllib.parse.urlsplit(u).netloc.lower()
     # aimimang 同款：源站图床 → CDN 镜像（绕防盗链）
     for dom, cdn in adfilter_mod.HOSTS_MIRROR:
@@ -8048,27 +8096,26 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
             u = u.replace("://" + dom, "://" + cdn, 1)
             host = cdn
             break
-    # 豆瓣图床需要带豆瓣 Referer，否则可能 403
-    if host.endswith("doubanio.com") or host.endswith("douban.com") or \
-            host.endswith("doubanio.viki.moe"):
-        headers["Referer"] = "https://movie.douban.com/"
     cached = _poster_cache_read(u)
     if cached:
         content, ctype = cached, (_sniff_image(cached[:12]) or "image/jpeg")
     else:
-        try:
-            r = await ext_client(request).get(u, headers=headers)
-            ctype = (r.headers.get("content-type") or "").lower()
-            if r.status_code != 200 or not r.content:
-                return _poster_fallback()
-            sniff = _sniff_image(r.content[:12])
-            if not (ctype.startswith("image/") or sniff):
-                return _poster_fallback()
-            ctype = ctype if ctype.startswith("image/") else sniff
-            content = r.content
-            _poster_cache_write(u, content)
-        except Exception:
+        r = await _poster_upstream_get(request, u)
+        if r is None:
+            _log.warning("海报抓取失败 host=%s：上游无响应", host)
             return _poster_fallback()
+        ctype = (r.headers.get("content-type") or "").lower()
+        if r.status_code != 200 or not r.content:
+            _log.warning("海报抓取失败 host=%s status=%s", host, r.status_code)
+            return _poster_fallback()
+        sniff = _sniff_image(r.content[:12])
+        if not (ctype.startswith("image/") or sniff):
+            _log.warning("海报抓取失败 host=%s：非图片内容 type=%s",
+                         host, ctype[:40])
+            return _poster_fallback()
+        ctype = ctype if ctype.startswith("image/") else sniff
+        content = r.content
+        _poster_cache_write(u, content)
 
     # 在海报上烧角标（网盘资源 / 源健康点）。GIF 不动，合成失败回退原图。
     out_bytes, out_type = content, (ctype or "image/jpeg")
@@ -8077,7 +8124,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
             import posterbadge
             if posterbadge.available():
                 badged = await asyncio.to_thread(
-                    posterbadge.badge, r.content, pan_label, health_grade)
+                    posterbadge.badge, content, pan_label, health_grade)
                 if badged:
                     out_bytes, out_type = badged, "image/jpeg"
         except Exception:  # noqa: BLE001
@@ -8151,7 +8198,7 @@ def _poster_cache_gc() -> None:
 
 
 async def _prefetch_posters(urls: list, concurrency: int = 4) -> int:
-    """后台把海报抓进磁盘缓存：避免 App 一次拉几十张时直连豆瓣过慢显示空白。"""
+    """后台把海报抓进磁盘缓存：避免 App 一次拉几十张时直连图床过慢显示空白。"""
     sem = asyncio.Semaphore(concurrency)
     done = 0
 
@@ -8161,10 +8208,8 @@ async def _prefetch_posters(urls: list, concurrency: int = 4) -> int:
             return
         async with sem:
             try:
-                hd = {"User-Agent": "Mozilla/5.0"}
-                if "douban" in u:
-                    hd["Referer"] = "https://movie.douban.com/"
-                r = await app.state.ext.get(u, headers=hd, timeout=20)
+                r = await app.state.ext.get(
+                    u, headers=_poster_fetch_headers(u), timeout=20)
                 if r.status_code == 200 and r.content:
                     _poster_cache_write(u, r.content)
                     done += 1
@@ -8175,6 +8220,33 @@ async def _prefetch_posters(urls: list, concurrency: int = 4) -> int:
     return done
 
 
+async def _prefetch_poster_urls() -> list[str]:
+    """本轮要预热的海报原地址（去重、仅 http）：榜单四库 + 海量分类库。
+
+    榜单只预热过豆瓣图床，海量分类（热门短剧等）从没预热过——App 打开
+    这些库时几十张海报同时现抓图床，慢源一抖就全白；先在后台低并发抓
+    进磁盘缓存，App 再打开就直接命中缓存。
+    """
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def _add(u: str):
+        if isinstance(u, str) and u.startswith("http") and u not in seen:
+            seen.add(u)
+            urls.append(u)
+
+    for cat, _t, _c in chartmod.CHART_CATEGORIES:
+        for it in chart_cache.items(cat)[:120]:
+            _add(it.get("cover") or "")
+    if catalog_enabled():
+        for cat, _t, _c in catalogmod.CATALOG_CATEGORIES:
+            if not catalog.available(cat):
+                continue
+            for p in catalog.cached_page_posters(cat, 40):
+                _add(p)
+    return urls
+
+
 async def _poster_prefetch_loop() -> None:
     await asyncio.sleep(20)
     while True:
@@ -8183,12 +8255,7 @@ async def _poster_prefetch_loop() -> None:
         except Exception:
             pass
         try:
-            urls = []
-            for cat, _t, _c in chartmod.CHART_CATEGORIES:
-                for it in chart_cache.items(cat)[:120]:
-                    c = it.get("cover") or ""
-                    if c.startswith("http"):
-                        urls.append(c)
+            urls = await _prefetch_poster_urls()
             if urls:
                 await _prefetch_posters(urls)
         except Exception:
