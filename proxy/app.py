@@ -35,6 +35,7 @@ import providers
 import sourcehealth
 import client as clientmod
 import live as livemod
+import iptv as iptvmod
 import inject as inj
 import config as cfgmod
 import adfilter as adfilter_mod
@@ -188,6 +189,15 @@ def standalone_source_of(lib_guid: str) -> str | None:
 # 分支与 play_play 用。
 def hgdj_enabled() -> bool:
     return hgdjmod.enabled()
+
+
+# —— 电视直播（IPTV）虚拟库：内置聚合 + 自定义订阅，频道测活，HLS 代理 ——
+# guid 形态与反解全部在 iptv 模块（fnmedia-live:*/fnmedia-livemg:*）。
+def live_enabled() -> bool:
+    try:
+        return iptvmod.enabled() and iptvmod.total_channels() > 0
+    except Exception:  # noqa: BLE001
+        return False
 
 
 
@@ -1806,7 +1816,7 @@ def catalog_enabled() -> bool:
 
 
 def any_virtual_lib_enabled() -> bool:
-    if charts_enabled() or catalog_enabled() or hgdj_enabled():
+    if charts_enabled() or catalog_enabled() or hgdj_enabled() or live_enabled():
         return True
     # >>> PRIVATE:GUARD
     try:
@@ -2072,6 +2082,9 @@ async def lifespan(app: FastAPI):
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
 
+    # 电视直播：订阅解析 + 频道测活后台循环（绝不阻塞浏览接口）
+    app.state.iptv_task = asyncio.create_task(iptvmod.worker(app.state.ext))
+
     # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
     async def _health_flush_loop():
         while True:
@@ -2136,6 +2149,10 @@ async def lifespan(app: FastAPI):
         # <<< PRIVATE:GUARD
         try:
             await app.state.hot_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        try:
+            await app.state.iptv_task
         except (asyncio.CancelledError, Exception):
             pass
         try:
@@ -3003,6 +3020,8 @@ async def mediadb_list(request: Request):
     dbs = payload.get("data") if payload else None
     vlib_guids = (set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
                   | {standalone_lib_guid(s["id"]) for s in config.all_sources()})
+    if live_enabled():
+        vlib_guids.add(iptvmod.lib_guid())
     # >>> PRIVATE:GUARD
     if features.GUARD:
         vlib_guids |= {guard_lib_guid(g["conf"]["key"]) for g in guard_libs_active()}
@@ -3197,6 +3216,21 @@ async def mediadb_list(request: Request):
                 "refresh_disabled": True,
             })
 
+        # —— 电视直播（IPTV）库：频道解析缓存就绪时展示；封面用台标。
+        if live_enabled():
+            try:
+                ps = [inj._poster(p) for p in iptvmod.lib_posters(8)]
+                inserts.append({
+                    "guid": iptvmod.lib_guid(),
+                    "title": "📺 电视直播",
+                    "poster": ps[0] if ps else "",
+                    "posters": ps,
+                    "category": "Mix", "view_type": 0, "poster_type": 0,
+                    "refresh_disabled": True,
+                })
+            except Exception:  # noqa: BLE001
+                pass
+
         # —— 置顶控制 ——
         # 置顶库（pinned_libs）插到列表最前并给较大 sort_num；未置顶的虚拟库仍排在
         # 官方本地库之前，但置于置顶组之后。客户端按返回顺序/ sort_num 展示。
@@ -3297,6 +3331,23 @@ async def mdb_detail(guid: str, request: Request):
             "include_adult": False, "subtitle_lan": "zh-CN",
             "poster": covers[0] if covers else "",
             "poster_type": 0, "posters": covers,
+            "view_type": 0, "last_update_time": 0, "sort_num": 0,
+            "auto_progress_thumb": 0, "skip_filesize": 0,
+            "prefer_local_nfo": 0, "refresh_disabled": True,
+        }
+        return JSONResponse({"code": 0, "msg": "", "data": payload})
+
+    # 电视直播（IPTV）库
+    if guid == iptvmod.lib_guid() and live_enabled():
+        try:
+            ps = [inj._poster(p) for p in iptvmod.lib_posters(8)]
+        except Exception:  # noqa: BLE001
+            ps = []
+        payload = {
+            "guid": guid, "name": "📺 电视直播", "category": "Mix",
+            "dir_list": [], "lan": "zh-CN", "auto_scrap_subtitle": 0,
+            "include_adult": False, "subtitle_lan": "zh-CN",
+            "poster": ps[0] if ps else "", "poster_type": 0, "posters": ps,
             "view_type": 0, "last_update_time": 0, "sort_num": 0,
             "auto_progress_thumb": 0, "skip_filesize": 0,
             "prefer_local_nfo": 0, "refresh_disabled": True,
@@ -3478,6 +3529,15 @@ async def mediadb_sum(request: Request):
         if n:
             payload["data"][hgdjmod.lib_guid()] = n
             total_added += n
+    # 电视直播库计数（频道数）
+    if live_enabled():
+        try:
+            n = iptvmod.total_channels()
+            if n:
+                payload["data"][iptvmod.lib_guid()] = n
+                total_added += n
+        except Exception:  # noqa: BLE001
+            pass
     if total_added:
         payload["data"]["total"] = int(payload["data"].get("total", 0)) + total_added
     return JSONResponse(payload)
@@ -3934,6 +3994,73 @@ async def item_list(request: Request):
             "top_dir": "", "dir": "", "total": total_n, "list": rows,
             "jump_list": None}})
 
+    # —— 电视直播（IPTV）：库根 → 分类文件夹；分类 → 频道海报墙 ——
+    # 只读解析缓存与测活结果，绝不联网，浏览接口零等待。
+    if live_enabled():
+        _live_parent = str(body.get("parent_guid") or body.get("dir") or "")
+        _live_group = None
+        for _g in (_live_parent, aguid):
+            _live_group = iptvmod.cat_guid_group(_g or "")
+            if _live_group is not None:
+                break
+        if _live_group is not None:
+            # 分类内频道墙（同名频道已合并，多线路在 stream/list 里选）
+            _chs = iptvmod.groups_of(iptvmod.channels_cached()).get(
+                _live_group) or []
+            _page = max(1, int(body.get("page") or body.get("page_index") or 1))
+            _psize = max(1, min(int(body.get("page_size") or 60), 100))
+            _off = (int(body["offset"]) if body.get("offset") is not None
+                    else (_page - 1) * _psize)
+            _off = max(0, min(_off, len(_chs)))
+            _win = _chs[_off:_off + _psize]
+            _cg = iptvmod.cat_guid(_live_group)
+            rows = []
+            for ch in _win:
+                chash = iptvmod.ch_hash(ch["key"])
+                row = inj._base_item(
+                    guid=iptvmod.ch_guid(ch["key"]), type="Movie",
+                    title=ch["n"], can_play=1,
+                    poster=inj._poster(ch.get("logo") or ""),
+                    parent_guid=_cg, parent_title=_live_group,
+                    ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
+                    ancestor_category="Mix", season_number=0, episode_number=0,
+                    number_of_seasons=0, number_of_episodes=max(1, len(ch["urls"])),
+                    file_name=ch["n"])
+                row["media_guid"] = iptvmod.media_guid_of(chash, 0)
+                row["video_guid"] = iptvmod.video_guid_of(chash, 0)
+                _apply_marks(row)
+                rows.append(row)
+            rows = clientmod.normalize_cards(rows, client)
+            return JSONResponse({"code": 0, "msg": "", "data": {
+                "mdb_name": _live_group, "mdb_category": "Mix", "top_dir": "",
+                "dir": _cg, "total": len(_chs), "list": rows,
+                "jump_list": None}})
+        if aguid == iptvmod.lib_guid():
+            # 库根：每个分组一个可下钻文件夹
+            _groups = iptvmod.groups_of(iptvmod.channels_cached())
+            rows = []
+            for gname in sorted(_groups.keys(), key=lambda s: "\\uffff" if s == "其他" else s):
+                chs = _groups[gname]
+                poster = ""
+                for ch in chs:
+                    if ch.get("logo"):
+                        poster = inj._poster(ch["logo"])
+                        break
+                row = inj._base_item(
+                    guid=iptvmod.cat_guid(gname), type="Directory",
+                    title="📡 " + gname, can_play=0, poster=poster,
+                    ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
+                    ancestor_category="Mix", number_of_episodes=len(chs),
+                    local_number_of_episodes=len(chs))
+                row["parent_guid"] = ""
+                row["overview"] = f"{len(chs)} 个频道"
+                rows.append(row)
+            rows = clientmod.normalize_cards(rows, client)
+            return JSONResponse({"code": 0, "msg": "", "data": {
+                "mdb_name": "📺 电视直播", "mdb_category": "Mix",
+                "top_dir": "", "dir": "", "total": len(rows), "list": rows,
+                "jump_list": None}})
+
     # —— 单源独立媒体库：该源四类交错成一条最近更新流 ——
     sscope = standalone_source_of(aguid) if aguid else None
     if sscope is not None and \
@@ -4105,6 +4232,26 @@ async def item_detail(guid: str, request: Request):
         data["play_item_guid"] = ""
         data["play_error"] = ""
         return JSONResponse({"code": 0, "msg": "", "data": data})
+    # 电视直播频道详情
+    if live_enabled():
+        ch = iptvmod.ch_by_guid(guid)
+        if ch:
+            chash = iptvmod.ch_hash(ch["key"])
+            srcs = sorted({(u.get("src") or "") for u in ch["urls"]})
+            data = inj._base_item(
+                guid=guid, type="Movie", title=ch["n"], can_play=1,
+                poster=inj._poster(ch.get("logo") or ""),
+                parent_guid=iptvmod.cat_guid(ch.get("g") or "其他"),
+                parent_title=ch.get("g") or "其他",
+                ancestor_guid=iptvmod.lib_guid(), ancestor_name="📺 电视直播",
+                ancestor_category="Mix", season_number=0, episode_number=0,
+                number_of_seasons=0, number_of_episodes=max(1, len(ch["urls"])),
+                file_name=ch["n"])
+            data["media_guid"] = iptvmod.media_guid_of(chash, 0)
+            data["video_guid"] = iptvmod.video_guid_of(chash, 0)
+            data["overview"] = (f"{len(ch['urls'])} 条线路 · "
+                                + ("来源：" + "、".join(srcs[:4]) if srcs else "内置聚合"))
+            return JSONResponse({"code": 0, "msg": "", "data": data})
     # TVBox 加固源专区库根节点
     # >>> PRIVATE:GUARD
     if features.GUARD:
@@ -4490,6 +4637,65 @@ async def stream_list(guid: str, request: Request):
             sl["qualities"] = quals
             sl["cloud_storage_info"] = None
         return JSONResponse({"code": 0, "msg": "", "data": sl})
+    # 电视直播频道：每条线路一个 video_stream，默认线路 0
+    if live_enabled():
+        ch = iptvmod.ch_by_guid(guid)
+        if ch:
+            chash = iptvmod.ch_hash(ch["key"])
+            urls = iptvmod.alive_urls(ch)
+            mg0 = iptvmod.media_guid_of(chash, 0)
+            vg0 = iptvmod.video_guid_of(chash, 0)
+            streams = []
+            for i, u in enumerate(urls):
+                streams.append({
+                    "media_guid": iptvmod.media_guid_of(chash, i),
+                    "title": u.get("src") or f"线路{i + 1}", "guid": iptvmod.video_guid_of(chash, i),
+                    "resolution_type": "1080p", "color_range_type": "SDR",
+                    "codec_name": "h264", "codec_type": "video",
+                    "color_range": "tv", "profile": "High", "index": i,
+                    "width": 1920, "height": 1080, "coded_width": 0,
+                    "coded_height": 0, "display_aspect_ratio": "16:9",
+                    "pix_fmt": "yuv420p", "level": "40", "color_space": "",
+                    "color_transfers": "", "color_primaries": "",
+                    "duration": 0, "dv_profile": 0, "refs": 1,
+                    "r_frame_rate": "25 fps", "avg_frame_rate": "25 fps",
+                    "bits_per_raw_sample": "8", "bps": 0, "progressive": 1,
+                    "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
+                    "update_time": 0, "rotation": 0, "ext1": 0,
+                    "is_bluray": False,
+                })
+            if not streams:
+                streams.append({
+                    "media_guid": mg0, "title": ch["n"], "guid": vg0,
+                    "resolution_type": "1080p", "color_range_type": "SDR",
+                    "codec_name": "h264", "codec_type": "video",
+                    "color_range": "tv", "profile": "High", "index": 0,
+                    "width": 1920, "height": 1080, "coded_width": 0,
+                    "coded_height": 0, "display_aspect_ratio": "16:9",
+                    "pix_fmt": "yuv420p", "level": "40", "color_space": "",
+                    "color_transfers": "", "color_primaries": "",
+                    "duration": 0, "dv_profile": 0, "refs": 1,
+                    "r_frame_rate": "25 fps", "avg_frame_rate": "25 fps",
+                    "bits_per_raw_sample": "8", "bps": 0, "progressive": 1,
+                    "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
+                    "update_time": 0, "rotation": 0, "ext1": 0,
+                    "is_bluray": False,
+                })
+            sl = {
+                "files": [{
+                    "guid": mg0, "path": f"直播/{ch['n']}.m3u8",
+                    "file_name": f"{ch['n']}.m3u8",
+                    "size": 0, "timestamp": 0, "type": 1, "sort_num": 0,
+                    "can_play": 1, "play_error": "", "create_time": 0,
+                    "update_time": 0, "parent_fv_guid": "",
+                    "progress_thumb_hash_dir": "",
+                }],
+                "video_streams": streams,
+                "audio_streams": [], "subtitle_streams": [],
+                "play_link": f"{iptvmod.PROXY_BASE}/{chash}/0/index.m3u8",
+                "qualities": [], "cloud_storage_info": None,
+            }
+            return JSONResponse({"code": 0, "msg": "", "data": sl})
     ep = store.get_episode(guid)
     target = None
     if ep:
@@ -4565,6 +4771,8 @@ def _is_online_item_guid(guid: str) -> bool:
     if hgdj_enabled() and hgdjmod.is_hgdj_series(guid):
         return True
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        return True
+    if iptvmod.is_live_mg(guid):
         return True
     if (guid in CATALOG_GUID_CAT or guid in CHART_GUID_CAT or is_hot_guid(guid)
             or standalone_source_of(guid) is not None):
@@ -4771,9 +4979,34 @@ async def play_info(request: Request):
             return JSONResponse({"code": 0, "msg": "", "data": xinfo})
     # <<< PRIVATE:CATVOD
 
-    # 电视直播频道：play_link 直指本插件 HLS 代理（App/TV 端再经 media/range 302）
-
-    # <<< PRIVATE:CATVOD
+    # 电视直播频道：play_link 直指本插件 HLS 代理
+    if live_enabled() and guid:
+        ch = iptvmod.ch_by_guid(guid)
+        if ch:
+            chash = iptvmod.ch_hash(ch["key"])
+            mg = iptvmod.media_guid_of(chash, 0)
+            info = {
+                "grand_guid": "", "guid": guid,
+                "parent_guid": iptvmod.cat_guid(ch.get("g") or "其他"),
+                "play_config": None, "ts": 0, "type": "Movie",
+                "video_guid": iptvmod.video_guid_of(chash, 0),
+                "audio_guid": "", "subtitle_guid": "",
+                "media_guid": mg,
+                "play_link": f"{iptvmod.PROXY_BASE}/{chash}/0/index.m3u8",
+                "item": {
+                    "guid": guid, "type": "Movie", "title": ch["n"],
+                    "can_play": 1, "play_error": "",
+                    "season_number": 0, "episode_number": 0,
+                    "parent_guid": "",
+                    "posters": inj._poster(ch.get("logo") or ""),
+                    "backdrops": inj._poster(ch.get("logo") or ""),
+                    "number_of_episodes": max(1, len(ch["urls"])),
+                    "number_of_seasons": 0,
+                },
+                "direct_link_audio_index": -1,
+            }
+            return JSONResponse({"code": 0, "msg": "",
+                                 "data": clientmod.normalize_detail(info, client)})
 
     def _prewarm_from_info(info: dict):
         """点击播放即后台预热默认线路的播放列表，缩短首帧等待。"""
@@ -4994,6 +5227,13 @@ async def media_range(mg: str, request: Request):
             return RedirectResponse(_xlib_play_link(sg, idx), status_code=302,
                                     headers={"Cache-Control": "no-store"})
     # <<< PRIVATE:CATVOD
+    # 电视直播：fnmedia-livemg:<chash>:<idx> 直接反解，302 到本插件 HLS 代理
+    _live_mg = iptvmod.parse_media_guid(mg)
+    if _live_mg:
+        chash, idx = _live_mg
+        return RedirectResponse(
+            f"{iptvmod.PROXY_BASE}/{chash}/{idx}/index.m3u8",
+            status_code=302, headers={"Cache-Control": "no-store"})
     target = store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
     if not target and chart_g:
@@ -5015,6 +5255,31 @@ async def media_range(mg: str, request: Request):
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+
+
+# ------------------------------------------------------- 电视直播（IPTV）HLS 代理
+@app.get(f"{iptvmod.PROXY_BASE}/{{chash}}/{{idx}}/index.m3u8")
+async def live_playlist(chash: str, idx: int, request: Request):
+    """拉源清单并把分片改写为本地 seg 端点。"""
+    body = await iptvmod.proxy_playlist(request.app.state.ext, chash, idx)
+    if body is None:
+        return JSONResponse({"code": -1, "msg": "频道不可用", "data": None},
+                            status_code=404)
+    return Response(body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store"})
+
+
+@app.get(f"{iptvmod.PROXY_BASE}/{{chash}}/{{idx}}/seg")
+async def live_segment(chash: str, idx: int, request: Request):
+    """分片/KEY/直连流：流式直通（带该线路 UA/Referer）。"""
+    u = request.query_params.get("u", "")
+    range_h = request.headers.get("range", "")
+    resp = await iptvmod.proxy_segment(request.app.state.ext, chash, idx, u,
+                                       range_h)
+    if resp is None:
+        return JSONResponse({"code": -1, "msg": "分片不可用", "data": None},
+                            status_code=404)
+    return resp
 
 
 def _guess_wrapper(target: dict) -> tuple[str, bool]:
@@ -5060,6 +5325,9 @@ async def play_play(request: Request):
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(info, client)})
         return JSONResponse({"code": 0, "msg": "", "data": {}})
+    # 电视直播 mg：直接反解为瞬时 HLS 返回（真正拉源延后到 index.m3u8 代理）
+    if iptvmod.is_live_mg(mg):
+        return _instant_play_response(mg, body.get("video_guid", ""))
     base_target = store.resolve_media_guid(mg)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
@@ -7797,6 +8065,45 @@ async def ext_live(request: Request):
 async def ext_live_clear(request: Request):
     livemod.reset()
     return {"code": 0, "msg": "", "data": True}
+
+
+# ------------------------------------------------------- 电视直播（IPTV）管理 API
+@app.get("/v/api/ext/iptv/conf")
+async def iptv_conf(request: Request):
+    return {"code": 0, "msg": "", "data": iptvmod.conf_payload()}
+
+
+@app.post("/v/api/ext/iptv/conf")
+async def iptv_conf_set(request: Request):
+    import json
+    body = json.loads(await request.body() or b"{}")
+    conf = iptvmod.load_conf()
+    if "enabled" in body:
+        conf["enabled"] = bool(body["enabled"])
+    if isinstance(body.get("subs"), list):
+        conf["subs"] = body["subs"]
+    iptvmod.save_conf(conf)
+    return {"code": 0, "msg": "", "data": iptvmod.conf_payload()}
+
+
+@app.get("/v/api/ext/iptv/channels")
+async def iptv_channels(request: Request):
+    kw = request.query_params.get("keyword", "")
+    group = request.query_params.get("group", "")
+    limit = int(request.query_params.get("limit", "200"))
+    return {"code": 0, "msg": "", "data": iptvmod.list_channels(kw, group, limit)}
+
+
+@app.post("/v/api/ext/iptv/refresh")
+async def iptv_refresh(request: Request):
+    res = await iptvmod.refresh(request.app.state.ext, force=True)
+    await iptvmod.check_once(request.app.state.ext)
+    return {"code": 0, "msg": "", "data": res}
+
+
+@app.get("/v/api/ext/iptv/check")
+async def iptv_check(request: Request):
+    return {"code": 0, "msg": "", "data": iptvmod.check_summary()}
 
 
 @app.get("/v/api/ext/status")
