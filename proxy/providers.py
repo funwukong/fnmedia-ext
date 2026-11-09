@@ -210,6 +210,8 @@ class Episode:
     # play_from 是该集所属线路标识，解码必须一并上送（公开构建下恒为 False）
     xsrc: bool = False
     play_from: str = ""
+    t4: bool = False
+    episode_key: str = ""
     # >>> PRIVATE:CATVOD
     # 小雅网盘：url 为网盘文件路径，播放前由 catvod 解析成签名直链（公开构建恒 False）
     catvod: bool = False
@@ -240,6 +242,7 @@ class OnlineTitle:
     actor: str
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
+    locator: dict = field(default_factory=dict)
 
     @property
     def online_id(self) -> str:
@@ -324,8 +327,21 @@ async def search_source(client: httpx.AsyncClient, source: dict,
     if _health is not None and not _health.usable(source.get("id", "")):
         _log.info("source skipped (dead cooldown): id=%s", source.get("id"))
         return []
-    params = {"ac": "detail", "wd": keyword}
     _t0 = time.monotonic()
+    if source.get("kind") == "t4":
+        import t4 as _t4mod
+        try:
+            out = await _t4mod.search(client, source, keyword)
+        except _t4mod.T4Error as exc:
+            _log.warning("T4 search failed: id=%s error=%s elapsed=%.2fs",
+                         source.get("id"), exc, time.monotonic() - _t0)
+            if _health is not None:
+                _health.record(source.get("id", ""), False, time.monotonic() - _t0)
+            return []
+        if _health is not None:
+            _health.record(source.get("id", ""), True, time.monotonic() - _t0)
+        return out
+    params = {"ac": "detail", "wd": keyword}
     try:
         r = await client.get(source["api"], params=params,
                              headers={"User-Agent": "Mozilla/5.0"},
@@ -452,10 +468,14 @@ async def resolve_share(client: httpx.AsyncClient, page_url: str,
 
 
 async def probe_source(api: str, keyword: str = "庆余年",
-                       timeout: float = 8.0) -> dict:
+                       timeout: float = 8.0, source: dict | None = None) -> dict:
     """探测一个苹果CMS资源站是否可用。
     返回 {ok,status,elapsed_ms,count,sample,error}。"""
     api = (api or "").strip()
+    if source and source.get("kind") == "t4":
+        import t4 as _t4mod
+        async with httpx.AsyncClient(trust_env=False) as client:
+            return await _t4mod.probe(client, source, timeout)
     t0 = time.monotonic()
     if not api.startswith(("http://", "https://")):
         return {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
@@ -971,50 +991,73 @@ async def spider_get_title(client, source: dict, vod_id: str) -> OnlineTitle | N
 
 
 async def search_all(keyword: str, sources=None,
-                     timeout: float | None = None) -> list[OnlineTitle]:
-    sources = sources or DEFAULT_SOURCES
+                     timeout: float | None = None,
+                     soft_timeout: float | None = None,
+                     *, budget: float | None = None) -> list[OnlineTitle]:
+    """聚合搜索所有启用源。
+
+    timeout/soft_timeout/budget：三者任一给出即为总预算（秒），到点返回已
+    拿到的部分结果，未完成的源取消（不因单个慢源而整块超时清空）。
+    为 None 时等全部完成。T4 与普通源交错排队、最多 8 路并发，避免 T4 源
+    排在所有慢 CMS 后面。sources=[] 保持空列表，不恢复默认源。
+    """
+    from itertools import zip_longest
+    sources = DEFAULT_SOURCES if sources is None else sources
     enabled = [s for s in sources if s.get("enabled")]
+    # T4 源不排在所有普通源后面：T4/普通交错，最多 8 路并发。
+    remote = [s for s in enabled if s.get("kind") == "t4"]
+    legacy = [s for s in enabled if s.get("kind") != "t4"]
+    scheduled = [s for pair in zip_longest(remote, legacy)
+                 for s in pair if s is not None]
+    if budget is None:
+        budget = soft_timeout if soft_timeout is not None else timeout
+    sem = asyncio.Semaphore(8)
+
+    async def _one(source):
+        async with sem:
+            return await _dispatch_search(client, source, keyword)
+
     async with httpx.AsyncClient(follow_redirects=True, trust_env=False) as client:
-        tasks = []
-        for s in enabled:
-            # >>> PRIVATE:CATVOD
-            if features.CATVOD and s.get("catvod"):
-                tasks.append(xiaoya_search_source(client, s, keyword))
-                continue
-            # <<< PRIVATE:CATVOD
-            # >>> PRIVATE:DRPY
-            if features.DRPY and s.get("drpy"):
-                tasks.append(drpy_search_source(client, s, keyword))
-                continue
-            # <<< PRIVATE:DRPY
-            # >>> PRIVATE:GUARD
-            if features.GUARD and s.get("guard"):
-                tasks.append(guard_search_source(client, s, keyword))
-                continue
-            if s.get("spider_src"):
-                tasks.append(spider_search_source(client, s, keyword))
-                continue
-            # <<< PRIVATE:GUARD
-            # >>> PRIVATE:DDUO
-            if features.DDUO and s.get("xsrc"):
-                tasks.append(dduo_search_source(client, s, keyword))
-                continue
-            # <<< PRIVATE:DDUO
-            tasks.append(search_source(client, s, keyword))
-        if timeout is None:
+        if not scheduled:
+            return []
+        tasks = [asyncio.create_task(_one(s)) for s in scheduled]
+        if budget is None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            running = [asyncio.create_task(c) for c in tasks]
-            done, pending = await asyncio.wait(running, timeout=timeout)
+            done, pending = await asyncio.wait(tasks, timeout=budget)
             for t in pending:
                 t.cancel()
-            results = [t.result() for t in running
+            results = [t.result() for t in tasks
                        if t in done and not t.cancelled() and t.exception() is None]
+            await asyncio.gather(*tasks, return_exceptions=True)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):
             titles.extend(r)
     return titles
+
+
+async def _dispatch_search(client, source, keyword):
+    """按源类型把一次搜索分发到对应的搜索实现。"""
+    # >>> PRIVATE:CATVOD
+    if features.CATVOD and source.get("catvod"):
+        return await xiaoya_search_source(client, source, keyword)
+    # <<< PRIVATE:CATVOD
+    # >>> PRIVATE:DRPY
+    if features.DRPY and source.get("drpy"):
+        return await drpy_search_source(client, source, keyword)
+    # <<< PRIVATE:DRPY
+    # >>> PRIVATE:GUARD
+    if features.GUARD and source.get("guard"):
+        return await guard_search_source(client, source, keyword)
+    if source.get("spider_src"):
+        return await spider_search_source(client, source, keyword)
+    # <<< PRIVATE:GUARD
+    # >>> PRIVATE:DDUO
+    if features.DDUO and source.get("xsrc"):
+        return await dduo_search_source(client, source, keyword)
+    # <<< PRIVATE:DDUO
+    return await search_source(client, source, keyword)
 
 
 def detail_source(source: dict, vod_id: str) -> OnlineTitle | None:
