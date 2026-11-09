@@ -468,9 +468,10 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
                 data = (await self.client.get(f"/v/api/v1/item/{item}")).json()["data"]
                 self.assertIn("原有简介", data["overview"])
                 self.assertIn("原有主演", data["overview"])
-                # fork 适配：本 fork 的海报统一走 /v/api/v1/sys/img/online/ 代理
-                # 前缀（TV/App 端不认裸 /online/），不是上游的裸 /online/。
-                self.assertTrue(data["posters"].startswith("/v/api/v1/sys/img/online/"))
+                # 海报地址与上游一致：/online/<token>.jpg。本 fork 曾改成
+                # /v/api/v1/sys/img/online/ 前缀，但 App 端拉不到该前缀的
+                # 在线海报（灰色胶片图标），已改回上游格式。
+                self.assertTrue(data["posters"].startswith("/online/"))
                 self.assertEqual(data["vote_average"], "8.5")
                 self.assertTrue(data["release_date"].startswith("2024"))
             info = (await self.client.post("/v/api/v1/play/info",

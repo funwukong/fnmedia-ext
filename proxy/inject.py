@@ -9,17 +9,20 @@ import t4
 from store import (make_guid, media_guid, video_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
-# v2 前缀：缓存破坏。旧版占位图是 App 解不了的 SVG，App 按稳定 token URL
-# 缓存了旧结果（解码失败→灰色胶片图标）；v2 让地址变化，App 重新拉图。
-# 服务端解 token 前剥掉 v2/ 前缀，旧版无前缀地址仍兼容。
-_IMG_PREFIX = "/v/api/v1/sys/img/online/v2/"
+# 海报地址格式与上游一致：/online/<token>.jpg。
+# 上游（yujian0815/fnmedia-ext，v0.2.42+）就是这个格式；本 fork 之前改成
+# /v/api/v1/sys/img/online/ 前缀后，App 端海报一直出不来（灰色胶片图标），
+# 网页端却正常；换成 v2 前缀也没用（新地址仍是 sys/img 前缀，同样空白）。
+# 结论：App 端拉不到 sys/img 前缀的在线海报地址，改回上游格式。
+# 库列表封面仍由 mediadb/list 改写为 sys/img 前缀（见 app.py 相关注释）。
+_IMG_PREFIX = "/online/"
 
 
 def _poster(url: str) -> str:
-    """在线资源海报 URL → 飞牛 App 图片代理前缀（TV/Web/Android/iOS 通用）。
+    """在线资源海报 URL → 上游同款 /online/<token>.jpg。
 
-    官方图片加载器只认 /v/api/v1/sys/img/ 前缀；裸 /online/ 在 TV/App 端
-    404 → 海报留白。直接生成 sys/img 前缀可被各端解析（UDS 与外部入口均可达）。
+    App 端用这个前缀能直接向插件取图；sys/img 前缀的在线海报地址在
+    App 端拉不到（网页端正常），不要再改回去。
     """
     if not url:
         return ""

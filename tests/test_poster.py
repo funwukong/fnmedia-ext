@@ -1,10 +1,15 @@
 """海报代理测试：App 端海报空白的回归覆盖。
 
-背景：热门短剧（海量分类库）在网页端能出图、App 端全白。卡片本身给两端
-的 poster 是同一个 sys/img token URL，差别在图片本身的抓取与回退：
-- 旧 fallback 是 SVG：浏览器能渲染，App/TV 原生加载器解不了 → 空白；
-- 上游抓取只有一次机会：图床抖动/限流就直接 fallback；
-- 预热只覆盖榜单四库，海量分类从没预热过，App 一开库就几十张现抓。
+背景：热门短剧（海量分类库）在网页端能出图、App 端全白（灰色胶片图标）。
+与上游（yujian0815/fnmedia-ext main，v0.2.42+）逐项对比后发现本 fork
+偏离了三处，上游格式是 App 端能拉到的唯一形式：
+- 卡片海报地址：上游是 /online/<token>.jpg；本 fork 曾改成
+  /v/api/v1/sys/img/online/（后又加 v2 前缀），App 端拉不到，改回上游格式；
+- 海报服务端缓存：上游 v0.2.42 已移除磁盘缓存与全量后台预热，纯透传；
+  本 fork 的 7 天磁盘缓存 + 预热循环随本次对齐一并移除；
+- 图床镜像改写（HOSTS_MIRROR）：本 fork 独有，上游直接抓原地址，已移除。
+保留的本 fork 改进：失败回退是 JPEG（不是 SVG，App 解不了 SVG）、
+403 时带图床自身 origin 作 Referer 重试一次。
 """
 from __future__ import annotations
 
@@ -12,7 +17,6 @@ import asyncio
 import sys
 import types
 from pathlib import Path
-from unittest.mock import patch
 
 import httpx
 
@@ -70,17 +74,15 @@ def test_poster_fallback_is_jpeg_not_svg():
 
 def test_serve_online_poster_retries_then_succeeds():
     fake = _FakeExt([httpx.ConnectError("boom", request=None), _Resp()])
-    written = {}
-    with patch.object(appmod, "_poster_cache_read", return_value=None), \
-            patch.object(appmod, "_poster_cache_write",
-                         side_effect=lambda u, b: written.setdefault("u", u)):
-        r = asyncio.run(appmod._serve_online_poster(
-            _tok(), _fake_request(fake)))
+    r = asyncio.run(appmod._serve_online_poster(
+        _tok(), _fake_request(fake)))
     assert r.status_code == 200
     assert r.media_type == "image/jpeg"
     assert r.body == JPEG
     assert len(fake.calls) == 2  # 第一次连不上，重试后成功
-    assert written.get("u") == IMG_URL
+    # 直接抓原地址，不经过镜像改写
+    assert fake.calls[0][0] == IMG_URL
+    assert fake.calls[1][0] == IMG_URL
 
 
 def test_serve_online_poster_403_retries_with_own_origin_referer():
@@ -93,11 +95,8 @@ def test_serve_online_poster_403_retries_with_own_origin_referer():
             return _Resp()
 
     fake = _Gate([])
-    with patch.object(appmod, "_poster_cache_read", return_value=None), \
-            patch.object(appmod, "_poster_cache_write",
-                         side_effect=lambda u, b: None):
-        r = asyncio.run(appmod._serve_online_poster(
-            _tok(), _fake_request(fake)))
+    r = asyncio.run(appmod._serve_online_poster(
+        _tok(), _fake_request(fake)))
     assert r.status_code == 200
     assert r.body == JPEG
     assert len(fake.calls) == 2
@@ -106,76 +105,43 @@ def test_serve_online_poster_403_retries_with_own_origin_referer():
 
 def test_serve_online_poster_failure_returns_jpeg_fallback():
     fake = _FakeExt([httpx.ConnectError("down", request=None)] * 3)
-    with patch.object(appmod, "_poster_cache_read", return_value=None), \
-            patch.object(appmod, "_poster_cache_write",
-                         side_effect=lambda u, b: None):
-        r = asyncio.run(appmod._serve_online_poster(
-            _tok(), _fake_request(fake)))
+    r = asyncio.run(appmod._serve_online_poster(
+        _tok(), _fake_request(fake)))
     assert r.status_code == 200
     assert r.media_type == "image/jpeg"
     assert r.body[:2] == b"\xff\xd8"
     assert b"<svg" not in r.body
 
 
-def test_poster_url_has_v2_prefix():
-    """缓存破坏：卡片海报地址带 v2 前缀，App 按新地址重新拉图，丢弃旧版
-    SVG 占位缓存（旧地址命中旧缓存→解码失败→灰色胶片图标）。"""
+def test_poster_url_is_upstream_online_format():
+    """卡片海报地址与上游一致：/online/<token>.jpg，不带 sys/img 前缀、不带 v2。"""
     p = inject._poster(IMG_URL)
-    assert p.startswith("/v/api/v1/sys/img/online/v2/")
+    assert p.startswith("/online/")
+    assert not p.startswith("/v/api/v1/sys/img/")
+    assert "/v2/" not in p
     assert p.endswith(".jpg")
-    # /online/ 短地址输入同样进 v2
-    p2 = inject._poster("/online/abc123.jpg")
-    assert p2 == "/v/api/v1/sys/img/online/v2/abc123.jpg"
+    # /online/ 输入原样返回
+    assert inject._poster("/online/abc123.jpg") == "/online/abc123.jpg"
     assert inject._poster("") == ""
 
 
-def test_serve_v2_prefixed_token_returns_image_and_legacy_still_works():
-    """带 v2 前缀的请求正常出图；剥掉前缀后的旧版地址同样正常出图。"""
-    fake = _FakeExt([_Resp()])
-    with patch.object(appmod, "_poster_cache_read", return_value=None), \
-            patch.object(appmod, "_poster_cache_write",
-                         side_effect=lambda u, b: None):
+def test_serve_poster_legacy_sysimg_and_v2_addresses_still_work():
+    """旧版地址仍兼容：/online/ 路由、sys/img 路由、v2 sys/img 路由都能出图。"""
+    tok = _tok()  # "<b64>.jpg"
+    for tok_path in (tok, "online/" + tok, "online/v2/" + tok):
+        fake = _FakeExt([_Resp()])
         r = asyncio.run(appmod._serve_online_poster(
-            _tok(), _fake_request(fake)))
-    assert r.status_code == 200
-    assert r.media_type == "image/jpeg"
-    assert r.body == JPEG
-    assert _tok().startswith("v2/")  # 本测试确实走了 v2 前缀路径
-
-    legacy = _tok()[len("v2/"):]
-    fake2 = _FakeExt([_Resp()])
-    with patch.object(appmod, "_poster_cache_read", return_value=None), \
-            patch.object(appmod, "_poster_cache_write",
-                         side_effect=lambda u, b: None):
-        r2 = asyncio.run(appmod._serve_online_poster(
-            legacy, _fake_request(fake2)))
-    assert r2.status_code == 200
-    assert r2.body == JPEG
+            tok_path, _fake_request(fake)))
+        assert r.status_code == 200, tok_path
+        assert r.media_type == "image/jpeg"
+        assert r.body == JPEG
+        assert fake.calls[0][0] == IMG_URL
 
 
-def test_prefetch_poster_urls_includes_catalog():
-    class _Charts:
-        def items(self, cat):
-            return [{"cover": "https://img.doubanio.com/view/photo/1.jpg"},
-                    {"cover": "https://img.doubanio.com/view/photo/1.jpg"},
-                    {"cover": "/relative/not-http.jpg"},
-                    {"cover": ""}]
-
-    class _Catalog:
-        def available(self, cat):
-            return True
-
-        def cached_page_posters(self, cat, n):
-            return [IMG_URL,
-                    "https://img.doubanio.com/view/photo/1.jpg",
-                    "not-a-url"]
-
-    with patch.object(appmod, "chart_cache", _Charts()), \
-            patch.object(appmod, "catalog", _Catalog()), \
-            patch.object(appmod, "catalog_enabled", return_value=True):
-        urls = asyncio.run(appmod._prefetch_poster_urls())
-    assert "https://img.doubanio.com/view/photo/1.jpg" in urls
-    assert IMG_URL in urls
-    assert urls.count("https://img.doubanio.com/view/photo/1.jpg") == 1
-    assert not any(u.startswith("/") for u in urls)
-    assert all(u.startswith("http") for u in urls)
+def test_poster_has_no_disk_cache_or_prefetch():
+    """上游式纯透传：磁盘缓存与后台预热已移除，不应再有这些入口。"""
+    for name in ("_poster_cache_read", "_poster_cache_write",
+                 "_poster_cache_file", "_poster_cache_gc",
+                 "_prefetch_posters", "_prefetch_poster_urls",
+                 "_poster_prefetch_loop"):
+        assert not hasattr(appmod, name), name

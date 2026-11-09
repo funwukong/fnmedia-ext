@@ -2111,7 +2111,6 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
     app.state.health_task = asyncio.create_task(_health_flush_loop())
-    app.state.poster_task = asyncio.create_task(_poster_prefetch_loop())
 
     # >>> PRIVATE:GUARD
     _gn_load_persist()   # 先读盘，重启后源文件夹/热墙秒显，不必重新扫数分钟
@@ -8267,12 +8266,14 @@ async def _poster_upstream_get(request: Request, url: str):
 
 async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     # 兼容 /online/<token>.jpg 与官方图片前缀 /v/api/v1/sys/img/online/<token>.jpg
+    # 机制对齐上游 v0.2.42：纯透传，服务端不做磁盘缓存——磁盘缓存（7 天）与
+    # 后台预热已随本提交一并移除（上游已在 v0.2.42 移除，两者都曾让海报墙变慢，
+    # 且缓存可能长期 serving 陈旧/错误内容）。浏览器/App 按 max-age 自行缓存。
     tok_path = tok_path.lstrip("/")
     marker = "online/"
     if marker in tok_path:
         tok_path = tok_path.split(marker, 1)[1]
-    # 缓存破坏：v2 前缀仅用于让 App 丢弃旧版 SVG 占位缓存、重新拉图；
-    # 解码前剥掉，旧版无前缀地址仍兼容。
+    # 兼容已发出的 v2 sys/img 地址：解码前剥掉 v2/ 前缀，旧版无前缀地址同样兼容。
     if tok_path.startswith("v2/"):
         tok_path = tok_path[len("v2/"):]
     try:
@@ -8283,32 +8284,21 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
         return _poster_fallback()
     want_badge = bool(pan_label) or health_grade is not None
     host = urllib.parse.urlsplit(u).netloc.lower()
-    # aimimang 同款：源站图床 → CDN 镜像（绕防盗链）
-    for dom, cdn in adfilter_mod.HOSTS_MIRROR:
-        if host == dom:
-            u = u.replace("://" + dom, "://" + cdn, 1)
-            host = cdn
-            break
-    cached = _poster_cache_read(u)
-    if cached:
-        content, ctype = cached, (_sniff_image(cached[:12]) or "image/jpeg")
-    else:
-        r = await _poster_upstream_get(request, u)
-        if r is None:
-            _log.warning("海报抓取失败 host=%s：上游无响应", host)
-            return _poster_fallback()
-        ctype = (r.headers.get("content-type") or "").lower()
-        if r.status_code != 200 or not r.content:
-            _log.warning("海报抓取失败 host=%s status=%s", host, r.status_code)
-            return _poster_fallback()
-        sniff = _sniff_image(r.content[:12])
-        if not (ctype.startswith("image/") or sniff):
-            _log.warning("海报抓取失败 host=%s：非图片内容 type=%s",
-                         host, ctype[:40])
-            return _poster_fallback()
-        ctype = ctype if ctype.startswith("image/") else sniff
-        content = r.content
-        _poster_cache_write(u, content)
+    r = await _poster_upstream_get(request, u)
+    if r is None:
+        _log.warning("海报抓取失败 host=%s：上游无响应", host)
+        return _poster_fallback()
+    ctype = (r.headers.get("content-type") or "").lower()
+    if r.status_code != 200 or not r.content:
+        _log.warning("海报抓取失败 host=%s status=%s", host, r.status_code)
+        return _poster_fallback()
+    sniff = _sniff_image(r.content[:12])
+    if not (ctype.startswith("image/") or sniff):
+        _log.warning("海报抓取失败 host=%s：非图片内容 type=%s",
+                     host, ctype[:40])
+        return _poster_fallback()
+    ctype = ctype if ctype.startswith("image/") else sniff
+    content = r.content
 
     # 在海报上烧角标（网盘资源 / 源健康点）。GIF 不动，合成失败回退原图。
     out_bytes, out_type = content, (ctype or "image/jpeg")
@@ -8328,41 +8318,6 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
                              "Access-Control-Allow-Origin": "*"})
 
 
-_POSTER_CACHE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "state", "poster_cache")
-_POSTER_CACHE_TTL = 7 * 86400
-
-
-def _poster_cache_file(u: str) -> str:
-    h = hashlib.sha1(u.encode("utf-8")).hexdigest()
-    return os.path.join(_POSTER_CACHE_DIR, h[:2], h)
-
-
-def _poster_cache_read(u: str):
-    path = _poster_cache_file(u)
-    try:
-        if time.time() - os.path.getmtime(path) > _POSTER_CACHE_TTL:
-            return None
-        with open(path, "rb") as f:
-            return f.read()
-    except Exception:
-        return None
-
-
-def _poster_cache_write(u: str, data: bytes) -> None:
-    if not data or len(data) > 8 * 1024 * 1024:
-        return
-    try:
-        path = _poster_cache_file(u)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "wb") as f:
-            f.write(data)
-        os.replace(tmp, path)
-    except Exception:
-        pass
-
-
 def _sniff_image(head: bytes) -> str:
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return "image/webp"
@@ -8373,87 +8328,6 @@ def _sniff_image(head: bytes) -> str:
     if head[:6] in (b"GIF87a", b"GIF89a"):
         return "image/gif"
     return ""
-
-
-def _poster_cache_gc() -> None:
-    cutoff = time.time() - _POSTER_CACHE_TTL
-    try:
-        for root, _dirs, files in os.walk(_POSTER_CACHE_DIR):
-            for name in files:
-                fp = os.path.join(root, name)
-                try:
-                    if os.path.getmtime(fp) < cutoff:
-                        os.remove(fp)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
-
-async def _prefetch_posters(urls: list, concurrency: int = 4) -> int:
-    """后台把海报抓进磁盘缓存：避免 App 一次拉几十张时直连图床过慢显示空白。"""
-    sem = asyncio.Semaphore(concurrency)
-    done = 0
-
-    async def one(u: str):
-        nonlocal done
-        if _poster_cache_read(u):
-            return
-        async with sem:
-            try:
-                r = await app.state.ext.get(
-                    u, headers=_poster_fetch_headers(u), timeout=20)
-                if r.status_code == 200 and r.content:
-                    _poster_cache_write(u, r.content)
-                    done += 1
-            except Exception:
-                pass
-
-    await asyncio.gather(*[one(u) for u in urls])
-    return done
-
-
-async def _prefetch_poster_urls() -> list[str]:
-    """本轮要预热的海报原地址（去重、仅 http）：榜单四库 + 海量分类库。
-
-    榜单只预热过豆瓣图床，海量分类（热门短剧等）从没预热过——App 打开
-    这些库时几十张海报同时现抓图床，慢源一抖就全白；先在后台低并发抓
-    进磁盘缓存，App 再打开就直接命中缓存。
-    """
-    urls: list[str] = []
-    seen: set[str] = set()
-
-    def _add(u: str):
-        if isinstance(u, str) and u.startswith("http") and u not in seen:
-            seen.add(u)
-            urls.append(u)
-
-    for cat, _t, _c in chartmod.CHART_CATEGORIES:
-        for it in chart_cache.items(cat)[:120]:
-            _add(it.get("cover") or "")
-    if catalog_enabled():
-        for cat, _t, _c in catalogmod.CATALOG_CATEGORIES:
-            if not catalog.available(cat):
-                continue
-            for p in catalog.cached_page_posters(cat, 40):
-                _add(p)
-    return urls
-
-
-async def _poster_prefetch_loop() -> None:
-    await asyncio.sleep(20)
-    while True:
-        try:
-            await asyncio.to_thread(_poster_cache_gc)
-        except Exception:
-            pass
-        try:
-            urls = await _prefetch_poster_urls()
-            if urls:
-                await _prefetch_posters(urls)
-        except Exception:
-            pass
-        await asyncio.sleep(1800)
 
 
 @app.get("/online/{tok_path:path}")
