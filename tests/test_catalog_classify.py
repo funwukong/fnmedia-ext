@@ -43,5 +43,5 @@ def test_redline_never_classified():
 
 def test_adult_cat_needs_ext_switch():
     # 扩展库默认关闭：未归入常规四类的成人向分类也不收编。
-    assert catalog._ext_lib_on() is False
+    assert catalog._welfare_on() is False
     assert catalog.classify_source_class("伦理", adult_allowed=True) is None

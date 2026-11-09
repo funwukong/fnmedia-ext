@@ -165,7 +165,7 @@ CATALOG_LIB_GUIDS: dict[str, str] = {
     "tv":      "196381f891d66a4de32f9032e8f244f3",
     "anime":   "97fc49015edcb20cc423658401711b6c",
     "variety": "cfff30730cffca2d1357e0c2b52fc2f5",
-    # 扩展分类库（跟随海量主开关 catalog_enabled，不设独立开关）：
+    # 福利分类库（跟随海量主开关 catalog_enabled，不设独立开关）：
     # 纪录片 / 4K / 短剧 —— 与基座扩展版保持同一稳定 guid，客户端缓存不丢。
     "documentary": "155f2305c2cbc76c85f981ef31cc192f",
     "uhd":         "262ce51312d7e72020514db5fd5f63e9",
@@ -176,7 +176,7 @@ CATALOG_LIB_GUIDS: dict[str, str] = {
     "overseas":    "c2fe61ae4d3adc87756a253cb108066e",
     "ai_comic":    "6784f423ff4be5af4fe60cde6c8da303",
     "ted":         "34883d4af44ca4a5539cb38827158294",
-    # 扩展资源独立库（md5("fnmedia-welfare-lib")，GUID 种子保持不变）：独立开关 ext_library_enabled
+    # 福利独立库（md5("fnmedia-welfare-lib")，GUID 种子保持不变）：独立开关 welfare_library_enabled
     # 控制是否建库/显示，反查 cat = catalog.ADULT_CAT，走同一条海量深翻链路。
     "adult":       "411515e17c85709cf1966697b7b2c58e",
 }
@@ -3078,10 +3078,10 @@ async def mediadb_list(request: Request):
                     "category": catalogmod.catalog_mdb(cat),
                     "view_type": 0, "poster_type": 0, "refresh_disabled": True,
                 })
-        # 2b) 扩展资源独立库：只受 ext_library_enabled 独立开关控制
+        # 2b) 福利独立库：只受 welfare_library_enabled 独立开关控制
         # （打开开关即收编各源的伦理类目，无需逐源标记）；开关关闭时
         # 不建路由、不抓取、不显示。海报同样走 sys/img 前缀。
-        if catalogmod._ext_lib_on() and catalog.available(catalogmod.ADULT_CAT):
+        if catalogmod._welfare_on() and catalog.available(catalogmod.ADULT_CAT):
             ps = [inj._poster(p) for p in
                   catalog.cached_page_posters(catalogmod.ADULT_CAT, 8)]
             ps = ["/v/api/v1/sys/img/" + q[1:]
@@ -3463,7 +3463,7 @@ async def mediadb_sum(request: Request):
                     payload["data"][CATALOG_LIB_GUIDS[cat]] = n
                     total_added += n
     # 扩展库独立开关自己的计数（独立于海量主开关）
-    if catalogmod._ext_lib_on() and catalog.available(catalogmod.ADULT_CAT):
+    if catalogmod._welfare_on() and catalog.available(catalogmod.ADULT_CAT):
         n = catalog.total(catalogmod.ADULT_CAT)
         if n:
             payload["data"][CATALOG_LIB_GUIDS[catalogmod.ADULT_CAT]] = n
@@ -3472,7 +3472,7 @@ async def mediadb_sum(request: Request):
         scope = s["id"]
         if catalog.standalone_available(scope):
             pool = list(catalogmod.CATALOG_CATEGORIES)
-            if catalogmod._ext_lib_on() and s.get("adult"):
+            if catalogmod._welfare_on() and s.get("adult"):
                 pool = pool + [(catalogmod.ADULT_CAT, "", "")]
             n = sum(catalog.total(c, scope) for c, _, _ in pool)
             if n:
@@ -4000,7 +4000,7 @@ async def item_list(request: Request):
         mdb_cat = catalogmod.catalog_mdb(ccat)
         # 扩展库走独立开关（不受海量主开关影响）；其余分类随海量主开关。
         if ccat == catalogmod.ADULT_CAT:
-            _cat_gate = catalogmod._ext_lib_on() and catalog.available(ccat)
+            _cat_gate = catalogmod._welfare_on() and catalog.available(ccat)
         else:
             _cat_gate = catalog_enabled() and catalog.available(ccat)
         if not _cat_gate:
@@ -4020,9 +4020,6 @@ async def item_list(request: Request):
         total = catalog.total(ccat)
         offset = max(0, min(offset, total))
         briefs = await catalog.get_window(ccat, offset, page_size)
-        # 派生 4K 的总数在翻页后才准（total() 在此场景下返回实际找到的数）；
-        # 先按旧总数翻、再按找到的数报，前端才不会对着空库一直翻页。
-        total = catalog.total(ccat)
         rows = _catalog_filter([_catalog_card(b, ccat) for b in briefs], body)
         rows = clientmod.normalize_cards(rows, client)
         return JSONResponse({"code": 0, "msg": "", "data": {
@@ -4122,7 +4119,7 @@ async def item_detail(guid: str, request: Request):
             any(s["id"] == sscope for s in standalone_sources_active()):
         src = next((s for s in config.all_sources() if s["id"] == sscope), {})
         _pool = list(catalogmod.CATALOG_CATEGORIES)
-        if catalogmod._ext_lib_on() and src.get("adult"):
+        if catalogmod._welfare_on() and src.get("adult"):
             _pool = _pool + [(catalogmod.ADULT_CAT, "", "")]
         n = sum(catalog.total(c, sscope) for c, _, _ in _pool)
         data = inj._base_item(
@@ -8106,7 +8103,7 @@ async def ext_set_config(request: Request):
         "hot_library_enabled", "hot_library_title", "hot_limit",
         "hot_per_source", "hot_pages_per_source", "hot_refresh_interval",
         "catalog_library_enabled",
-        "ext_library_enabled",
+        "welfare_library_enabled",
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
@@ -8154,7 +8151,7 @@ async def ext_set_config(request: Request):
         patch["sources"] = list(cur.values())
     config.save(patch)
     _search_cache.clear()
-    if sources_changed or "ext_library_enabled" in patch:
+    if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
         # 否则打开开关后扩展库卡要等下次路由过期才出现。
         _schedule_routes_refresh()

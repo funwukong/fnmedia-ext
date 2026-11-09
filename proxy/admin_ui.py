@@ -309,15 +309,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
 
       <div class="card">
-        <div class="card-title">🔞 扩展资源（独立开关）</div>
-        <p class="card-sub">仅在已勾选「扩展分类」的资源站里浏览成人向片库。默认关闭：完全不建路由、不抓取、不显示。</p>
+        <div class="card-title">🔞 福利（独立开关）</div>
+        <p class="card-sub">仅在已勾选「福利分类」的资源站里浏览成人向片库。默认关闭：完全不建路由、不抓取、不显示。</p>
         <label class="switch-row">
-          <input type="checkbox" id="extLibEnabled"/>
-          <span>启用扩展资源库
-            <span class="sub">需配合「资源站」页的扩展分类标记才生效</span></span>
+          <input type="checkbox" id="welfareEnabled"/>
+          <span>启用福利库
+            <span class="sub">需配合「资源站」页的福利分类标记才生效</span></span>
         </label>
         <div class="btn-row">
-          <button class="primary small" onclick="saveExtLibCfg()">保存扩展设置</button>
+          <button class="primary small" onclick="saveWelfareCfg()">保存扩展设置</button>
         </div>
       </div>
     </section>
@@ -1097,7 +1097,7 @@ function renderLibrary(){
   if(!STATUS)return;
   $("hotEnabled").checked=CFG.hot_library_enabled!==false;
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
-  if($("extLibEnabled"))$("extLibEnabled").checked=CFG.ext_library_enabled===true;
+  if($("welfareEnabled"))$("welfareEnabled").checked=CFG.welfare_library_enabled===true;
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
@@ -1130,10 +1130,10 @@ async function saveCatCfg(){
   if(r.code===0){Object.assign(CFG,body);toast("海量四库设置已保存");await loadLibs();renderLibrary();}
   else toast(r.msg||"保存失败","fail");
 }
-async function saveExtLibCfg(){
-  const body={ext_library_enabled:$("extLibEnabled").checked};
+async function saveWelfareCfg(){
+  const body={welfare_library_enabled:$("welfareEnabled").checked};
   const r=await jpost("/v/api/ext/config",body);
-  if(r.code===0){Object.assign(CFG,body);toast(body.ext_library_enabled?"已启用扩展资源库":"已关闭扩展资源库");}
+  if(r.code===0){Object.assign(CFG,body);toast(body.welfare_library_enabled?"已启用福利库":"已关闭福利库");}
   else toast(r.msg||"保存失败","fail");
 }
 async function refreshHot(){

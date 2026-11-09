@@ -71,15 +71,15 @@ _AI_COMIC_KW = ("AI漫剧", "AI动漫", "AI漫画", "动态漫画", "漫剧")
 _TED_KW = ("ted", "ted演讲", "tedx", "ted-ed", "ted演讲")
 _OVERSEAS_KW = ("海外剧", "美剧", "英剧", "韩剧", "日剧", "泰剧",
                 "港台剧", "欧美剧", "海外电视剧")
-# 成人向分类名：显式导向 ADULT 扩展分类，绝不落入常规电影/剧集类。
+# 成人向分类名：显式导向 ADULT 福利分类，绝不落入常规电影/剧集类。
 # 硬红线（_REDLINE_KW）在 is_redline 中先于本表拦截，任何开关都不放行。
-_ADULT_KW = ("伦理", "情色", "午夜", "写真", "里番", "成人")
+_ADULT_KW = ("福利", "伦理", "情色", "午夜", "写真", "里番", "成人")
 # 电影：电影/影片/各类型“XX片”且非剧非动漫；剧：电视/连续剧/美剧/国产剧…
 _MOVIE_KW = ("电影", "影片")
 _TV_KW = ("电视", "连续剧", "剧集", "美剧", "英剧", "韩剧", "日剧", "泰剧",
           "国产剧", "港台剧", "海外剧", "番剧")
-# 明确排除的脏类（伦理/资讯/解说/预告/体育/短剧等）
-_EXCLUDE_KW = ("理论", "写真", "午夜", "解说", "预告",
+# 明确排除的脏类（伦理/福利/资讯/解说/预告/体育/短剧等）
+_EXCLUDE_KW = ("理论", "福利", "写真", "午夜", "解说", "预告",
                "花絮", "资讯", "新闻", "体育", "赛事", "漫剧", "AI",
                "演员", "音乐", "MV")
 
@@ -91,11 +91,11 @@ _REDLINE_KW = (
     # 非自愿 / 性暴力
     "换脸"
 )
-# 即便开启扩展分类，也仍按“非影视/中性噪音”排除的分类
+# 即便开启福利分类，也仍按“非影视/中性噪音”排除的分类
 _NEUTRAL_KW = ("解说", "预告", "花絮", "资讯", "新闻", "体育", "赛事",
                "演员", "音乐", "MV", "直播", "电台")
 
-# 扩展分类使用的内部 cat id（不进入 CATS，故永不进入跨源聚合的四个海量库）
+# 福利分类使用的内部 cat id（不进入 CATS，故永不进入跨源聚合的四个海量库）
 ADULT_CAT = "adult"
 
 try:
@@ -104,19 +104,19 @@ except Exception:  # 兜底：独立运行/剥离异常时按公开（关闭）�
     features = None
 
 
-def _ext_lib_on() -> bool:
+def _welfare_on() -> bool:
     """扩展（成人）资源库独立开关（管理页可调，默认关）。
 
     与构建期 features.ADULT（是否编译进本包的能力）是两个维度：
     - features.ADULT=False：完整能力未编译，任何开关都不放行；
-    - ext_library_enabled=False：独立开关关闭，不建路由、不抓取、不显示。
-    开启后还需该源显式勾选「扩展分类」(source.adult=true) 才会实际建库。
+    - welfare_library_enabled=False：独立开关关闭，不建路由、不抓取、不显示。
+    开启后还需该源显式勾选「福利分类」(source.adult=true) 才会实际建库。
     """
     if not getattr(features, "ADULT", False):
         return False
     try:
         from config import config as _cfg
-        return bool(_cfg.get().get("ext_library_enabled", False))
+        return bool(_cfg.get().get("welfare_library_enabled", False))
     except Exception:
         return False
 
@@ -133,7 +133,7 @@ def is_redline(*texts: str) -> bool:
 
 def catalog_title(cat: str) -> str:
     if cat == ADULT_CAT:
-        return "🔞扩展资源"
+        return "🔞福利"
     for c, title, _ in CATALOG_CATEGORIES:
         if c == cat:
             return title
@@ -191,8 +191,8 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
 
     - 命中硬红线（涉未成年/非自愿）一律返回 None，任何开关都不放行；
     - 常规四类走 classify（其内部脏类/中性噪音仍排除）；
-    - 仅当该源显式开启扩展分类(adult_allowed)、且为完整构建时，未归入常规
-      四类、又不属于中性噪音/红线的分类，纳入内部扩展分类（只进该源独立库）。
+    - 仅当该源显式开启福利分类(adult_allowed)、且为完整构建时，未归入常规
+      四类、又不属于中性噪音/红线的分类，纳入内部福利分类（只进该源独立库）。
     """
     n = (name or "").strip()
     if not n or is_redline(n):
@@ -200,7 +200,7 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
     cat = classify(n)
     if cat:
         return cat
-    if not _ext_lib_on():
+    if not _welfare_on():
         return None
     if any(k in n for k in _NEUTRAL_KW):
         return None
@@ -208,7 +208,7 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
     # 这样扩展库卡"打开开关就有内容"；硬红线已在函数开头拦截。
     if any(k in n for k in _ADULT_KW):
         return ADULT_CAT
-    # 其余未归类扩展分类：仍需该源显式勾选扩展分类才纳入
+    # 其余未归类福利分类：仍需该源显式勾选福利分类才纳入
     if adult_allowed:
         return ADULT_CAT
     return None
@@ -351,9 +351,9 @@ class Catalog:
 
             def routes_for_scope(scope: str) -> dict[str, list[dict]]:
                 out: dict[str, list[dict]] = {}
-                # 扩展分类由 ext_library_enabled 独立开关控制：
+                # 福利分类由 welfare_library_enabled 独立开关控制：
                 # 开关开 → 聚合与单源独立库都纳入 ADULT 池；开关关 → 一律不建。
-                cats = CATS + ([ADULT_CAT] if _ext_lib_on() else [])
+                cats = CATS + ([ADULT_CAT] if _welfare_on() else [])
                 for cat in cats:
                     if scope == AGG_SCOPE:
                         rs = [probed[(cat, sid)] for (c2, sid) in probed if c2 == cat]
@@ -403,16 +403,9 @@ class Catalog:
                 self._updated = time.time()
             warm_scopes = [sid for sid in self.standalone_scopes()
                            if any(self.available(c, sid) for c in
-                                  (CATS + ([ADULT_CAT] if _ext_lib_on() else [])))]
+                                  (CATS + ([ADULT_CAT] if _welfare_on() else [])))]
             for sid in warm_scopes:
                 asyncio.create_task(self.warm_standalone(sid))
-            # 4K 派生预热：源没有 4K 分类时，后台先翻电影页把 4K 片抄进
-            # uhd 密集列表——库卡才有海报、首次点开才有内容；只在 uhd
-            # 还是空的时候跑一次（密集列表在路由刷新时保留，不会反复跑）。
-            if (not self._routes.get(self._scope_key(AGG_SCOPE, "uhd"))
-                    and self._routes.get(self._scope_key(AGG_SCOPE, "movie"))
-                    and not self._dense.get(self._scope_key(AGG_SCOPE, "uhd"))):
-                asyncio.create_task(self.get_window("uhd", 0, 40))
         finally:
             self._refreshing = False
         return self.status()
@@ -498,18 +491,8 @@ class Catalog:
                 return 0
             return min(int(routes[0].get("pagecount") or 0), MAX_PAGES)
 
-    def dense_count(self, cat: str, scope: str = AGG_SCOPE) -> int:
-        """已实际找到并去重的条目数（密集列表长度）。"""
-        with self._lock:
-            return len(self._dense.get(self._scope_key(scope, cat)) or [])
-
     def total(self, cat: str, scope: str = AGG_SCOPE) -> int:
         # 用规范源页数估算 total；最后一页条数未知，前端以空页自然停止。
-        # 例外：4K 没有原生路由时是派生库，电影页数 × 20 是虚数——源备注里
-        # 没有 4K 信号时库是空的，却报几十条，前端会一直翻空页转圈；
-        # 只报实际找到的数，没找到就是 0。
-        if cat == "uhd" and not self._routes.get(self._scope_key(scope, cat)):
-            return self.dense_count(cat, scope)
         return self.pagecount(cat, scope) * PAGE_SIZE
 
     def routes_stale(self) -> bool:
@@ -575,11 +558,6 @@ class Catalog:
                     return data
                 self._page_cache.pop(key, None)
             fut = self._inflight.get(key)
-            if fut is not None and fut.get_loop() is not asyncio.get_running_loop():
-                # 旧事件循环残留的 future（循环已关闭、拉取任务已取消）：
-                # 丢弃重建，否则新循环里等一个永远不会完成的 future。
-                fut = None
-                self._inflight.pop(key, None)
         if fut is None:
             fut = asyncio.get_event_loop().create_future()
             with self._lock:
@@ -594,12 +572,6 @@ class Catalog:
                         self._page_cache[key] = (time.time(), briefs, ttl)
                     if not fut.done():
                         fut.set_result(briefs)
-                except asyncio.CancelledError:
-                    # 拉取任务被取消：先给等它的人一个空结果再重抛，
-                    # 别把 key 永远挂在 _inflight 让后来的人等死。
-                    if not fut.done():
-                        fut.set_result([])
-                    raise
                 except Exception:
                     if not fut.done():
                         fut.set_result([])
@@ -765,7 +737,7 @@ class Catalog:
         """建库后后台预热独立库各分类首页，缓解慢源首屏空白。"""
         try:
             src = self._source_by_id(scope)
-            pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
+            pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
             await asyncio.gather(
                 *[self.get_page(c, 1, scope) for c in pool
                   if self.available(c, scope)],
@@ -807,7 +779,7 @@ class Catalog:
         再按排名轮次合并去重，最后按全局 offset 切片。
         """
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
+        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
         cats = [c for c in pool if self.available(c, scope)]
         if not cats:
             return [], 0
@@ -837,7 +809,7 @@ class Catalog:
 
     def standalone_available(self, scope: str) -> bool:
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_ext_lib_on() and src and src.get("adult")) else CATS
+        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
         return any(self.available(c, scope) for c in pool)
 
 

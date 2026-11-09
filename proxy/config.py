@@ -120,9 +120,9 @@ DEFAULTS = {
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
     "catalog_library_enabled": True,
-    # 扩展（成人）资源库独立开关：开启后，已被源标记为「扩展分类(adult)」的
+    # 扩展（成人）资源库独立开关：开启后，已被源标记为「福利分类(adult)」的
     # 源才把 ADULT_CAT 纳入浏览。默认关闭：不建路由、不抓取、不显示。
-    "ext_library_enabled": False,
+    "welfare_library_enabled": False,
     # 是否把每个启用的 TVBox 加固源（csp_*Guard，如比特/糯米/花花）生成为一张
     # 独立“专区媒体库”卡片。默认关闭：加固源只作为播放时可切换的线路/搜索源，
     # 不在媒体库列表里产生空库。需要专区墙时可在管理页打开。
