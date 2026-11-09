@@ -1883,7 +1883,7 @@ def chart_card(item: dict) -> dict:
     overview = item.get("desc") or ("、".join(tags) if tags else "")
     title = item["title"]
     guid = item["guid"]
-    return {
+    row = {
         "guid": guid,
         # TV/盒子端(Flutter)列表模型要求 video_guid/path/runtime，缺失会整库“加载失败”；
         # 手机端较宽松。video_guid 与播放/详情接口用的 video_guid(guid) 保持一致。
@@ -1927,6 +1927,7 @@ def chart_card(item: dict) -> dict:
         "single_child_guid": "",
         "file_name": "",
     }
+    return _vod_directory_card(row)
 
 
 def prewarm_persist_mode() -> bool:
@@ -2924,7 +2925,7 @@ def _hot_card(brief: dict, cat: str) -> dict:
     row["ancestor_name"] = hot_cat_title(cat)
     row["ancestor_category"] = hot_cat_category(cat)
     row["video_guid"] = video_guid(brief["guid"])
-    return row
+    return _vod_directory_card(row)
 
 
 def _hot_cat_items(cat: str) -> list[dict]:
@@ -2946,7 +2947,8 @@ def _hot_rows_all(body: dict, cat: str) -> list[dict]:
             media_wanted.discard("Movie,TV")
             media_wanted.update({"Movie", "TV"})
         if media_wanted:
-            rows = [r for r in rows if r.get("type") in media_wanted]
+            rows = [r for r in rows if r.get("type") in media_wanted
+                    or r.get("type") == "Directory"]
         watched = str(tags.get("watched") or "")
         if watched in {"0", "1"}:
             want_watched = watched == "1"
@@ -2961,7 +2963,8 @@ def _hot_rows_all(body: dict, cat: str) -> list[dict]:
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows if r.get("type") in wanted
+                    or r.get("type") == "Directory"]
 
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
@@ -3010,11 +3013,13 @@ def _chart_rows_all(body: dict, cat: str) -> list[dict]:
             media_wanted.discard("Movie,TV")
             media_wanted.update({"Movie", "TV"})
         if media_wanted:
-            rows = [r for r in rows if r.get("type") in media_wanted]
+            rows = [r for r in rows if r.get("type") in media_wanted
+                    or r.get("type") == "Directory"]
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows if r.get("type") in wanted
+                    or r.get("type") == "Directory"]
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
         rows = [r for r in rows if r.get("is_favorite")]
@@ -3050,7 +3055,7 @@ def _catalog_card(brief: dict, cat: str) -> dict:
     row["ancestor_name"] = catalogmod.catalog_title(cat)
     row["ancestor_category"] = catalogmod.catalog_mdb(cat)
     row["video_guid"] = video_guid(brief["guid"])
-    return row
+    return _vod_directory_card(row)
 
 
 def _catalog_filter(rows: list[dict], body: dict) -> list[dict]:
@@ -3061,11 +3066,13 @@ def _catalog_filter(rows: list[dict], body: dict) -> list[dict]:
         if "Movie,TV" in mw:
             mw.discard("Movie,TV"); mw.update({"Movie", "TV"})
         if mw:
-            rows = [r for r in rows if r.get("type") in mw]
+            rows = [r for r in rows
+                    if r.get("type") in mw or r.get("type") == "Directory"]
     elif isinstance(tags, list):
         wanted = set(tags) & {"Movie", "TV"}
         if wanted:
-            rows = [r for r in rows if r.get("type") in wanted]
+            rows = [r for r in rows
+                    if r.get("type") in wanted or r.get("type") == "Directory"]
     rows = [_apply_marks(r) for r in rows]
     if int(body.get("is_favorite") or 0):
         rows = [r for r in rows if r.get("is_favorite")]
@@ -4201,6 +4208,334 @@ async def _xlib_play_info(guid: str) -> dict | None:
 # <<< PRIVATE:CATVOD
 
 
+# ------------------------------------------------- 二级线路海报墙（移植上游 v1.0.0）
+# 上游：proxy/app.py _line_folder_guid / _vod_line_card / _vod_line_detail /
+# _vod_line_folder（v1.0.0）。fork 适配点（冻结约束，见 _seeded_media_target）：
+# 线路身份只作“选集不串线 + 竞速优先种子”，绝不固定单线、绝不跳过竞速。
+# 上游的 _fixed_line=True（play_link 去 auto=1、_pick_episode 优先直出）与
+# 冻结的竞速/first-success-wins/吞吐打分/最快线记忆冲突，本移植不搬那一部分。
+_LINE_FOLDER_PREFIX = "fnmedia-line-folder:"
+_LINE_ITEM_PREFIX = "fnmedia-line-item:"
+_LINE_SEASON_PREFIX = "fnmedia-line-season:"
+
+
+def _line_season_guid(og: str, line: str, season: int = 1) -> str:
+    raw = f"{og}|{line}|{int(season or 1)}".encode("utf-8")
+    return _LINE_SEASON_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _parse_line_season_guid(guid: str) -> tuple[str, str, int] | None:
+    if not isinstance(guid, str) or not guid.startswith(_LINE_SEASON_PREFIX):
+        return None
+    try:
+        token = guid[len(_LINE_SEASON_PREFIX):]
+        token += "=" * (-len(token) % 4)
+        og, line, season = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
+        return og, line, int(season or 1)
+    except Exception:
+        return None
+
+
+def _line_folder_guid(og: str) -> str:
+    if isinstance(og, str) and og.startswith(_LINE_FOLDER_PREFIX):
+        return og  # 幂等，避免多次包装
+    return _LINE_FOLDER_PREFIX + og
+
+
+def _parse_line_folder_guid(guid: str) -> str | None:
+    if isinstance(guid, str) and guid.startswith(_LINE_FOLDER_PREFIX):
+        return guid[len(_LINE_FOLDER_PREFIX):]
+    return None
+
+
+def _line_item_guid(og: str, line: str, index: int = 0) -> str:
+    raw = f"{og}|{line}|{int(index or 0)}".encode("utf-8")
+    return _LINE_ITEM_PREFIX + base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _parse_line_item_guid(guid: str) -> tuple[str, str, int] | None:
+    if not isinstance(guid, str) or not guid.startswith(_LINE_ITEM_PREFIX):
+        return None
+    try:
+        token = guid[len(_LINE_ITEM_PREFIX):]
+        token += "=" * (-len(token) % 4)
+        og, line, index = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
+        return og, line, int(index or 0)
+    except Exception:
+        return None
+
+
+def _vod_directory_card(row: dict) -> dict:
+    """一级影片卡改为文件夹；进入后陈列该片线路海报，不展开季集。"""
+    row["type"] = "Directory"
+    row["guid"] = _line_folder_guid(row["guid"])
+    row["can_play"] = 0
+    row["play_item_guid"] = ""
+    row["play_error"] = ""
+    row["ancestor_category"] = "Mix"
+    row["number_of_episodes"] = 0
+    row["number_of_seasons"] = 0
+    row["local_number_of_episodes"] = 0
+    row["local_number_of_seasons"] = 0
+    row["season_number"] = 0
+    row["episode_number"] = 0
+    return row
+
+
+def _vod_resume_index(brief: dict) -> int:
+    if not inj.is_tv(brief):
+        return 0
+    try:
+        ep_guids = store.tv_episode_guids(brief.get("guid", ""), regular_only=True)
+        target_eg, _ = history.resume_episode(ep_guids)
+        ep = store.get_episode(target_eg) if target_eg else None
+        return int((ep or {}).get("index", 0) or 0)
+    except Exception:
+        return 0
+
+
+def _provider_display(provider: str) -> str:
+    """资源站 id → 播放器里显示的名字（上游 v1.0.0 原样搬）。
+
+    优先用用户在资源站里设置的名称（自定义源 id 形如 custom_xxxx，否则会直接
+    露出技术 id），再回退内置中文名表，最后才用原始 id。
+    """
+    try:
+        s = next((x for x in config.all_sources() if x.get("id") == provider), None)
+        if s and str(s.get("name") or "").strip():
+            return str(s["name"]).strip()
+    except Exception:
+        pass
+    return _PROVIDER_CN.get(provider, provider)
+
+
+def _vod_line_card(brief: dict, line: str, index: int, parent: str) -> dict:
+    og = brief["guid"]
+    provider = line.split("::", 1)[0]
+    source = _provider_display(provider)
+    title = brief.get("title", "")
+    row = inj.detail_item(brief)
+    item_guid = _line_item_guid(og, line, index)
+    folder_guid = _line_folder_guid(og)
+    is_tv = inj.is_tv(brief)
+    if is_tv:
+        try:
+            ep_count = len(store.list_episodes(og, line))
+        except Exception:
+            ep_count = int(row.get("number_of_episodes") or 0)
+        row.update({
+            "type": "TV",
+            "number_of_seasons": 1,
+            "number_of_episodes": ep_count,
+        })
+    else:
+        row.update({
+            "type": "Movie",
+            "number_of_seasons": 0,
+            "number_of_episodes": 0,
+            "local_number_of_episodes": 0,
+            "local_number_of_seasons": 0,
+        })
+    row.update({
+        "guid": item_guid,
+        "title": f"{source}｜{title}",
+        "can_play": 1,
+        "play_item_guid": item_guid,
+        "parent_guid": folder_guid,
+        "parent_title": title,
+        "ancestor_guid": folder_guid,
+        "ancestor_name": title,
+        "ancestor_category": row.get("type"),
+        "local_number_of_episodes": 0,
+        "local_number_of_seasons": 0,
+        "overview": f"来源：{source}\n点击以该线路为优先种子起播，仍走竞速选最快线。\n\n"
+                    + (brief.get("overview") or ""),
+    })
+    return _apply_marks(row)
+
+
+def _seeded_media_target(mg: str, request: Request | None = None) -> dict | None:
+    """线路卡 guid -> 该线路的播放目标（选集身份），但只是竞速种子，不是固定线。
+
+    上游 v1.0.0 的 _fixed_media_target 在此返回 _fixed_line=True，调用方据此
+    去掉 auto=1、跳过竞速——与冻结的竞速/最快线记忆冲突，不搬。
+    这里只标记 _line_seed：调用方（play/play、media/range、stream）仍按
+    auto=1 起播走竞速，种子只决定“播哪条线的第几集”、并在竞速候选排序里
+    作最后一级 tiebreak；绝不改 _race_fastest / _race_candidates 的
+    吞吐打分与最快线记忆主导顺序。
+    """
+    parsed = _parse_line_item_guid(mg)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    if request is not None:
+        try:
+            index = int(request.query_params.get("index", index) or index)
+        except (TypeError, ValueError):
+            pass
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    target = store.resolve_episode(og, line, index)
+    if not target:
+        return None
+    is_tv = inj.is_tv(brief)
+    return dict(target, online_guid=og, title=brief.get("title", ""),
+                ep_guid=episode_guid(og, "", index) if is_tv else "",
+                kind="episode" if is_tv else "title", _line_seed=line)
+
+
+def _vod_folder_detail(guid: str, client) -> JSONResponse | None:
+    """仅专用文件夹 guid 返回目录；原影片详情与播放身份保持不变。"""
+    og = _parse_line_folder_guid(guid)
+    if not og:
+        return None
+    brief = store.get_title_by_guid(og)
+    if brief:
+        row = inj.detail_item(brief)
+    else:
+        item = chart_cache.get_guid(og)
+        if not item:
+            return None
+        row = chart_card(item)
+    row["guid"] = _line_folder_guid(og)
+    row = _vod_directory_card(row)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(row, client)})
+
+
+def _vod_line_detail(guid: str, client) -> JSONResponse | None:
+    parsed = _parse_line_item_guid(guid)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    row = _vod_line_card(brief, line, index, og)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(row, client)})
+
+
+async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
+    """二级线路海报墙：整片/整剧按线路直接播放，不展示每集。
+
+    文件夹打开必须快速返回：已有绑定立即出线路；未绑定只给极短等待，后台单飞继续
+    绑定，下一次轮询/重进即可显示完整线路，避免二级菜单卡 8 秒。
+    """
+    brief = store.get_title_by_guid(parent)
+    if not brief and chart_cache.is_chart_guid(parent):
+        # 客户端不会在空目录上自动轮询，因此冷片首次进入必须在本次请求内等待
+        # 绑定完成。已绑定影片在函数开头即可直接出线路，仍保持毫秒级二级菜单。
+        start_resolve_chart(parent)
+        fut = _chart_resolving.get(parent)
+        if fut is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
+            except Exception:
+                pass
+        brief = store.get_title_by_guid(parent)
+    title = (brief or chart_cache.get_guid(parent) or {}).get("title", "")
+    if not brief:
+        return JSONResponse({"code": 0, "msg": "", "data": {
+            "mdb_name": title or "线路", "mdb_category": "Movie", "top_dir": "",
+            "dir": parent, "total": 0, "list": [], "jump_list": None}})
+    index = _vod_resume_index(brief)
+    lines = store.target_lines({"online_guid": parent, "index": index})
+    # 同一资源站常有“解析线 + m3u8直放线”两种技术线路。二级海报墙按来源聚合，
+    # 每个来源只展示一张卡，优先 m3u8/直放线；解析线仍可进入播放后的线路菜单。
+    source_rows: dict[str, dict] = {}
+    for t in lines:
+        line = t.get("line")
+        if not line:
+            continue
+        provider = line.split("::", 1)[0]
+        old = source_rows.get(provider)
+        if old is None:
+            source_rows[provider] = t
+            continue
+        old_direct = bool(old.get("m3u8") or not old.get("resolve"))
+        new_direct = bool(t.get("m3u8") or not t.get("resolve"))
+        if new_direct and not old_direct:
+            source_rows[provider] = t
+    rows = [_vod_line_card(brief, t["line"], index, parent)
+            for t in source_rows.values() if t.get("line")]
+    rows = clientmod.normalize_cards(rows, client)
+    # 电视剧线路墙仍归入 TV，保证客户端加载剧集模型与选集入口。
+    mdb_category = "TV" if inj.is_tv(brief) else "Movie"
+    return JSONResponse({"code": 0, "msg": "", "data": {
+        "mdb_name": f"{brief.get('title', '')} · {len(rows)}条线路",
+        "mdb_category": mdb_category, "top_dir": "", "dir": parent,
+        "total": len(rows), "list": rows, "jump_list": None}})
+
+
+def _vod_play_info(guid: str, client) -> JSONResponse | None:
+    parsed = _parse_line_item_guid(guid)
+    if not parsed:
+        return None
+    og, line, index = parsed
+    brief = store.get_title_by_guid(og)
+    if not brief:
+        return None
+    target = store.resolve_episode(og, line, index)
+    if not target:
+        return None
+    is_tv = inj.is_tv(brief)
+    eg = episode_guid(og, "", index)
+    base_guid = eg if is_tv else og
+    if is_tv:
+        ep = store.get_episode(eg)
+        if not ep:
+            return None
+        info = inj.episode_play_info(ep)
+    else:
+        info = inj.play_info(brief)
+    info["guid"] = base_guid
+    # TVBox/VOD：点击即播当前续播集，但保留TV模型以显示选集入口。
+    info["type"] = "TV" if is_tv else "Movie"
+    info["media_guid"] = ep_media_guid(eg, line)
+    info["video_guid"] = ep_video_guid(eg, line)
+    item = inj.detail_item(brief)
+    item.update({
+        "guid": base_guid,
+        "type": "TV" if is_tv else "Movie",
+        "can_play": 1,
+        "play_item_guid": base_guid,
+        "parent_guid": og,
+        "parent_title": brief.get("title", ""),
+        "number_of_episodes": len(store.list_episodes(og, line)) if is_tv else 0,
+        "number_of_seasons": 1 if is_tv else 0,
+        "local_number_of_episodes": 0,
+        "local_number_of_seasons": 0,
+        "overview": f"来源：{_provider_display(line.split('::', 1)[0])}\n"
+                    f"以该线路为优先种子起播，仍走竞速选最快线。\n\n{brief.get('overview') or ''}",
+    })
+    info["item"] = item
+    rec = history.get(base_guid)
+    if rec:
+        info["ts"] = rec.get("ts", 0)
+    return JSONResponse({"code": 0, "msg": "", "data":
+                         clientmod.normalize_detail(info, client)})
+
+
+def _normalize_history_guid(guid: str) -> str:
+    """把带线路身份的复合 guid 归一化为基础影片/集 guid，保证历史、收藏、已看
+    都按原片身份记录，不按资源站拆分；非复合 guid 原样返回。"""
+    if not isinstance(guid, str):
+        return guid or ""
+    parsed = _parse_line_item_guid(guid)
+    if parsed:
+        og, _line, index = parsed
+        brief = store.get_title_by_guid(og)
+        if brief and inj.is_tv(brief):
+            return episode_guid(og, "", index)
+        return og
+    season = _parse_line_season_guid(guid)
+    if season:
+        return season_guid(season[0], season[2])
+    return guid
+
+
 @app.post("/v/api/v1/item/list")
 async def item_list(request: Request):
     raw = await request.body()
@@ -4361,6 +4696,13 @@ async def item_list(request: Request):
             "jump_list": None}})
 
 
+    # —— TVBox 式二级线路海报墙：一级影片文件夹，二级线路卡（竞速种子） ——
+    # （冻结适配：文件夹点某条线路只选定竞速种子/选集身份，不固定单线、不跳竞速。
+    # 种子经 _seeded_media_target 解析，起播仍走 auto=1 竞速流程。）
+    folder_og = _parse_line_folder_guid(parent)
+    if folder_og:
+        return await _vod_line_folder(folder_og, body, client)
+
     # —— 单源独立媒体库：该源四类交错成一条最近更新流 ——
     sscope = standalone_source_of(aguid) if aguid else None
     if sscope is not None and \
@@ -4389,7 +4731,7 @@ async def item_list(request: Request):
             row["ancestor_category"] = "Mix"
             row["video_guid"] = video_guid(b["guid"])
             _apply_marks(row)
-            rows.append(row)
+            rows.append(_vod_directory_card(row))
         rows = clientmod.normalize_cards(rows, client)
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": lib_name, "mdb_category": "Mix", "top_dir": "",
@@ -4609,6 +4951,14 @@ async def t4_resource(token: str, request: Request):
 
 @app.get("/v/api/v1/item/{guid}")
 async def item_detail(guid: str, request: Request):
+    if _parse_line_item_guid(guid):
+        line_detail = _vod_line_detail(guid, _client_of(request))
+        if line_detail is not None:
+            return line_detail
+    if _parse_line_folder_guid(guid):
+        folder_detail = _vod_folder_detail(guid, _client_of(request))
+        if folder_detail is not None:
+            return folder_detail
     if guid == T4_LIB_GUID or t4_browser.node(guid):
         if guid == T4_LIB_GUID:
             data = inj._base_item(guid=guid, type="MediaDB", title=T4_LIB_TITLE,
@@ -4917,12 +5267,26 @@ async def season_list_route(guid: str, request: Request):
                                  "data": clientmod.normalize_cards(
                                      data, _client_of(request))})
     # <<< PRIVATE:CATVOD
+    parsed_line = _parse_line_item_guid(guid) or _parse_line_season_guid(guid)
+    fixed_line = parsed_line[1] if parsed_line else None
+    fixed_season = parsed_line[2] if parsed_line else 1
+    if parsed_line:
+        guid = parsed_line[0]
     brief = store.get_title_by_guid(guid)
     if not brief or not inj.is_tv(brief):
         return await forward_upstream(request)
     client = _client_of(request)
+    rows = inj.season_list(brief)
+    if fixed_line:
+        for row in rows:
+            try:
+                sn = int(row.get("season_number") or fixed_season or 1)
+            except (TypeError, ValueError):
+                sn = 1
+            row["guid"] = _line_season_guid(guid, fixed_line, sn)
+            row["parent_guid"] = _line_item_guid(guid, fixed_line, 0)
     return JSONResponse({"code": 0, "msg": "",
-                         "data": clientmod.normalize_cards(inj.season_list(brief), client)})
+                         "data": clientmod.normalize_cards(rows, client)})
 
 
 @app.get("/v/api/v1/episode/list/{guid}")
@@ -4971,7 +5335,12 @@ async def episode_list_route(guid: str, request: Request):
                                  "data": clientmod.normalize_cards(
                                      rows, _client_of(request))})
     # <<< PRIVATE:CATVOD
-    # guid 可能是伪造的 season guid，也可能是 tv guid
+    # guid 可能是伪造的 season guid、固定线路卡/线路季 guid，也可能是 tv guid
+    parsed_line = _parse_line_item_guid(guid) or _parse_line_season_guid(guid)
+    fixed_line = parsed_line[1] if parsed_line else None
+    fixed_season = parsed_line[2] if parsed_line else None
+    if parsed_line:
+        guid = parsed_line[0]
     season = store.get_season(guid)
     tv = season["online_guid"] if season else None
     if not tv:
@@ -4984,14 +5353,43 @@ async def episode_list_route(guid: str, request: Request):
     if error is not None:
         return error
     client = _client_of(request)
+    season_number = season["season"] if season else fixed_season
+    rows = inj.episode_list(store.get_title_by_guid(tv), season_number)
+    if fixed_line:
+        line_season = _line_season_guid(tv, fixed_line, season_number or 1)
+        for row in rows:
+            ep_g = row.get("guid")
+            if ep_g:
+                try:
+                    ep_index = int(row.get("episode_number") or 1) - 1
+                except (TypeError, ValueError):
+                    ep_index = 0
+                row["guid"] = _line_item_guid(tv, fixed_line, ep_index)
+                row["media_guid"] = ep_media_guid(ep_g, fixed_line)
+                row["video_guid"] = ep_video_guid(ep_g, fixed_line)
+                row["parent_guid"] = line_season
     return JSONResponse({"code": 0, "msg": "",
-                         "data": clientmod.normalize_cards(
-                             inj.episode_list(store.get_title_by_guid(tv),
-                                              season["season"] if season else None), client)})
+                         "data": clientmod.normalize_cards(rows, client)})
 
 
 @app.get("/v/api/v1/stream/list/{guid}")
 async def stream_list(guid: str, request: Request):
+    return await _stream_list_impl(guid, request)
+
+
+@app.post("/v/api/v1/stream/list")
+async def stream_list_post(request: Request):
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    guid = str(body.get("guid") or body.get("item_guid") or "")
+    if not guid:
+        return await forward_upstream(request)
+    return await _stream_list_impl(guid, request)
+
+
+async def _stream_list_impl(guid: str, request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
@@ -5023,33 +5421,48 @@ async def stream_list(guid: str, request: Request):
             sl["qualities"] = quals
             sl["cloud_storage_info"] = None
         return JSONResponse({"code": 0, "msg": "", "data": sl})
-    ep = store.get_episode(guid)
-    target = None
-    if ep:
-        sl = inj.episode_stream_list(ep)
-        target = store.get_episode_target(guid)
-    else:
-        brief = store.get_title_by_guid(guid)
-        if not brief and chart_cache.is_chart_guid(guid):
-            if time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
-                return await forward_upstream(request)
-            # 打开详情/线路菜单也不能同步等搜源：启动后台匹配并立即返回占位线路，
-            # 真正播放时 play/info/preset 会等待同一单飞任务。
-            start_resolve_chart(guid)
-            _PENDING_MEDIA_CHART[media_guid(guid)] = guid
-            return JSONResponse({"code": 0, "msg": "",
-                                 "data": _instant_stream_payload(media_guid(guid))})
-        if not brief:
-            return await forward_upstream(request)
-        sl = inj.stream_list(brief)
-        if inj.is_tv(brief):
-            # 标题播放键实际播放智能续播集，线路菜单也以该集为准
-            egs = store.tv_episode_guids(guid, regular_only=True)
-            if egs:
-                resume_guid, _ = history.resume_episode(egs)
-                target = store.get_episode_target(resume_guid)
+    # 线路卡 guid：按 guid 中携带的影片/线路/集序号返回流容器。
+    # 种子身份只决定“播哪条线的第几集”；起播仍走竞速（见 play/play）。
+    seeded = _seeded_media_target(guid, request)
+    if seeded is not None:
+        brief = store.get_title_by_guid(seeded["online_guid"]) or {}
+        ep_guids = store.tv_episode_guids(seeded["online_guid"], regular_only=True) \
+            if inj.is_tv(brief) else []
+        ep = store.get_episode(ep_guids[seeded["index"]]) \
+            if ep_guids and seeded["index"] < len(ep_guids) else None
+        if ep is not None:
+            sl = inj.episode_stream_list(ep)
         else:
-            target = store.resolve_media_guid(media_guid(guid))
+            sl = inj.stream_list(brief)
+        target = seeded
+    else:
+        ep = store.get_episode(guid)
+        target = None
+        if ep:
+            sl = inj.episode_stream_list(ep)
+            target = store.get_episode_target(guid)
+        else:
+            brief = store.get_title_by_guid(guid)
+            if not brief and chart_cache.is_chart_guid(guid):
+                if time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
+                    return await forward_upstream(request)
+                # 打开详情/线路菜单也不能同步等搜源：启动后台匹配并立即返回占位线路，
+                # 真正播放时 play/info/preset 会等待同一单飞任务。
+                start_resolve_chart(guid)
+                _PENDING_MEDIA_CHART[media_guid(guid)] = guid
+                return JSONResponse({"code": 0, "msg": "",
+                                     "data": _instant_stream_payload(media_guid(guid))})
+            if not brief:
+                return await forward_upstream(request)
+            sl = inj.stream_list(brief)
+            if inj.is_tv(brief):
+                # 标题播放键实际播放智能续播集，线路菜单也以该集为准
+                egs = store.tv_episode_guids(guid, regular_only=True)
+                if egs:
+                    resume_guid, _ = history.resume_episode(egs)
+                    target = store.get_episode_target(resume_guid)
+            else:
+                target = store.resolve_media_guid(media_guid(guid))
     quals = _qualities(target) if target else []
     if target and target.get("t4"):
         # Menus never start a media probe. Reuse an exact episode/line result.
@@ -5101,6 +5514,8 @@ def _online_card_meta(guid: str) -> dict | None:
 def _is_online_item_guid(guid: str) -> bool:
     if not guid:
         return False
+    if _parse_line_item_guid(guid) or _parse_line_season_guid(guid):
+        return True
     if hgdj_enabled() and hgdjmod.is_hgdj_series(guid):
         return True
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
@@ -5184,7 +5599,8 @@ async def item_favorite_add(request: Request):
         body = json.loads(await request.body() or b"{}")
     except Exception:
         body = {}
-    guid = (body.get("guid") or body.get("item_guid") or "").strip()
+    guid = _normalize_history_guid(
+        (body.get("guid") or body.get("item_guid") or "").strip())
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
     marks.add_favorite(guid, _mark_extra(guid))
@@ -5197,7 +5613,8 @@ async def item_favorite_del(request: Request):
         body = json.loads(await request.body() or b"{}")
     except Exception:
         body = {}
-    guid = (body.get("guid") or body.get("item_guid") or "").strip()
+    guid = _normalize_history_guid(
+        (body.get("guid") or body.get("item_guid") or "").strip())
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
     marks.remove_favorite(guid)
@@ -5210,7 +5627,8 @@ async def item_watched_set(request: Request):
         body = json.loads(await request.body() or b"{}")
     except Exception:
         body = {}
-    guid = (body.get("guid") or body.get("item_guid") or "").strip()
+    guid = _normalize_history_guid(
+        (body.get("guid") or body.get("item_guid") or "").strip())
     # 允许显式取消（watched=0/is_watched=0）
     want = body.get("watched", body.get("is_watched", 1))
     try:
@@ -5232,7 +5650,8 @@ async def item_watched_del(request: Request):
         body = json.loads(await request.body() or b"{}")
     except Exception:
         body = {}
-    guid = (body.get("guid") or body.get("item_guid") or "").strip()
+    guid = _normalize_history_guid(
+        (body.get("guid") or body.get("item_guid") or "").strip())
     if not _is_online_item_guid(guid):
         return await forward_upstream(request)
     marks.remove_watched(guid)
@@ -5386,6 +5805,10 @@ async def play_info(request: Request):
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
     client = _client_of(request)
+    if _parse_line_item_guid(guid):
+        line_info = _vod_play_info(guid, client)
+        if line_info is not None:
+            return line_info
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
@@ -5614,7 +6037,8 @@ async def stream_post(request: Request):
                     "audio_streams": [], "subtitle_streams": [],
                     "qualities": [], "cloud_storage_info": None}})
     # <<< PRIVATE:CATVOD
-    target = store.resolve_media_guid(mg)
+    # 线路卡 media_guid：先按 guid 内线路身份解析（只定选集身份，不固定线）。
+    target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
     if not target and chart_guid_by_media(mg):
         # 网页播放器会在进入播放页前连续请求 stream；这里必须瞬时返回，不能等待搜源，
         # 否则三个请求串起来仍会把用户留在海报墙。真实匹配推迟到播放器请求 preset。
@@ -5729,7 +6153,7 @@ async def media_range(mg: str, request: Request):
             return RedirectResponse(_xlib_play_link(sg, idx), status_code=302,
                                     headers={"Cache-Control": "no-store"})
     # <<< PRIVATE:CATVOD
-    target = store.resolve_media_guid(mg)
+    target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
     chart_g = "" if target else chart_guid_by_media(mg)
     if not target and chart_g:
         if time.time() - _CHART_FAILED_TS.get(chart_g, 0) < _CHART_FAILED_TTL:
@@ -5747,7 +6171,12 @@ async def media_range(mg: str, request: Request):
     # 同样【不在此同步解析】（会卡 App 起播、像点了没反应）：先瞬时 302 到对应代理，
     # 由 preset/main、direct 内部在播放加载阶段解析，并有双向 302 兜底。
     _wrapper, is_hls = _guess_wrapper(target)
-    q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
+    # 线路卡：auto=1 + 种子，不 pin line，起播仍走竞速（冻结）。
+    if target.get("_line_seed"):
+        q = urllib.parse.urlencode({"auto": "1", "seed_line": target["line"],
+                                    "index": target["index"]})
+    else:
+        q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
     if is_hls:
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
@@ -5799,7 +6228,7 @@ async def play_play(request: Request):
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(info, client)})
         return JSONResponse({"code": 0, "msg": "", "data": {}})
-    base_target = store.resolve_media_guid(mg)
+    base_target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
     if not base_target and chart_guid_by_media(mg):
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
         # preset/main 请求时再等待后台匹配，避免 play/info+stream+play 串行等待。
@@ -5837,7 +6266,13 @@ async def play_play(request: Request):
     # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
     # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
     wrapper, is_hls = _guess_wrapper(target)
-    q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
+    # 线路卡起播：仍带 auto=1 走竞速；种子只经 seed_line 传递，不 pin line。
+    # （冻结：上游 _fixed_line 式“去 auto + 固定线”不搬；见 _seeded_media_target。）
+    if base_target.get("_line_seed"):
+        q = urllib.parse.urlencode({"auto": "1", "seed_line": target["line"],
+                                    "index": target["index"]})
+    else:
+        q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
     if is_hls:
         play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}"
         # 后台立刻预热该线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
@@ -6035,6 +6470,8 @@ async def play_record(request: Request):
     except Exception:
         body = {}
     ig = body.get("item_guid", "")
+    body["item_guid"] = _normalize_history_guid(ig)
+    ig = body["item_guid"]
     if store.get_title_by_guid(ig) or store.get_episode(ig):
         # 记录在线播放进度到本地（继续观看），不上报官方库
         history.record(body)
@@ -6057,7 +6494,9 @@ async def play_record_delete(request: Request):
                 ids = [x.get("item_guid") if isinstance(x, dict) else x for x in j]
     except Exception:
         ids = []
-    ids = [g for g in ids if g and (store.get_title_by_guid(g) or store.get_episode(g))]
+    ids = [_normalize_history_guid(g) for g in ids
+           if g and (store.get_title_by_guid(_normalize_history_guid(g))
+                     or store.get_episode(_normalize_history_guid(g)))]
     if ids:
         history.delete(ids)
         return JSONResponse({"code": 0, "msg": "", "data": True})
@@ -6163,6 +6602,23 @@ def _line_key_match(want: str, got: str) -> bool:
 
 
 def _pick_episode(mg: str, request: Request) -> dict | None:
+    # 线路卡 guid：按 guid 内线路身份解析该集（选集不串线）。
+    # 播放器在菜单里手切了另一条线（query 带 line）时尊重手切——现有显式选线
+    # 语义不变；种子只在没有手切时决定集身份，绝不固定播放线（冻结）。
+    seeded = _seeded_media_target(mg, request)
+    if seeded is not None:
+        qline = request.query_params.get("line")
+        if qline and qline != seeded.get("line"):
+            try:
+                idx = int(request.query_params.get("index", seeded.get("index", 0)))
+            except ValueError:
+                idx = seeded.get("index", 0)
+            r = store.resolve_episode(seeded["online_guid"], qline, idx)
+            if r:
+                return dict(r, online_guid=seeded["online_guid"],
+                            ep_guid=seeded.get("ep_guid", ""),
+                            kind=seeded.get("kind"))
+        return seeded
     # 全网回源别名：内置线路全死、已按片名找到别的可播记录时，原 mg 改指新记录
     alt_og = _MEDIA_REDIRECT.get(mg)
     if alt_og:
@@ -7414,7 +7870,7 @@ def _line_score(cand: dict) -> float:
     return s if s > 0 else _SPEED_PRIOR
 
 
-def _race_candidates(picked: dict) -> list[dict]:
+def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
     """竞速候选：默认线/上次最快线在前，坏线排除（除非全坏），限量。"""
     cands = _episode_candidates(picked)
     default = store.best_line(picked.get("online_guid", ""))
@@ -7440,7 +7896,9 @@ def _race_candidates(picked: dict) -> list[dict]:
         return (-round(_line_score(c), 1),           # 实测/先验吞吐高的线优先
                 c["line"] != fast if fast else True,
                 c["line"] != pred if pred else True,
-                c["line"] != default if default else True)
+                c["line"] != default if default else True,
+                # 冻结：种子只作最后一级 tiebreak，绝不盖过吞吐打分/最快线/默认线。
+                c["line"] != seed if seed else True)
 
     cands.sort(key=rank)
     return cands
@@ -7450,7 +7908,8 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
     """并行竞速探测候选线路；先成功者胜（默认高质量线给小幅领先优势）。
 
     返回胜出的已解析目标（HLS 胜者会再构建播放列表缓存）；全部失败返回 None。"""
-    cands = _race_candidates(picked)
+    cands = _race_candidates(
+        picked, request.query_params.get("seed_line") or "")
     if not cands:
         return None
     default = store.best_line(picked.get("online_guid", ""))
@@ -7882,11 +8341,15 @@ async def hls_preset(mg: str, request: Request):
     idx = int(picked.get("index", 0) or 0)
 
     # 自动起播：把上一次竞速选出的最快线排到首位（稳定用线）；用户显式选线时不动顺序
+    # 冻结：最快线记忆仍是首要顺序；线路卡的种子只作次级 tiebreak，绝不盖过最快线。
     auto_mode = (not explicit_line) and _fastest_on()
+    seed_line = request.query_params.get("seed_line") or ""
     if auto_mode:
         fast = remembered_fast_line(picked)
-        if fast:
-            hls_targets.sort(key=lambda t: t["line"] != fast)
+        if fast or seed_line:
+            hls_targets.sort(key=lambda t: (
+                t["line"] != fast if fast else True,
+                t["line"] != seed_line if seed_line else True))
     else:
         # 手动/菜单模式：网盘线（高质量原画）排在在线线之前，便于直接选到网盘资源
         hls_targets.sort(key=lambda t: 0 if _pan_match(str(t.get("url") or ""))
@@ -7898,6 +8361,11 @@ async def hls_preset(mg: str, request: Request):
         # 用户手动切到的其它变体不带，严格尊重其选择
         if is_auto_first:
             q["auto"] = "1"
+            if seed_line:
+                # 种子首变体不 pin line：main 见到 auto=1 且无显式 line 才会
+                # 真正跑并行竞速（_race_fastest）；种子经 seed_line 参与候选排序。
+                q.pop("line")
+                q["seed_line"] = seed_line
         return "main.m3u8?" + urllib.parse.urlencode(q)
 
     if len(hls_targets) == 1:
