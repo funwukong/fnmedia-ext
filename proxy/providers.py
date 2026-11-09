@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 import httpx
 
 import features
+import netutil
 
 try:
     from fnlog import get_logger
@@ -481,8 +482,7 @@ async def probe_source(api: str, keyword: str = "庆余年",
         return {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
                 "sample": "", "error": "地址需以 http(s):// 开头"}
     try:
-        async with httpx.AsyncClient(follow_redirects=True,
-                                     trust_env=False) as client:
+        async with netutil.async_client(timeout=timeout) as client:
             r = await client.get(
                 api, params={"ac": "detail", "wd": keyword},
                 headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
@@ -512,8 +512,7 @@ async def probe_source(api: str, keyword: str = "庆余年",
     if not lst:
         # 接口合法但该词无结果，再试分类列表确认源活着
         try:
-            async with httpx.AsyncClient(follow_redirects=True,
-                                         trust_env=False) as client:
+            async with netutil.async_client(timeout=timeout) as client:
                 r2 = await client.get(
                     api, params={"ac": "list", "pg": 1},
                     headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
@@ -1017,19 +1016,44 @@ async def search_all(keyword: str, sources=None,
         async with sem:
             return await _dispatch_search(client, source, keyword)
 
-    async with httpx.AsyncClient(follow_redirects=True, trust_env=False) as client:
+    async with netutil.async_client() as client:
         if not scheduled:
             return []
         tasks = [asyncio.create_task(_one(s)) for s in scheduled]
         if budget is None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
-            done, pending = await asyncio.wait(tasks, timeout=budget)
+            # 够快即返回（上游 v0.2.70）：快源先完成、累计结果达到阈值且过了最小
+            # 等待后，立即取消仍在途的慢源，不必干等满预算；预算仍作兜底，保证
+            # 慢词/冷门词能拿全结果。只改预算分支的等待方式，不动源健康降级
+            # （search_source 内）与并发/交错调度。
+            early_min_results, early_min_wait = 25, 0.8
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + float(budget)
+            early_gate = loop.time() + min(early_min_wait, float(budget))
+            pending = set(tasks)
+            results = []
+            while pending and loop.time() < deadline:
+                done, pending = await asyncio.wait(
+                    pending, timeout=min(0.25, deadline - loop.time()),
+                    return_when=asyncio.FIRST_COMPLETED)
+                for t in done:
+                    if not t.cancelled() and t.exception() is None:
+                        r = t.result()
+                        if isinstance(r, list):
+                            results.append(r)
+                total = sum(len(x) for x in results if isinstance(x, list))
+                if loop.time() >= early_gate and total >= early_min_results:
+                    break
             for t in pending:
                 t.cancel()
-            results = [t.result() for t in tasks
-                       if t in done and not t.cancelled() and t.exception() is None]
             await asyncio.gather(*tasks, return_exceptions=True)
+            # 被取消/超时的任务若已产出也尽量回收
+            for t in tasks:
+                if t.done() and not t.cancelled() and t.exception() is None:
+                    r = t.result()
+                    if isinstance(r, list) and r not in results:
+                        results.append(r)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):

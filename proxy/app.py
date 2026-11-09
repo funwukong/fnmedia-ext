@@ -38,6 +38,7 @@ try:
 except Exception:  # noqa: BLE001
     BUILD_LABEL = "dev"
 import providers
+import netutil
 import sourcehealth
 import t4
 from t4_service import T4Service
@@ -8826,6 +8827,48 @@ async def ext_junk_keywords(request: Request):
     return {"code": 0, "msg": "saved", "data": {"junk_keywords": kws}}
 
 
+@app.post("/v/api/ext/source-proxy")
+async def ext_set_source_proxy(request: Request):
+    """设置/清空「访问资源站取源」专用代理（搜索/分类/测速/解析；视频流仍直连）。
+
+    issue #30：部分运营商直连资源站超时/被墙。保存后即时用该代理对一个内置源做
+    一次轻量测速，返回连通结果（失败也保存，由用户自行决定）。"""
+    body = await request.json()
+    px = str(body.get("proxy", "") or "").strip()
+    ok, msg = config.set_source_proxy(px)
+    if not ok:
+        return JSONResponse({"code": 400, "msg": msg}, status_code=400)
+    # 代理模式：off/on/auto（缺省保持不变）
+    if body.get("mode") is not None:
+        mok, mmsg = config.set_source_proxy_mode(str(body.get("mode")))
+        if not mok:
+            return JSONResponse({"code": 400, "msg": mmsg}, status_code=400)
+    mode = config.source_proxy_mode()
+    # 切换模式或改代理时，清空 auto 学习到的"需代理主机"，避免旧判断残留
+    netutil.clear_proxy_hosts()
+    test_ok, test_msg = False, ""
+    if px:
+        try:
+            import time as _t
+            src = next((s for s in config.enabled_sources()
+                        if s.get("api", "").startswith("http")), None)
+            api = (src or {}).get("api", "")
+            t0 = _t.monotonic()
+            async with netutil.async_client(timeout=10.0, px=px) as cli:
+                rr = await cli.get(api, params={"ac": "list", "pg": 1},
+                                   headers={"User-Agent": "Mozilla/5.0"})
+            ms = int((_t.monotonic() - t0) * 1000)
+            test_ok = rr.status_code == 200
+            test_msg = f"{(src or {}).get('name', api[:30])} HTTP {rr.status_code} / {ms}ms"
+        except Exception as exc:  # noqa: BLE001
+            test_msg = f"{type(exc).__name__}: {str(exc)[:100]}"
+    return {"code": 0, "msg": "",
+            "data": {"proxy": netutil.source_proxy(),
+                     "mode": mode,
+                     "test_ok": (True if not px else test_ok),
+                     "test_msg": ("直连（未设置代理）" if not px else test_msg)}}
+
+
 def _schedule_routes_refresh():
     async def _run_after_current():
         # 刷新进行中时不能丢事件：连续“关→开”切换若把“开”丢掉，
@@ -9308,6 +9351,7 @@ async def ext_adfilter_status():
     import adfilter as _adf
     st = _adf.stats()
     st["dynamic"] = _adf._dynamic_enabled()
+    st["sps"] = _adf.sps_enabled()
     # 附带各规则组的名称/域名，便于管理页展示
     st["groups"] = [{"name": g.get("name", ""),
                      "hosts": g.get("hosts", []),
@@ -9318,16 +9362,21 @@ async def ext_adfilter_status():
 
 @app.post("/v/api/ext/adfilter/toggle")
 async def ext_adfilter_toggle(request: Request):
-    """开关 m3u8 去广告。body: {"enabled":bool} 或 {"enabled":bool,"dynamic":bool}"""
+    """开关 m3u8 去广告。body: {"enabled":bool} / {"dynamic":bool} / {"sps":bool}"""
     import adfilter as _adf
     body = await request.json()
     if "dynamic" in body:
         config.save({"ad_filter_dynamic": bool(body.get("dynamic"))})
+    if "sps" in body:
+        config.save({"ad_filter_sps": bool(body.get("sps"))})
+        if not bool(body.get("sps")):
+            _adf.reset_sps_cache()
     if "enabled" in body:
         _adf.set_enabled(bool(body.get("enabled")))
     return {"code": 0, "msg": "",
             "data": {"enabled": _adf.enabled(),
-                     "dynamic": _adf._dynamic_enabled()}}
+                     "dynamic": _adf._dynamic_enabled(),
+                     "sps": _adf.sps_enabled()}}
 
 
 @app.post("/v/api/ext/adfilter/rules")

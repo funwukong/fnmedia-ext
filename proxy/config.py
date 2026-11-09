@@ -161,6 +161,15 @@ DEFAULTS = {
     # 播放、聚合搜索、CMS 探测等一律不走此代理（产品客户端保持 trust_env=False 直连）。
     # 形如 http://user:pass@host:port ；留空表示直连。
     "subscription_proxy": "",
+    # 仅用于「访问资源站取源」（聚合搜索 / 分类深翻 / 测速探测 / CMS 详情）的可选
+    # HTTP(S) 代理。部分运营商直连资源站超时/被墙，挂代理可显著改善搜索结果与速度
+    # （issue #30）。播放、m3u8/分片等媒体流默认仍直连，不增加代理带宽压力。
+    # 形如 http://user:pass@host:port ；留空=直连。
+    "source_proxy": "",
+    # 资源站代理模式："off"=一律直连（忽略已配置代理）；"on"=所有取源都走代理；
+    # "auto"=默认直连，仅当某个资源站直连发生连接级失败（重置/超时/DNS等）时，
+    # 自动对该站切换到已配置代理重试，其余站点保持直连（推荐）。
+    "source_proxy_mode": "auto",
     # 检查/下载插件更新安装包时可选的 HTTP(S) 代理（仅更新用途）。
     # 留空则回退 subscription_proxy，再不行直连。仅存于本机 state，不随包分发。
     "update_proxy": "",
@@ -168,6 +177,9 @@ DEFAULTS = {
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
     "ad_filter_dynamic": True,
+    # 分片编码参数(SPS)指纹去广告：识别"重新编码拼接、无任何结构特征"的广告。
+    # 只读分片头 4~32KB，按块时长加权投票 + 多重守卫，判定不确定时绝不删。
+    "ad_filter_sps": True,
     # 红果短剧（HGDJ）伪媒体库：由本机 HGDJ 服务提供元数据/播放流，
     # 插件仅充当客户端，本机服务缺省监听 127.0.0.1:18098。
     "hgdj_enabled": False,
@@ -485,6 +497,39 @@ class Config:
             cfg["subscription_proxy"] = p
             self._persist(cfg)
             return True, "ok"
+
+    def set_source_proxy(self, proxy_url: str) -> tuple[bool, str]:
+        """保存「资源站取源」专用代理（空串=直连），issue #30。
+        仅用于搜索/分类/探测/详情；不影响订阅抓取与媒体播放。"""
+        from urllib.parse import urlparse
+        p = (proxy_url or "").strip()
+        if p:
+            u = urlparse(p)
+            if u.scheme not in ("http", "https", "socks5", "socks5h") or not u.hostname:
+                return False, "代理地址格式应为 http://user:pass@host:port"
+        with _LOCK:
+            cfg = self.get()
+            cfg["source_proxy"] = p
+            self._persist(cfg)
+            return True, "ok"
+
+    def set_source_proxy_mode(self, mode: str) -> tuple[bool, str]:
+        """设置资源站代理模式：off/on/auto。"""
+        m = str(mode or "auto").strip().lower()
+        if m not in ("off", "on", "auto"):
+            return False, "模式须为 off/on/auto"
+        with _LOCK:
+            cfg = self.get()
+            cfg["source_proxy_mode"] = m
+            self._persist(cfg)
+            return True, "ok"
+
+    def source_proxy_mode(self) -> str:
+        try:
+            m = str(self.get().get("source_proxy_mode") or "auto").strip().lower()
+            return m if m in ("off", "on", "auto") else "auto"
+        except Exception:
+            return "auto"
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
         with _LOCK:
