@@ -4020,6 +4020,9 @@ async def item_list(request: Request):
         total = catalog.total(ccat)
         offset = max(0, min(offset, total))
         briefs = await catalog.get_window(ccat, offset, page_size)
+        # 派生 4K 的总数在翻页后才准（total() 在此场景下返回实际找到的数）；
+        # 先按旧总数翻、再按找到的数报，前端才不会对着空库一直翻页。
+        total = catalog.total(ccat)
         rows = _catalog_filter([_catalog_card(b, ccat) for b in briefs], body)
         rows = clientmod.normalize_cards(rows, client)
         return JSONResponse({"code": 0, "msg": "", "data": {
