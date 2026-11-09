@@ -132,6 +132,10 @@ DEFAULTS = {
     "guard_native_enabled": True,
     # 置顶的虚拟媒体库 guid 集合（打开=在飞牛影视媒体库列表置顶，关闭=普通顺序）。
     "pinned_libs": [],
+    # 媒体库可见权限：{库 guid: [用户名, ...]}。某库没配或配空列表=全部用户
+    # 可见（默认）；配了非空名单后只有名单里的用户能看到该库。用户名以官方
+    # user/info 返回的为准；身份识别不到时放行，不锁死。
+    "library_visible_users": {},
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
@@ -479,6 +483,32 @@ class Config:
             else:
                 cur = [g for g in cur if g != guid]
             cfg["pinned_libs"] = cur
+            self._persist(cfg)
+            return True, "ok"
+
+    def lib_visible_users(self, guid: str) -> list[str]:
+        """某库允许的用户名列表；空列表表示不限制（全部可见）。"""
+        from visibility import allowed_users_for
+        with _LOCK:
+            users = allowed_users_for(self.get(), guid)
+            return list(users) if users else []
+
+    def set_lib_visible_users(self, guid: str, users) -> tuple[bool, str]:
+        """设置某库的可见用户名单；空列表=取消限制（全部可见）。"""
+        from visibility import normalize_users
+        if not isinstance(guid, str) or not guid:
+            return False, "guid 非法"
+        clean = normalize_users(users)
+        with _LOCK:
+            cfg = self.get()
+            mapping = cfg.get("library_visible_users")
+            if not isinstance(mapping, dict):
+                mapping = {}
+            if clean:
+                mapping[guid] = clean
+            else:
+                mapping.pop(guid, None)
+            cfg["library_visible_users"] = mapping
             self._persist(cfg)
             return True, "ok"
 
