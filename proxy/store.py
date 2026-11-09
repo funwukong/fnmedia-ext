@@ -390,6 +390,23 @@ class Store:
                for ln in brief.get("lines", {})]
         return [ln for ln, n in sorted(out, key=lambda x: -x[1]) if n > 0]
 
+    def close(self):
+        """进程关闭：尽力把最后一批脏数据写盘（本 fork 无防抖线程）。"""
+        try:
+            with self._lock:
+                self._flush_locked()
+        except Exception:
+            pass
+
+    def flush(self, wait: bool = True) -> bool:
+        """对外的立即落盘（关闭/重启前调用）。本 fork 写盘本就是同步的。"""
+        try:
+            with self._lock:
+                self._flush_locked()
+            return True
+        except Exception:
+            return False
+
     def _flush_locked(self, force=False):
         now = time.time()
         if not self._dirty:

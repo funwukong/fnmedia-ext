@@ -320,6 +320,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="primary small" onclick="saveWelfareCfg()">保存扩展设置</button>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-title">T4 选片</div>
+        <div class="lib-grid" id="t4Libs"></div>
+        <label class="switch-row">
+          <input type="checkbox" id="t4Enabled" onchange="saveT4Cfg()"/>
+          <span>在飞牛影视媒体库显示 T4 选片</span>
+        </label>
+      </div>
     </section>
 
     <!-- ============ 片源质量 ============ -->
@@ -429,7 +438,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
       </div>
       <div class="card">
-        <div class="card-title">TVBox / 影视仓 / OK影视 订阅</div>
+        <div class="card-title">TVBox / T4 订阅</div>
         <p class="card-sub">自动识别并分类：标准苹果CMS影视站（type 0/1）
           <!-- >>> PRIVATE:GUARD -->
           、<strong>Guard 加固秒播源</strong>、<strong>普通爬虫源（csp_，自动下载/补传 jar）</strong>（完整版，本地安卓运行时执行）
@@ -439,7 +448,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <!-- <<< PRIVATE:DRPY -->
           能直接播放的<strong>自动启用</strong>；P2P/磁力/云盘等慢源与 jar/脚本暂未就绪的源导入后默认关闭，可在结果里开启或补传；
           网盘/直播/无法识别的源跳过并说明原因。</p>
-        <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 base64 与多订阅聚合）" style="flex:2"/>
+        <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 T4 / base64 / 多订阅聚合）" style="flex:2"/>
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
           <!-- >>> PRIVATE:SPIDER -->
           <button class="small" style="border-color:var(--accent);color:var(--accent)" onclick="importFantaiying()" title="官方维护、在线影视+网盘聚合；自动解密、智能跳过 x86 会崩溃的加固源">⚡ 一键饭太硬</button>
@@ -1081,7 +1090,7 @@ function catKeyOf(title){
 function libCardHtml(L,ic){
   return `<div class="lib" data-g="${L.guid}"><div class="ic">${ic}</div>
     <div style="flex:1;min-width:0"><div class="t">${esc(L.title)}</div>
-      <div class="c">${L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):"建库中…")}</div></div>
+      <div class="c">${L.group==="t4"?(L.count+" 个源"):L.group==="hot"?(L.count+" 条"):(L.count?("路由 "+L.count):"建库中…")}</div></div>
     <label class="pin" title="在飞牛影视媒体库列表中置顶">
       <input type="checkbox" ${L.pinned?"checked":""} onchange="togglePin('${L.guid}',this)"/>置顶</label>
   </div>`;
@@ -1098,6 +1107,8 @@ function renderLibrary(){
   $("hotEnabled").checked=CFG.hot_library_enabled!==false;
   if($("catEnabled"))$("catEnabled").checked=CFG.catalog_library_enabled!==false;
   if($("welfareEnabled"))$("welfareEnabled").checked=CFG.welfare_library_enabled===true;
+  if($("t4Enabled"))$("t4Enabled").checked=CFG.t4_library_enabled!==false;
+  if($("t4Libs"))$("t4Libs").innerHTML=LIBS.filter(x=>x.group==="t4").map(L=>libCardHtml(L,"📡")).join("");
   $("hotInterval").value=Math.round((CFG.hot_refresh_interval||21600)/3600);
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const cats=(STATUS.catalog&&STATUS.catalog.categories)||{};
@@ -1128,6 +1139,12 @@ async function saveCatCfg(){
   const body={catalog_library_enabled:$("catEnabled").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){Object.assign(CFG,body);toast("海量四库设置已保存");await loadLibs();renderLibrary();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function saveT4Cfg(){
+  const body={t4_library_enabled:$("t4Enabled").checked};
+  const r=await jpost("/v/api/ext/config",body);
+  if(r.code===0){Object.assign(CFG,body);toast("T4 选片设置已保存");await loadLibs();renderLibrary();}
   else toast(r.msg||"保存失败","fail");
 }
 async function saveWelfareCfg(){
@@ -1199,13 +1216,13 @@ function renderSources(){
       <td style="white:nowrap">
         <label title="把该资源站单独生成一张媒体库卡片" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer">
           <input type="checkbox" class="sa" ${src.standalone?"checked":""}
-           ${(src.enabled&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--accent)"/>库</label>
+           ${(src.enabled&&src.kind!=="t4"&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--accent)"/>库</label>
         <label title="非过滤：独立库内不按标题/备注过滤解说/预告/花絮" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer;margin-left:4px">
           <input type="checkbox" class="lf" ${src.loose_filter?"checked":""}
            ${(src.enabled&&src.standalone&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--warn)"/>非过滤</label>
         ${extraCell}
       </td>
-      <td><div style="font-weight:500">${esc(src.name)}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
+      <td><div style="font-weight:500">${esc(src.name)}${src.kind==="t4"?'<span class="tag">T4</span>':''}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
         <div class="meta">${esc(src.api)}</div></td>
       <td class="st wait" data-st>未测</td>
       <td><button class="small" data-test>测试</button></td>
@@ -1426,7 +1443,7 @@ async function importFantaiying(){
 }
 function goDeploy(){switchPage("tvbox");setTimeout(()=>{const b=$("scInstallAll");if(b)b.click();},80);}
 function renderSubResult(d){
-  const cms=d.cms||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
+  const cms=d.cms||{},t4=d.t4||{},g=d.guard||{},rt=d.runtime,skips=d.skipped_detail||[];
   let h="";
   // 运行时引导（加固源已登记但运行时未就绪 / 公开构建）
   if(g && !g.skipped_build && g.items && g.items.length && rt && !rt.ready){
@@ -1443,13 +1460,18 @@ function renderSubResult(d){
   const csp=d.csp||{}, dr=d.drpy||{};
   const cspOk=(csp.items||[]).filter(x=>x.enabled).length;
   const drOk=(dr.items||[]).filter(x=>x.enabled).length;
-  const totalOk=cmsOk+gOk+cspOk+drOk;
+  const totalOk=cmsOk+gOk+cspOk+drOk+(t4.added||0);
   h+='<div style="margin:8px 0;font-weight:600">共扫描 '+(d.scanned||0)+' 个站点'
-    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增可直接使用 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
+    +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增登记 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
   // 苹果CMS
   if(cms.candidates||cms.added||cms.duplicate){
     h+='<div class="subgrp"><div class="subgrp-t">🍿 苹果CMS影视站　新增 '+cmsOk+' · 已存在 '+(cms.duplicate||0)+'</div>';
     (cms.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已启用</span></div>';});
+    h+='</div>';
+  }
+  if(t4.candidates||t4.added||t4.duplicate){
+    h+='<div class="subgrp"><div class="subgrp-t">T4 远程源　新增 '+(t4.added||0)+' · 已存在 '+(t4.duplicate||0)+'</div>';
+    (t4.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已登记</span></div>';});
     h+='</div>';
   }
   // 加固

@@ -120,6 +120,7 @@ DEFAULTS = {
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
     "catalog_library_enabled": True,
+    "t4_library_enabled": True,
     # 扩展（成人）资源库独立开关：开启后，已被源标记为「福利分类(adult)」的
     # 源才把 ADULT_CAT 纳入浏览。默认关闭：不建路由、不抓取、不显示。
     "welfare_library_enabled": False,
@@ -312,6 +313,9 @@ class Config:
                 m["guard_key"] = s.get("guard_key", "") if features.GUARD else ""
                 # <<< PRIVATE:GUARD
                 m["builtin"] = bool(s.get("builtin", False))
+                for key in ("kind", "site_key", "ext", "searchable", "filterable", "indexs", "method"):
+                    if key in s:
+                        m[key] = s[key]
                 merged.append(m)
             cfg["sources"] = merged
             cfg["removed_ids"] = sorted(removed)
@@ -418,6 +422,26 @@ class Config:
         with _LOCK:
             return dict(self.get().get("source_priority") or {})
 
+    def import_t4_sources(self, sources: list[dict]) -> dict:
+        import t4
+        with _LOCK:
+            cfg = self.get()
+            existing = {s["id"] for s in cfg["sources"]}
+            added, duplicate = [], 0
+            for source in sources:
+                sid = t4.source_id(source["api"], source.get("ext"))
+                if sid in existing:
+                    duplicate += 1
+                    continue
+                cfg["sources"].append(dict(
+                    source, id=sid, kind="t4", builtin=False, standalone=False))
+                existing.add(sid)
+                added.append(source["name"])
+            if added:
+                self._persist(cfg)
+            return {"candidates": len(sources), "added": len(added),
+                    "added_names": added, "duplicate": duplicate}
+
     def set_source_priority(self, mapping: dict) -> tuple[bool, str]:
         """整体保存源优先级（id -> 整数权重），忽略未知源与非法值。"""
         with _LOCK:
@@ -455,6 +479,8 @@ class Config:
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
+            if target.get("kind") == "t4" and on:
+                return False, "T4 来源统一显示在「T4 选片」，无需逐插件建立独立库"
             target["standalone"] = bool(on)
             self._persist(cfg)
             return True, "ok"
