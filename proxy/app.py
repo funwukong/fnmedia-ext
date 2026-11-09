@@ -9101,6 +9101,10 @@ async def ext_import_subscription(request: Request):
             if _builtin == "fantaiying":
                 raw_sites, _spider, _base, _used = await tvboxmod.load_fantaiying()
                 _subs, _rules = 0, []
+            elif _builtin in ("cat_lite", "catlite", "mao_lite"):
+                # 内置轻量猫源：纯苹果CMS，无 jar/爬虫，零运行时，full/lite 通用。
+                raw_sites, _spider, _base, _used = tvboxmod.load_cat_lite_sync()
+                _subs, _rules = 0, []
             else:
                 return JSONResponse({"code": 400, "msg": f"未知内置订阅：{_builtin}"},
                                     status_code=400)
