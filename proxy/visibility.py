@@ -6,8 +6,8 @@
 - 某库没配、配了空列表、配的不是列表——全部视为“不限制”，所有人可见。
   默认行为与没这功能时完全一致。
 - 配了非空列表后，只有名单里的用户能看到该库。
-- 当前用户名为 None（身份识别不到）时一律放行：绝不因为识别失败
-  把库锁死，这是 fail-open 设计。
+- 当前用户名为 None（身份识别不到）时隐藏受限库：fail-closed 设计——
+  认不出是谁就不给看配了名单的库，未配限制的库不受影响（仍全部可见）。
 
 用户名按原样精确匹配（飞牛用户名区分大小写，以官方 user/info
 返回的为准）。
@@ -50,12 +50,12 @@ def restrictions_configured(cfg: dict) -> bool:
 
 
 def is_visible(cfg: dict, guid: str, username: str | None) -> bool:
-    """该用户能不能看到这个库。username 为 None（身份未知）时放行。"""
+    """该用户能不能看到这个库。username 为 None（身份未知）时隐藏受限库。"""
     allowed = allowed_users_for(cfg, guid)
     if allowed is None:
         return True
     if username is None:
-        return True
+        return False
     return username in allowed
 
 

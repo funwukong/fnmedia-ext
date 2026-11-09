@@ -134,7 +134,7 @@ DEFAULTS = {
     "pinned_libs": [],
     # 媒体库可见权限：{库 guid: [用户名, ...]}。某库没配或配空列表=全部用户
     # 可见（默认）；配了非空名单后只有名单里的用户能看到该库。用户名以官方
-    # user/info 返回的为准；身份识别不到时放行，不锁死。
+    # user/info 返回的为准；身份识别不到时受限库隐藏（fail-closed）。
     "library_visible_users": {},
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限

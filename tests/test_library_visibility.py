@@ -1,4 +1,4 @@
-"""媒体库可见权限：默认全放行、名单允许/拒绝、身份未知时放行。"""
+"""媒体库可见权限：默认全放行、名单允许/拒绝、身份未知时隐藏受限库。"""
 import asyncio
 import hashlib
 import types
@@ -34,9 +34,11 @@ def test_allow_list_allow_and_deny():
     assert vis.is_visible(cfg, LIB, "Alice") is False
 
 
-def test_unknown_identity_fails_open():
+def test_unknown_identity_fails_closed():
     cfg = {"library_visible_users": {LIB: ["alice"]}}
-    assert vis.is_visible(cfg, LIB, None) is True
+    # 身份未知时隐藏受限库（fail-closed）；未配限制的库仍全部可见。
+    assert vis.is_visible(cfg, LIB, None) is False
+    assert vis.is_visible({"library_visible_users": {}}, LIB, None) is True
 
 
 def test_allowed_users_normalization():

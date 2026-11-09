@@ -9,12 +9,12 @@
 
 本模块绝不伪造身份、绝不自己算签名、绝不存密码：只把本次请求自带
 的 Authorization（以及客户端自己算好的 Authx，如有）原样转发给官方
-user/info。官方认不出时返回 None，调用方按“身份未知”处理——默认
-放行，不锁死任何库。
+user/info。官方认不出时返回 None，调用方按“身份未知”处理——配了
+名单的受限库隐藏（fail-closed），未配限制的库不受影响。
 
 未在真机上验证的一步：user/info 是否接受回放的 Authx（签名里绑了
 原请求路径），或只凭 Authorization 就够。真机上若识别不到，日志里
-会有 identity_lookup_failed 警告，库保持全部可见。
+会有 identity_lookup_failed 警告，受限库隐藏。
 """
 from __future__ import annotations
 
@@ -95,7 +95,7 @@ async def _lookup(client, request, token: str, path: str):
 
 
 async def current_username(request) -> str | None:
-    """返回当前请求的飞牛用户名；识别不到返回 None（调用方按放行处理）。"""
+    """返回当前请求的飞牛用户名；识别不到返回 None（调用方按身份未知处理，受限库隐藏）。"""
     token = (request.headers.get("authorization") or "").strip()
     if not token:
         return None
