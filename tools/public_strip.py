@@ -15,7 +15,7 @@
 3. 把特性开关区块改写为关闭态：
    - proxy/features.py 的 PRIVATE:FEATURE_FLAGS → DDUO=False, ADULT=False；
    - 管理页 JS 的同名标记块 → 两个 FEAT_* 常量为 false。
-4. 从 requirements.txt 移除 wasmtime。
+4. 从 requirements.txt / requirements.lock / pyproject.toml 移除 wasmtime。
 5. 重新生成 CHANGELOG.md（去掉只属于可剥离特性的版本/条目）。
 
 硬红线（is_redline，涉未成年人性化、非自愿内容的永久屏蔽）不在剥离范围，
@@ -63,6 +63,7 @@ DROP_FILES = {
 # 仅处理这些文本扩展名（其余二进制/资产原样保留）
 TEXT_SUFFIX = {".py", ".js", ".html", ".css", ".md", ".txt", ".in",
                ".sh", ".json", ".yaml", ".yml", ".toml", ".cfg", ".service",
+               ".lock",
                "._common", ""}
 
 BLOCK_RE = re.compile(
@@ -125,8 +126,13 @@ def strip_blocks(text: str) -> tuple[str, set[str]]:
 
 
 def strip_requirements(text: str) -> str:
+    """去掉 wasmtime 依赖行。
+
+    覆盖两种写法：requirements*.txt/lock 的裸行 ``wasmtime==49.0.0``，
+    以及 pyproject.toml 依赖表里的带引号行 ``"wasmtime==49.0.0",``。
+    """
     kept = [ln for ln in text.splitlines(keepends=True)
-            if not re.match(r"\s*wasmtime\b", ln)]
+            if not re.match(r"\s*\"?wasmtime\b[^\n\"]*\"?,?\s*$", ln)]
     return "".join(kept)
 
 
@@ -554,7 +560,8 @@ def main(root: str) -> int:
             except (UnicodeDecodeError, OSError):
                 continue
             new = text
-            if rel == "requirements.txt":
+            if rel in ("requirements.txt", "requirements.lock",
+                       "pyproject.toml"):
                 new = strip_requirements(new)
             if rel == "CHANGELOG.md":
                 p.write_text(public_changelog(), encoding="utf-8")
