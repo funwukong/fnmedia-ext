@@ -111,14 +111,15 @@ class NonT4SearchBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(search.call_args.kwargs.get("budget"), BUDGET)
 
     async def test_explicit_timeout_still_drives_budget(self):
-        # 媒体库搜索传 timeout=6.0：不被默认预算覆盖，search_all 内仍由
-        # timeout 派生预算（6.0s）。
+        # 媒体库搜索传 timeout=6.0：不被默认预算覆盖，预算即 6.0s。
+        # P0-19：死三元已拆掉，预算只走 budget 一个参数（不再经
+        # timeout=None/budget=None 在 search_all 内二次派生）。
         with patch.object(providers, "search_all",
                           return_value=[]) as search:
             await appmod._aggregate_briefs("预算片D", timeout=6.0,
                                            refresh=True)
-        self.assertEqual(search.call_args.kwargs.get("timeout"), 6.0)
-        self.assertIsNone(search.call_args.kwargs.get("budget"))
+        self.assertEqual(search.call_args.kwargs.get("budget"), 6.0)
+        self.assertIsNone(search.call_args.kwargs.get("timeout"))
 
     # ---------- 端到端：假源 + 慢源 ----------
 

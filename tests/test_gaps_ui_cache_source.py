@@ -157,6 +157,9 @@ def test_catalog_reset_clears_routes_and_pages():
 
 def test_cache_status_and_clear(tmp_path, monkeypatch):
     _fresh_env(tmp_path, monkeypatch)
+    # P0-19 单层缓存：_search_cache 与 _AGG_CACHE 是同一对象，计数前先清空，
+    # 否则此前测试残留的聚合缓存条目会算进来。
+    appmod._AGG_CACHE.clear()
     appmod._search_cache["kw"] = (0.0, [])
     appmod._AGG_CACHE["kw"] = (0.0, [])
     with chartmod.chart_cache._lock:

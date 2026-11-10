@@ -140,19 +140,24 @@ def _self_url(url: str) -> str:
     if url.startswith("/"):
         return SELF_BASE.rstrip("/") + url
     return url
-_search_cache: dict[str, tuple[float, list]] = {}
-_search_inflight: dict[str, asyncio.Future] = {}
-CACHE_TTL = 120
-# 绑定聚合缓存池（上游 v0.2.69）：同一(片名·是否快源·是否含T4)在 TTL 内复用聚合后
-# 的 briefs，榜单绑定 / 播放回源 / 搜索等多次调用同一片名时不重复扇出所有源。
+# 单层搜索缓存（P0-19 合并，上游 v0.2.69 绑定聚合缓存池）：同一
+# (片名·是否快源·是否含T4)在 TTL 内复用聚合后的 briefs，榜单绑定 /
+# 播放回源 / 搜索等多次调用同一片名时不重复扇出所有源。
 # 注意：缓存的是 remember_merged 之后的 brief（含线路），命中即等价一次完整聚合。
-# 与已有的 _search_cache（120 秒，缓存搜索 brief，未过滤；每次返回时按
-# 当前查看者重新过滤建卡，见 online_search）+ _search_inflight 单飞互不干扰，
-# 只补聚合层这一层，不动现有搜索缓存。
+# 此前是双层：online_search 的 _search_cache（120 秒）+ _search_inflight 单飞，
+# 与聚合层 _AGG_CACHE（180 秒）+ _AGG_INFLIGHT 单飞存同一份 brief、单飞两次。
+# 现只留聚合层一层，TTL 统一为 AGG_CACHE_TTL（180 秒）；online_search
+# 不再自建缓存/单飞，直接复用 _aggregate_briefs（它缓存的是未过滤的
+# brief，每次返回仍按当前查看者重新过滤建卡，不会把先搜者的可见范围
+# 漏给后搜者）。缓存键仍区分请求参数（keyword·fast_only·include_t4）。
 _AGG_CACHE: dict[str, tuple[float, list]] = {}
 _AGG_INFLIGHT: dict[str, asyncio.Future] = {}
 AGG_CACHE_TTL = 180
 _AGG_CACHE_MAX = 800
+# 旧名字保留为同一对象的别名（不产生第二层存储）：既有测试、管理端点
+# （缓存计数/清空）仍引用 _search_cache / _search_inflight。
+_search_cache = _AGG_CACHE
+_search_inflight = _AGG_INFLIGHT
 T4_STREAM_READY_BUDGET = 8.0
 # 在线热门按内容拆成 4 个虚拟媒体库。guid 由固定串 md5 派生，保持稳定。
 HOT_CATEGORIES = [
@@ -2847,24 +2852,36 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     # 全局搜索，外层 wait_for 到点还会把已拿到的部分结果一并丢掉。现在无
     # 显式 timeout 时一律给 5.0s 兜底（与 T4 路径同值），早返回/总预算逻辑
     # 仍在 search_all 内，不动 fast_only 过滤与 T4 交错调度。
-    titles = await providers.search_all(
-        keyword, sources, timeout=timeout,
-        budget=None if timeout is not None else _AGGREGATE_SEARCH_BUDGET)
+    # 预算只传一个参数：显式 timeout 即总预算，否则用 5.0s 兜底。
+    # （旧写法 budget=None if timeout is not None else ... 是死三元：
+    # search_all 内又会把 None 还原成 timeout。）
+    budget = timeout if timeout is not None else _AGGREGATE_SEARCH_BUDGET
+    titles = await providers.search_all(keyword, sources, budget=budget)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
     # 播放线路（供播放器「切换线路」）；过滤解说/预告/无直链。
     loose_ids = {s["id"] for s in sources if s.get("loose_filter")}
     # T4 search cards intentionally have no episode list. Never merge them by name.
-    remote = [inj.brief_of(t) for t in titles if t.locator.get("kind") == "t4"
-              and not catalogmod.is_redline(t.title, t.remarks)
-              and (t.provider in loose_ids or not config.is_junk(t.title, t.remarks))]
-    titles = [t for t in titles if t.locator.get("kind") != "t4"]
+    # T4 与普通源一次遍历分流（此前 remote / titles 各全量扫一遍）。
+    remote = []
+    rest = []
+    for t in titles:
+        if t.locator.get("kind") == "t4":
+            if (not catalogmod.is_redline(t.title, t.remarks)
+                    and (t.provider in loose_ids
+                         or not config.is_junk(t.title, t.remarks))):
+                remote.append(inj.brief_of(t))
+        else:
+            rest.append(t)
+    titles = rest
     groups: dict[tuple, dict] = {}
 
     # 预筛可分组标题，并统计每个规范片名的年份（加固/爬虫源常缺年份）。
     # 归并规则：年份缺失的结果并入同规范片名“有年份且出现最多”的组，
     # 避免加固源因缺年份单独成组、导致无法作为该影片的可切换线路。
+    # 每标题每线路的可播集数只算一遍（按线路分组的 {线路名: [可播集]}），
+    # 归并循环直接复用，不再对每条线路重算一次。
     cand: list = []
     year_votes: dict[str, dict[str, int]] = {}
     for t in titles:
@@ -2875,12 +2892,15 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             pass
         if t.provider not in loose_ids and config.is_junk(t.title, t.remarks):
             continue
-        playable = [e for line in t.sources.values() for e in line
-                    if e.direct or e.resolve]
-        if not playable:
+        playable_by_line = {}
+        for lname, eps in t.sources.items():
+            play = [e for e in eps if e.direct or e.resolve]
+            if play:
+                playable_by_line[lname] = play
+        if not playable_by_line:
             continue
         nt = _norm_title(t.title)
-        cand.append((t, nt, playable))
+        cand.append((t, nt, playable_by_line))
         if t.year:
             year_votes.setdefault(nt, {})
             year_votes[nt][t.year] = year_votes[nt].get(t.year, 0) + 1
@@ -2894,16 +2914,13 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             return (ntitle, best_year)
         return (ntitle, year)
 
-    for t, nt, playable in cand:
+    for t, nt, playable_by_line in cand:
         key = _group_key_for(nt, t.year)
         g = groups.get(key)
         if g is None:
             g = {"rep": t, "lines": {}}
             groups[key] = g
-        for lname, eps in t.sources.items():
-            play = [e for e in eps if e.direct or e.resolve]
-            if not play:
-                continue
+        for lname, play in playable_by_line.items():
             lkey = f"{t.provider}::{lname}"
             # 同 key 保留直链更多（更优）者；否则集数更多者
             cur = g["lines"].get(lkey)
@@ -2958,43 +2975,20 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
     """在线搜索：聚合 brief → 按查看者可打开的库过滤 → 建卡。
 
     过滤是独立的一层（libfilter.filter_briefs），不改 search_all /
-    _aggregate_briefs。缓存与单飞只存**未过滤的 brief**：同一关键词
-    可能被不同账号先后搜到，缓存卡片会把先搜者的可见范围漏给后搜者，
-    故每次返回时都按当前 request 重新过滤、重新建卡。
+    _aggregate_briefs。缓存与单飞只有聚合层一层（见 _AGG_CACHE）：
+    它存的是**未过滤的 brief**，同一关键词可能被不同账号先后搜到，
+    缓存卡片会把先搜者的可见范围漏给后搜者，故每次返回时都按当前
+    request 重新过滤、重新建卡；查看者上下文（_ViewerCtx）每请求一个。
     request 为 None（无查看者上下文）时按 fail-closed 全部隐藏。
     """
-    now = time.time()
-    cache_key = keyword if not fast_only else keyword + "\x00fast"
-    if cache_key in _search_cache and now - _search_cache[cache_key][0] < CACHE_TTL:
-        briefs = _search_cache[cache_key][1]
-    else:
-        fut = _search_inflight.get(cache_key)
-        if fut is None:
-            fut = asyncio.get_event_loop().create_future()
-            _search_inflight[cache_key] = fut
-
-            async def work():
-                try:
-                    # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
-                    # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
-                    # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
-                    briefs = await _aggregate_briefs(
-                        keyword, fast_only=fast_only, timeout=timeout)
-                    _search_cache[cache_key] = (time.time(), briefs)
-                    if not fut.done():
-                        fut.set_result(briefs)
-                except Exception:
-                    # 客户端断连会让 fut 被取消，此时再 set_result 会抛 InvalidStateError
-                    if not fut.done():
-                        fut.set_result([])
-                finally:
-                    _search_inflight.pop(cache_key, None)
-
-            asyncio.create_task(work())
-        briefs = await fut
-    can_open = lambda k: _viewer_can_open_key(request, k)  # noqa: E731
+    # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
+    # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
+    # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
+    ctx = _viewer_ctx(request)
+    briefs = await _aggregate_briefs(
+        keyword, fast_only=fast_only, timeout=timeout)
     return [_search_card(b) for b in libfiltermod.filter_briefs(
-        briefs, can_open, gkey_of=_gkey_of_source)]
+        briefs, ctx.can_open_key, gkey_of=ctx.gkey_of_source)]
 
 
 def _search_card(brief: dict) -> dict:
