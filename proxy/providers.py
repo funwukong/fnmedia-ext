@@ -29,6 +29,18 @@ except Exception:  # 独立运行缺少 fnlog 时退回标准 logging
 
 _log = get_logger("providers")
 
+# P1-14 高频日志采样（与 app.py 的同名小工具各自独立，避免 providers
+# 依赖 app 造成循环引用）：死源跳过每搜 1 条 INFO，搜索扇出时会刷爆日志。
+# 默认只记 debug，每 100 次采样 1 条 info 保留心跳。
+_LOG_SAMPLE: dict[str, int] = {}
+
+
+def _sampled_log(key: str, every: int = 100) -> bool:
+    """该 key 的第 every 次调用返回 True（其余时间调用方记 debug）。"""
+    n = _LOG_SAMPLE.get(key, 0) + 1
+    _LOG_SAMPLE[key] = n
+    return n % every == 0
+
 try:
     import sourcehealth as _health
 except Exception:
@@ -345,7 +357,8 @@ async def search_source(client: httpx.AsyncClient, source: dict,
     # P2 源健康自动降级：连续失败 5 次的源在 3 分钟冷却窗内直接跳过，
     # 不再每次都等超时拖慢整体搜索；冷却过后自动放行一次试探。
     if _health is not None and not _health.usable(source.get("id", "")):
-        _log.info("source skipped (dead cooldown): id=%s", source.get("id"))
+        _emit = _log.info if _sampled_log("source_skip") else _log.debug
+        _emit("source skipped (dead cooldown): id=%s", source.get("id"))
         return []
     _t0 = time.monotonic()
     if source.get("kind") == "t4":
@@ -703,14 +716,6 @@ async def dduo_probe_source(source: dict, keyword: str = "庆余年",
                 "count": 0, "sample": "", "error": type(exc).__name__}
 
 
-async def dduo_get_title(client: httpx.AsyncClient, source: dict,
-                         vod_id: str) -> OnlineTitle | None:
-    """按 vod_id 拉详情并映射（供按需详情/独立库使用）。"""
-    import dduo
-    detail = await dduo.get_detail(client, source, vod_id)
-    if not detail:
-        return None
-    return _dduo_map_vod(detail, source, detail)
 # <<< PRIVATE:DDUO
 
 
@@ -721,7 +726,7 @@ def _xiaoya_map_item(v: dict) -> OnlineTitle:
     """把小雅分类/搜索列表项映射成 OnlineTitle。
 
     列表项不带播放线路（线路要 detail 才有），这里用一个占位 Episode 承载
-    vod_id，供聚合层判定"可播"；真正线路在按需详情（xiaoya_get_title）补全。
+    vod_id，供聚合层判定"可播"；真正线路在按需详情时补全。
     """
     vod_id = str(v.get("vod_id") or "")
     episodes = []
@@ -767,31 +772,6 @@ async def xiaoya_search_source(client, source: dict,
     return out
 
 
-async def xiaoya_get_title(client, source: dict, vod_id: str) -> OnlineTitle | None:
-    """按 vod_id 拉详情，解析出真实文件线路（供按需详情/播放）。"""
-    import asyncio
-    import catvod
-    tok = await catvod.xiaoya_token()
-    det = await asyncio.to_thread(catvod.detail, vod_id, tok)
-    if not det:
-        return None
-    eps = catvod.parse_episodes(det)
-    episodes = [Episode(
-        title=e["title"], url=e["id"], direct=True,
-        headers={"User-Agent": "Mozilla/5.0"},
-        play_from="xiaoya:" + e["line"], catvod=True,
-    ) for e in eps]
-    t = _xiaoya_map_item(det)
-    t.sources = {}
-    # 按线路分组（同一部影片的文件通常只有一个目录线路）
-    groups: dict[str, list] = {}
-    for ep in eps:
-        groups.setdefault(ep["line"], []).append(
-            Episode(title=ep["title"], url=ep["id"], direct=True,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    play_from="xiaoya:" + ep["line"], catvod=True))
-    t.sources = groups
-    return t
 # <<< PRIVATE:CATVOD
 
 
@@ -853,26 +833,6 @@ async def drpy_search_source(client, source: dict,
     return out
 
 
-async def drpy_get_title(client, source: dict, vod_id: str) -> OnlineTitle | None:
-    import asyncio
-    import drpy
-    site = _drpy_site(source)
-    try:
-        det = await asyncio.to_thread(drpy.detail, site, vod_id)
-    except Exception:
-        return None
-    if not det:
-        return None
-    prov = _drpy_provider(source)
-    t = _drpy_map_item(source, det)
-    groups: dict[str, list] = {}
-    for e in drpy.parse_episodes(det):
-        groups.setdefault(e["line"], []).append(
-            Episode(title=e["title"], url=e["id"], direct=True,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    play_from=prov + ":" + e["line"], drpy=True))
-    t.sources = groups
-    return t
 # <<< PRIVATE:DRPY
 
 # >>> PRIVATE:GUARD
@@ -937,36 +897,6 @@ async def guard_search_source(client, source: dict, keyword: str) -> list[Online
     return out
 
 
-async def guard_get_title(client, source: dict, vod_id: str) -> OnlineTitle | None:
-    import asyncio
-    import guard
-    conf = _guard_conf(source)
-    if not conf:
-        return None
-    # 网盘聚合源（夸父等）：搜索返回的 vod_id 本身就是完整夸克/UC 分享链接。
-    # 其 detail 走 Cloudflare 常需 15s+（超过 22s 即超时），且详情集用夸父私有
-    # sToken 编码（我们无法直接播放）。直接短路：用分享链接作唯一可播线路，
-    # 播放时 _resolve_guard 识别网盘 → 自有账号转存原画，避免超时与空集。
-    if _PAN_SHARE_RE.search(str(vod_id)):
-        t = _guard_map_item(source, {"vod_id": str(vod_id).strip()})
-        if t.sources:
-            return t
-    try:
-        det = await asyncio.to_thread(guard.detail, conf, vod_id)
-    except Exception:
-        return None
-    if not det:
-        return None
-    t = _guard_map_item(source, det)
-    groups: dict[str, list[Episode]] = {}
-    for e in guard.parse_episodes(det):
-        groups.setdefault(e["line"], []).append(
-            Episode(title=e["title"], url=e["id"], direct=True,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    play_from=_guard_provider(source) + ":" + e["line"],
-                    xsrc=True, guard=True))
-    t.sources = groups
-    return t
 # <<< PRIVATE:GUARD
 
 
@@ -1027,29 +957,6 @@ async def spider_search_source(client, source: dict, keyword: str) -> list[Onlin
     return out
 
 
-async def spider_get_title(client, source: dict, vod_id: str) -> OnlineTitle | None:
-    import asyncio
-    import spiders
-    import guard
-    conf = _spider_conf(source)
-    if not conf:
-        return None
-    try:
-        det = await asyncio.to_thread(spiders.detail, conf, vod_id)
-    except Exception:
-        return None
-    if not det:
-        return None
-    t = _spider_map_item(source, det)
-    groups: dict[str, list[Episode]] = {}
-    for e in guard.parse_episodes(det):
-        groups.setdefault(e["line"], []).append(
-            Episode(title=e["title"], url=e["id"], direct=True,
-                    headers={"User-Agent": "Mozilla/5.0"},
-                    play_from=_spider_provider(source) + ":" + e["line"],
-                    xsrc=True, spider_src=True))
-    t.sources = groups
-    return t
 # <<< PRIVATE:SPIDER
 
 
@@ -1153,9 +1060,3 @@ async def _dispatch_search(client, source, keyword):
         return await dduo_search_source(client, source, keyword)
     # <<< PRIVATE:DDUO
     return await search_source(client, source, keyword)
-
-
-def detail_source(source: dict, vod_id: str) -> OnlineTitle | None:
-    """同步取详情（带缓存由调用方做）。"""
-    import requests  # 仅 PoC；主代理内用 httpx 异步版
-    return None

@@ -1269,14 +1269,6 @@ def _gn_category_rows(key: str, tid: str, pg: int,
     return [], False
 
 
-async def _gn_fetch_category(key: str, tid: str, pg: int = 1,
-                             extend: dict | None = None,
-                             force_type: str | None = None):
-    """取某源某分类一页并入库缓存。通过 _gn_category_task 去重，调用方超时
-    也不会取消真正的取数（结果照样落缓存，下次秒回）。返回 (cards, more)。"""
-    return await _gn_category_task(key, tid, pg, extend, force_type)
-
-
 def _gn_category_task(key: str, tid: str, pg: int = 1,
                       extend: dict | None = None,
                       force_type: str | None = None):
@@ -1843,71 +1835,6 @@ def _xlib_cat(lib_guid: str) -> dict | None:
     return None
 
 
-_XLIB_POSTER_STARTED = False
-
-
-def _xlib_start_poster_fill() -> None:
-    """后台用普通苹果CMS资源站搜索结果为小雅影片补封面（比豆瓣稳定、无需新密钥）。"""
-    global _XLIB_POSTER_STARTED
-    if _XLIB_POSTER_STARTED:
-        return
-    _XLIB_POSTER_STARTED = True
-    asyncio.create_task(_xlib_poster_loop())
-
-
-async def _xlib_poster_loop() -> None:
-    import xlib
-    # 只用普通公共资源站做封面检索，排除小雅/JS/加固等私有与重源
-    srcs = [dict(s) for s in config.enabled_sources()
-            if not (s.get("catvod") or s.get("drpy") or s.get("guard")
-                    or s.get("xsrc"))]
-    if not srcs:
-        return
-    per_round = 20
-    while True:
-        worked = 0
-        try:
-            for cat in xlib.CATEGORIES:
-                idx = xlib.library._idx[cat[0]]
-                idx.load()
-                todo = [it for it in idx.items
-                        if not xlib.library.poster_of(it["id"]).get("poster")]
-                todo = todo[:per_round]
-                for it in todo:
-                    q = xlib.library._poster_query(it.get("title", ""))
-                    if not q:
-                        continue
-                    try:
-                        res = await providers.search_all(q, srcs)
-                    except Exception:
-                        res = []
-                    want_y = str(it.get("year") or "")[:4]
-                    pick = None
-                    for t in res:
-                        if not t.poster:
-                            continue
-                        tt = (t.title or "").strip()
-                        if tt == it.get("title", "").strip() or tt == q:
-                            pick = t
-                            break
-                        if want_y and (t.year or "")[:4] == want_y and \
-                                (q in tt or tt in q):
-                            pick = t
-                            break
-                    if pick is None:
-                        with_year = [t for t in res if t.poster and want_y
-                                     and (t.year or "")[:4] == want_y]
-                        if with_year:
-                            pick = with_year[0]
-                    if pick:
-                        xlib.library.save_poster(
-                            it["id"], pick.poster,
-                            (pick.overview or "")[:500])
-                        worked += 1
-                    await asyncio.sleep(0.25)
-        except Exception as exc:
-            _log.info("xlib source-poster loop: %s", str(exc)[:80])
-        await asyncio.sleep(20 if worked == 0 else 2)
 # <<< PRIVATE:CATVOD
 
 
@@ -1933,23 +1860,9 @@ def any_virtual_lib_enabled() -> bool:
     return False
 
 
-def _tv_compat_date(v) -> str:
-    """TV/盒子端用严格日期解析：'2026' 年份会抛异常导致整页空白，补成完整日期。"""
-    s = str(v or "").strip()
-    if len(s) == 4 and s.isdigit():
-        return f"{s}-01-01"
-    return s
-
-
 def _client_of(request: Request) -> clientmod.Client:
     """从请求 UA 解析客户端画像（TV/iOS/Android/Web）。"""
     return clientmod.parse_user_agent(request.headers.get("user-agent", ""))
-
-
-def _tv_compat_card(row: dict) -> dict:
-    """已废弃的单点规整，保留为兼容包装；新代码请用 client.normalize_card。"""
-    return clientmod.normalize_card(
-        row, clientmod.Client(kind=clientmod.TV, is_tv=True, strict_card=True))
 
 
 def chart_card(item: dict) -> dict:
@@ -2096,19 +2009,6 @@ def _chart_binding_matches(guid: str, brief: dict | None) -> bool:
     return bool(item and brief and _chart_title_rank(item, brief) < 99)
 
 
-def _drop_chart_binding(guid: str) -> None:
-    """废弃已落盘的错误榜单绑定，并同步清理内存播放索引。"""
-    try:
-        with store._lock:
-            store._titles.pop(guid, None)
-            store._orig.pop(guid, None)
-            store._dirty = True
-            store._rebuild_index()
-        chartbind.bind_store.forget(guid)
-    except Exception:
-        pass
-
-
 def start_resolve_chart(guid: str) -> asyncio.Future | None:
     """启动榜单 guid 的后台解析（单飞），立即返回在途 Future；不阻塞当前请求。"""
     existing = store.get_title_by_guid(guid)
@@ -2187,19 +2087,6 @@ def chart_guid_by_media(mg: str) -> str:
     return og if og and chart_cache.is_chart_guid(og) else ""
 
 
-async def resolve_chart_by_media(mg: str) -> dict | None:
-    """播放页内用 media_guid 找回榜单片并等待其后台绑定完成。"""
-    target = store.resolve_media_guid(mg)
-    if target:
-        return target
-    og = chart_guid_by_media(mg)
-    if og:
-        await resolve_chart(og)
-        _PENDING_MEDIA_CHART.pop(mg, None)
-        return store.resolve_media_guid(mg)
-    return None
-
-
 def _instant_play_response(mg: str, body_video_guid: str = ""):
     """榜单源尚未绑定时的瞬时播放返回：先把播放器带进加载页，真正匹配延后到 preset。"""
     play_link = f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index=0"
@@ -2244,13 +2131,6 @@ def _instant_stream_payload(mg: str):
 def _instant_stream_response(mg: str):
     return JSONResponse({"code": 0, "msg": "",
                          "data": _instant_stream_payload(mg)})
-
-
-def _no_source_response():
-    # 明确属于我们的在线榜单片、但源解析失败/暂无线路：返回本地可识别错误，
-    # 不能转发官方（它不认识虚拟 media guid，会报“权限不足/Auth Failed”）。
-    return JSONResponse({"code": 4001, "msg": "暂无可用在线片源，请稍后重试或切换其他影片",
-                         "data": None}, status_code=200)
 
 
 def hot_cat_title(cat: str) -> str:
@@ -2446,6 +2326,20 @@ for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
+# P1-14 高频日志采样：中间件与 mediadb/list 原先每请求 1 条 INFO，
+# 建库/资源站轮询会刷爆日志。默认只记 debug；每 100 次采样 1 条 info
+# 保留心跳，慢请求（>=1s）与错误（>=400）每次都记 info，保证异常可观测。
+_ACCESS_SLOW_MS = 1000
+_LOG_SAMPLE: dict[str, int] = {}
+
+
+def _sampled_log(key: str, every: int = 100) -> bool:
+    """该 key 的第 every 次调用返回 True（其余时间调用方记 debug）。"""
+    n = _LOG_SAMPLE.get(key, 0) + 1
+    _LOG_SAMPLE[key] = n
+    return n % every == 0
+
+
 def _diagnostic_query(request: Request) -> str:
     return urllib.parse.urlencode([
         (k, "<redacted>" if k.lower() in (
@@ -2480,10 +2374,15 @@ async def _access(request: Request, call_next):
     p = request.url.path
     if "/api/" in p or p.startswith(ONLINE_PREFIX) or p.startswith("/v/media"):
         query = _diagnostic_query(request)
-        _log.info("%s %s -> %s client=%s elapsed_ms=%d", request.method,
-                  (p + ("?" + query if query else ""))[:120],
-                  resp.status_code, _client_of(request).label,
-                  int((time.monotonic() - started) * 1000))
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        # 慢请求 / 错误每次记 info；其余每 100 次采样 1 条 info，剩下记 debug。
+        _emit = (_log.info if (elapsed_ms >= _ACCESS_SLOW_MS
+                               or resp.status_code >= 400
+                               or _sampled_log("access"))
+                 else _log.debug)
+        _emit("%s %s -> %s client=%s elapsed_ms=%d", request.method,
+              (p + ("?" + query if query else ""))[:120],
+              resp.status_code, _client_of(request).label, elapsed_ms)
     _live_record(request, resp.status_code, p)
     return resp
 
@@ -2670,19 +2569,6 @@ async def forward_upstream(request: Request) -> Response:
     return Response(content=r.content, status_code=r.status_code,
                     headers=resp_headers,
                     media_type=r.headers.get("content-type"))
-
-
-# 需要逐块流式转发的响应类型（视频/文件/媒体流）。这些绝不能整包缓冲，
-# 否则本地播放几 GB 的影片会被一次性读进内存，打满 RAM+swap 拖死整机。
-_STREAM_CONTENT_TYPE = (
-    "video/", "audio/", "application/octet-stream", "application/x-mpegurl",
-    "application/vnd.apple.mpegurl", "image/", "multipart/", "binary",
-)
-
-
-def _is_stream_response(headers) -> bool:
-    ct = (headers.get("content-type") or "").lower()
-    return any(t in ct for t in _STREAM_CONTENT_TYPE)
 
 
 async def forward_upstream_streaming(request: Request) -> Response:
@@ -3079,96 +2965,6 @@ def _brief_poster_badged(brief: dict) -> str:
         return inj._poster_badged(cover, pan_label, grade)
     except Exception:  # noqa: BLE001
         return inj._poster(cover)
-
-
-def _hot_card(brief: dict, cat: str) -> dict:
-    row = inj.search_item(brief)
-    # 海报墙角标：网盘资源 + 源健康点（烧进海报图，原生库无需改 UI）
-    try:
-        bp = _brief_poster_badged(brief)
-        if bp:
-            row["poster"] = bp
-    except Exception:  # noqa: BLE001
-        pass
-    # 媒体库内不再重复显示【在线】前缀，让海报墙更接近原生媒体库体验
-    title = (brief.get("title") or "").strip()
-    remarks = (brief.get("remarks") or "").strip()
-    row["title"] = title + (f" ·{remarks}" if remarks else "")
-    row["ancestor_guid"] = HOT_LIB_GUIDS[cat]
-    row["ancestor_name"] = hot_cat_title(cat)
-    row["ancestor_category"] = hot_cat_category(cat)
-    row["video_guid"] = video_guid(brief["guid"])
-    return _vod_directory_card(row)
-
-
-def _hot_cat_items(cat: str) -> list[dict]:
-    return [b for b in hot_cache.items() if inj.hot_category(b) == cat]
-
-
-def _hot_rows_all(body: dict, cat: str) -> list[dict]:
-    items = _hot_cat_items(cat)
-    # parent_guid 可能用于目录/分组；热门库只有一层，非根 parent 直接为空。
-    parent = (body.get("parent_guid") or "").strip()
-    if parent:
-        return []
-    rows = [_hot_card(b, cat) for b in items]
-    tags = body.get("tags")
-    if isinstance(tags, dict):
-        wanted = set(tags.get("type") or [])
-        media_wanted = wanted & {"Movie", "TV", "Movie,TV"}
-        if "Movie,TV" in media_wanted:
-            media_wanted.discard("Movie,TV")
-            media_wanted.update({"Movie", "TV"})
-        if media_wanted:
-            rows = [r for r in rows if r.get("type") in media_wanted
-                    or r.get("type") == "Directory"]
-        watched = str(tags.get("watched") or "")
-        if watched in {"0", "1"}:
-            want_watched = watched == "1"
-            filtered = []
-            for r in rows:
-                rec = history.get(r["guid"])
-                is_watched = bool(rec and rec.get("duration") and
-                                  int(rec.get("ts") or 0) >= int(rec.get("duration") or 0) * 0.95)
-                if is_watched == want_watched:
-                    filtered.append(r)
-            rows = filtered
-    elif isinstance(tags, list):
-        wanted = set(tags) & {"Movie", "TV"}
-        if wanted:
-            rows = [r for r in rows if r.get("type") in wanted
-                    or r.get("type") == "Directory"]
-
-    rows = [_apply_marks(r) for r in rows]
-    if int(body.get("is_favorite") or 0):
-        rows = [r for r in rows if r.get("is_favorite")]
-    kw = str(body.get("keyword") or body.get("q") or body.get("title") or "").strip().lower()
-    if kw:
-        rows = [r for r in rows if kw in (r.get("title") or "").lower()]
-
-    col = body.get("sort_column", "create_time")
-    order = str(body.get("sort_type", "DESC")).upper()
-    reverse = order.lower() != "asc"
-
-    def rank(r: dict):
-        g = r["guid"]
-        b = hot_cache.get_guid(g) or {}
-        h = b.get("hot") or {}
-        return (h.get("rank") if reverse else -int(h.get("rank") or 0))
-
-    if col == "sort_title":
-        rows.sort(key=lambda r: (r.get("title") or ""), reverse=reverse)
-    elif col in ("release_date", "air_date", "year"):
-        rows.sort(key=lambda r: (r.get("release_date") or ""), reverse=reverse)
-    elif col in ("vote_average", "score"):
-        def score(r):
-            try:
-                return float(r.get("vote_average") or 0)
-            except ValueError:
-                return 0
-        rows.sort(key=lambda r: (score(r), rank(r)), reverse=True)
-    # create_time / 默认：保持 collect_hot 已计算好的热门顺序，不在这里二次排序。
-    return rows
 
 
 def _chart_rows_all(body: dict, cat: str) -> list[dict]:
@@ -3841,10 +3637,13 @@ async def mediadb_list(request: Request):
         payload["data"] = dbs
         # TV 诊断：记录是哪端、注入了几个虚拟库、上游状态。TV 端“有时不显示”
         # 时看这条日志就能区分：是上游失败、注入抛错，还是 TV 根本没调到这里。
-        _log.info("mediadb/list client=%s inserted=%d upstream_code=%s total=%d",
-                  _client_of(request).kind, len(inserts),
-                  payload.get("code") if isinstance(payload, dict) else "?",
-                  len(dbs))
+        # 高频：每 100 次采样 1 条 info，其余记 debug（upstream_code 到这里恒为 0，
+        # 见上方的失败兜底改码，诊断价值已有限）。
+        _emit = _log.info if _sampled_log("mediadb_list") else _log.debug
+        _emit("mediadb/list client=%s inserted=%d upstream_code=%s total=%d",
+              _client_of(request).kind, len(inserts),
+              payload.get("code") if isinstance(payload, dict) else "?",
+              len(dbs))
         return JSONResponse(payload)
     except Exception as exc:
         _log.warning("inject virtual mediadb failed: client=%s err=%s",
@@ -4248,17 +4047,6 @@ def _xlib_ep_guid(show_guid: str, index: int) -> str:
 
 def _xlib_season_guid(show_guid: str) -> str:
     return hashlib.md5(f"xseason:{show_guid}".encode()).hexdigest()
-
-
-async def _xlib_resolve_ep(ep_guid: str) -> dict | None:
-    """把小雅集 guid 解析为 {cat,show,index,file}。剧集文件懒取（含季目录）。"""
-    import xlib
-    # 集 guid 不可逆，需在当前索引中匹配：用映射缓存
-    rec = _XLIB_EP_MAP.get(ep_guid)
-    if rec:
-        return rec
-    # 反查：遍历各集（首次打开剧集详情时建立映射）
-    return None
 
 
 # 集 guid -> (show_guid,index) 内存映射（详情/播放流程内复用）
