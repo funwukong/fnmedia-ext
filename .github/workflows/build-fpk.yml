@@ -96,7 +96,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME:-v$(head -n1 VERSION | tr -d '[:space:]')}"
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
           gh release create "$TAG" dist/* \
             --title "fnmedia-ext ${TAG#v}" --generate-notes \
             || gh release upload "$TAG" dist/* --clobber
@@ -159,7 +162,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${GITHUB_REF_NAME:-v$(head -n1 VERSION | tr -d '[:space:]')}"
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
           gh release create "$TAG" dist/* \
             --title "fnmedia-ext ${TAG#v}" --generate-notes \
             || gh release upload "$TAG" dist/* --clobber
