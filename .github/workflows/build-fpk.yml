@@ -48,6 +48,23 @@ jobs:
           curl -fsSL -o .tools/fnpack "$FNPACK_URL"
           chmod +x .tools/fnpack
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 冒烟：先组装出暂存树，验证完整构建能启动、核心测试子集能过，
+      # 再正式打包。打包步骤会重新组装一次，与冒烟用的是同一份源码。
+      # 注意：不要复用 tools/post_strip_smoke.py——它是剥离版，断言私有文件
+      # 不在、开关全关，在完整构建上会误报；完整构建用 tools/full_build_smoke.py。
+      - name: 组装(完整构建，暂存)
+        run: bash packaging/fpk/build.sh --stage-only packaging/fpk/.build/fpk --fnpack "$PWD/.tools/fnpack"
+
+      - name: 安装冒烟依赖
+        run: python -m pip install -q -r packaging/fpk/.build/fpk/app/repo/requirements-dev.txt
+
+      - name: 冒烟：完整构建启动验证
+        run: python3 tools/full_build_smoke.py packaging/fpk/.build/fpk/app/repo
+
       - name: 打包(完整构建)
         run: bash packaging/fpk/build.sh --fnpack "$PWD/.tools/fnpack"
 
