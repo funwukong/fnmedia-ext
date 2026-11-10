@@ -45,10 +45,27 @@ def _node() -> str:
     return "node"
 
 
+# drpy 引擎选择（进程级切换，改开关需重启 sidecar）：
+#   DRPY_ENGINE=drpy3（默认）—— drpy3 Runtime，每站独立实例；
+#   DRPY_ENGINE=drpy2 —— 老路 drpy2.min.js 单例。drpy2 全保留作 fallback。
+def drpy_engine() -> str:
+    return "drpy2" if os.environ.get("DRPY_ENGINE", "drpy3").strip().lower() == "drpy2" else "drpy3"
+
+
+def _engine_files(engine: str) -> list[str]:
+    if engine == "drpy2":
+        return [os.path.join(_ASSET, "drpy2.min.js")]
+    return [os.path.join(_ASSET, f) for f in (
+        "drpy3.js", "drpy3-peer.js", "drpy3-globals-capture.js",
+        "drpy-core-lite.min.js")]
+
+
 def available() -> bool:
     if not bool(getattr(features, "DRPY", False)):
         return False
     if not (os.path.exists(_SIDECAR) and os.path.exists(_REGISTER)):
+        return False
+    if not all(os.path.exists(f) for f in _engine_files(drpy_engine())):
         return False
     try:
         subprocess.run([_node(), "--version"], capture_output=True, timeout=8)
@@ -64,14 +81,20 @@ class Sidecar:
         self._lock = threading.Lock()
         self._proc = None
         self._seq = 0
+        self._engine = None
 
     def _start(self):
+        engine = drpy_engine()
         if self._proc and self._proc.poll() is None:
-            return
+            if self._engine == engine:
+                return
+            self.stop()  # 引擎开关变了：重启 sidecar
         cmd = [_node(), "--import", "./register.mjs", "sidecar.mjs"]
+        env = {**os.environ, "DRPY_ENGINE": engine}
         self._proc = subprocess.Popen(
             cmd, cwd=_ASSET, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            stderr=subprocess.DEVNULL, text=True, bufsize=1, env=env)
+        self._engine = engine
 
     def call(self, payload: dict, timeout: float = 90.0):
         with self._lock:
