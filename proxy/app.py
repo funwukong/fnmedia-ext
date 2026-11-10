@@ -7647,6 +7647,30 @@ def _autofail_on() -> bool:
         return True
 
 
+def _source_health_enabled() -> bool:
+    """源健康自动降级开关（config.source_health_enabled，默认 True）。
+
+    关时：搜索不再跳过冷却窗内的死源，也不再记录新的健康画像
+    （降级不记录/不冷却）；取流级熔断（播放 dodge/竞速沉底）不受此开关影响，
+    那是播放链的故障切换，不是搜索降级。
+    """
+    try:
+        return bool(config.get().get("source_health_enabled", True))
+    except Exception:
+        return True
+
+
+def _domain_heal_enabled() -> bool:
+    """域名自愈开关（config.domain_heal_enabled，默认 True）。
+
+    关时：/v/api/ext/source/heal 不再试备用域名，直接返回空结果，不换域名。
+    """
+    try:
+        return bool(config.get().get("domain_heal_enabled", True))
+    except Exception:
+        return True
+
+
 def _episode_candidates(picked: dict, include_current: bool = True) -> list[dict]:
     """枚举该集在各线路下的可播目标（按 store 默认顺序：默认线在前）。
     直接复用索引，不发起任何网络请求。"""
@@ -9791,6 +9815,9 @@ async def ext_source_heal(request: Request):
     src = next((s for s in config.all_sources() if s.get("id") == sid), None)
     if not src:
         return {"code": 1, "msg": "source not found", "data": None}
+    if not _domain_heal_enabled():
+        # 域名自愈开关关闭：不试备用域名、不换域名，直接返回空结果。
+        return {"code": 0, "msg": "domain heal disabled", "data": None}
     backups = (config.get().get("source_domain_backups") or {}).get(sid, [])
     import httpx as _httpx
 
@@ -10410,8 +10437,9 @@ async def ext_source_health_check(request: Request):
                      "elapsed_ms": 0, "count": 0, "sample": "",
                      "error": type(exc).__name__, "hit": "", "tried": []}
             sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
-            # 回写源健康：失效累计失败（达阈值熔断），有效则清零失败计数
-            if sk:
+            # 回写源健康：失效累计失败（达阈值熔断），有效则清零失败计数。
+            # 源健康降级开关关闭时不记录（画像冻结，搜索不再按它降级）。
+            if sk and _source_health_enabled():
                 sourcehealth.record(sk, bool(r.get("alive")),
                                     (r.get("elapsed_ms") or 0) / 1000.0)
             return {

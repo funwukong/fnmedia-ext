@@ -1,14 +1,23 @@
-"""P1 配置项 10、11：main_ready_budget + CONFIG_VERSION 迁移。
+"""P1 配置项：10 main_ready_budget、11 CONFIG_VERSION 迁移、12 死开关接线。
 
-- DEFAULTS 含 main_ready_budget=2.4；旧配置加载后自动出现该键；
+- 第 10 项：DEFAULTS 含 main_ready_budget=2.4；旧配置加载后自动出现该键；
   每次读取夹取 [0.8, 2.8]，非法值回落 2.4（POST 夹取见 test_slow_line_budget）。
 - 第 11 项：版本号稳健解析；非数字不再误判为 v1 翻掉用户显式 True；
   降级警告；迁移跑与不跑都记日志。
+- 第 12 项：source_health_enabled 门控搜索降级（不跳过/不记录），
+  domain_heal_enabled 门控域名自愈端点（不试备用域名）。
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
 
 import config as config_mod
 
@@ -164,3 +173,149 @@ def test_migration_logs_when_run_and_when_skipped(monkeypatch, tmp_path, caplog)
     assert "no migration needed" in caplog.text
 
 
+# ---------------- 第 12 项：源健康降级开关 ----------------
+
+import providers as providers_mod
+import sourcehealth
+
+
+class _FakeResp:
+    def __init__(self, status=200, payload=None):
+        self.status_code = status
+        self._payload = payload if payload is not None else {"code": 1, "list": []}
+
+    def json(self):
+        return self._payload
+
+
+class _FakeClient:
+    def __init__(self, resp=None, exc=None):
+        self.resp = resp
+        self.exc = exc
+        self.calls = []
+
+    async def get(self, url, params=None, headers=None, timeout=None):
+        self.calls.append(url)
+        if self.exc is not None:
+            raise self.exc
+        return self.resp
+
+
+_SRC = {"id": "p1-health-src",
+        "api": "https://p1-health.test/api.php/provide/vod/at/json"}
+
+
+def _make_dead(key):
+    sourcehealth.reset(key)
+    for _ in range(5):
+        sourcehealth.record(key, False, 1.0)
+    assert sourcehealth.usable(key) is False
+
+
+def test_health_switch_off_does_not_skip_dead_source(monkeypatch):
+    # 开关关：即使画像已死（5 次失败/冷却窗内），搜索也不跳过，照常请求。
+    _make_dead(_SRC["id"])
+    monkeypatch.setattr(providers_mod, "_source_health_enabled", lambda: False)
+    client = _FakeClient(_FakeResp())
+    try:
+        out = asyncio.run(providers_mod.search_source(client, _SRC, "测试"))
+        assert out == []
+        assert len(client.calls) == 1
+        # 开关关也不记录：成功结果未清零失败计数，画像仍死。
+        assert sourcehealth.usable(_SRC["id"]) is False
+    finally:
+        sourcehealth.reset(_SRC["id"])
+
+
+def test_health_switch_on_skips_dead_source(monkeypatch):
+    # 开关开：行为与改前一致，死源在冷却窗内直接跳过，不发请求。
+    _make_dead(_SRC["id"])
+    monkeypatch.setattr(providers_mod, "_source_health_enabled", lambda: True)
+    client = _FakeClient(_FakeResp())
+    try:
+        out = asyncio.run(providers_mod.search_source(client, _SRC, "测试"))
+    finally:
+        sourcehealth.reset(_SRC["id"])
+    assert out == []
+    assert client.calls == []
+
+
+def test_health_switch_off_does_not_record(monkeypatch):
+    # 开关关：搜索失败也不记入画像。
+    key = "p1-health-norecord"
+    sourcehealth.reset(key)
+    monkeypatch.setattr(providers_mod, "_source_health_enabled", lambda: False)
+    client = _FakeClient(exc=RuntimeError("boom"))
+    try:
+        out = asyncio.run(providers_mod.search_source(
+            client, {"id": key, "api": "https://p1-norecord.test/api.php"}, "测试"))
+        assert out == []
+        assert sourcehealth.stats(key) == {}
+    finally:
+        sourcehealth.reset(key)
+
+
+def test_health_switch_on_records_failure(monkeypatch):
+    # 开关开：搜索失败记入画像（行为与改前一致）。
+    key = "p1-health-record"
+    sourcehealth.reset(key)
+    monkeypatch.setattr(providers_mod, "_source_health_enabled", lambda: True)
+    client = _FakeClient(exc=RuntimeError("boom"))
+    try:
+        out = asyncio.run(providers_mod.search_source(
+            client, {"id": key, "api": "https://p1-record.test/api.php"}, "测试"))
+        assert out == []
+        assert sourcehealth.stats(key)["fails"] == 1
+    finally:
+        sourcehealth.reset(key)
+
+
+# ---------------- 第 12 项：域名自愈开关 ----------------
+
+import app as appmod
+import domain_heal as domain_heal_mod
+
+
+class HealEndpointTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        item = patch.object(config_mod, "_STATE",
+                            Path(self._tmp.name) / "config.json")
+        item.start()
+        self.addCleanup(item.stop)
+        self.cfg = config_mod.Config()
+        item = patch.object(appmod, "config", self.cfg)
+        item.start()
+        self.addCleanup(item.stop)
+        self.client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=appmod.app),
+            base_url="http://fnmedia.test")
+        self.addAsyncCleanup(self.client.aclose)
+
+    async def test_heal_disabled_returns_none_without_calling_heal(self):
+        # 开关关：不试备用域名、不换域名，heal() 一次也不调用。
+        self.cfg.save({"domain_heal_enabled": False})
+        with patch.object(domain_heal_mod, "heal",
+                          return_value="https://bak.test/api.php") as heal:
+            resp = await self.client.post("/v/api/ext/source/heal",
+                                          json={"id": "baofeng"})
+        heal.assert_not_called()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body.get("code"), 0)
+        self.assertIsNone(body.get("data"))
+        self.assertIn("disabled", body.get("msg", ""))
+
+    async def test_heal_enabled_calls_heal(self):
+        # 开关开：行为与改前一致，调 heal() 并返回其结果。
+        self.cfg.save({"domain_heal_enabled": True})
+        with patch.object(domain_heal_mod, "heal",
+                          return_value="https://bak.test/api.php/x") as heal:
+            resp = await self.client.post("/v/api/ext/source/heal",
+                                          json={"id": "baofeng"})
+        heal.assert_called_once()
+        self.assertEqual(resp.status_code, 200)
+        body = resp.json()
+        self.assertEqual(body.get("code"), 0)
+        self.assertEqual(body.get("data"), "https://bak.test/api.php/x")
