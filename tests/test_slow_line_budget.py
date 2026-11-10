@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from contextlib import contextmanager
 import subprocess
@@ -321,6 +322,97 @@ class SlowLineBudgetTests(unittest.IsolatedAsyncioTestCase):
             got = json.loads(proc.stdout.strip().splitlines()[-1])
         self.assertEqual(got, {"99": 2.8, "0.1": 0.8, "'junk'": 2.4,
                                "1.5": 1.5, "None": 2.4})
+
+
+    # ---------- (f) 后台 future 异常被取回记日志，不留 "never retrieved" ----------
+
+    async def test_slow_line_background_exception_retrieved_and_logged(self):
+        async def _slow_fail(mg, picked, request):
+            calls.append(1)
+            await asyncio.sleep(1.0)
+            raise RuntimeError("slow boom")
+
+        calls = []
+        stack = self._patches(SLOW_PICKED, _slow_fail)
+        self._enter(stack)
+        try:
+            bk = "mg-slow-f|drpy-x::A|0"
+            appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+            # 根 logger 捕获：既要收到 fnmedia.app 的取回日志，也要能看到
+            # asyncio 在 GC 时可能打的 "Future exception was never retrieved"。
+            with _budget(0.4), self.assertLogs(level="WARNING") as cm:
+                t0 = time.monotonic()
+                resp = await self.client.get(
+                    "/v/media/online/mg-slow-f/main.m3u8", params={"index": 0})
+                elapsed = time.monotonic() - t0
+                # 预算到点先回占位；后台继续跑，1.0s 后抛错，由 done 回调取回记日志
+                await self._drain_serve_fut()
+                gc.collect()
+                await asyncio.sleep(0.1)
+                gc.collect()
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(resp.headers.get("X-fnmedia-Placeholder"), "1")
+            self.assertLess(elapsed, 1.0)  # 超时语义不变：不等后台跑完
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(appmod._MAIN_SERVE_BG_FAILS.get(bk), 1)
+            out = "\n".join(cm.output)
+            self.assertIn("慢线后台取流失败", out)
+            self.assertIn("slow boom", out)
+            self.assertNotIn("Future exception was never retrieved", out)
+        finally:
+            self._exit(stack)
+
+    # ---------- (g) done 回调只删同键的同一个 future ----------
+
+    async def test_done_callback_keeps_new_future_for_same_key(self):
+        loop = asyncio.get_running_loop()
+        bk = "mg-stale|drpy-x::A|0"
+        old = loop.create_future()
+        new = loop.create_future()
+        appmod._MAIN_SERVE_FUT[bk] = new
+        appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+        try:
+            old.set_exception(RuntimeError("stale boom"))
+            with self.assertLogs("fnmedia.app", level="WARNING") as cm:
+                appmod._main_serve_fut_done(bk, old)(old)
+            # 旧 fut 的异常已取回记日志/统计，但字典里的新 fut 必须保留
+            self.assertIs(appmod._MAIN_SERVE_FUT.get(bk), new)
+            self.assertEqual(appmod._MAIN_SERVE_BG_FAILS.get(bk), 1)
+            self.assertIn("stale boom", "\n".join(cm.output))
+            # 新 fut 正常完成后，自己的回调仍能清理
+            new.set_result(None)
+            appmod._main_serve_fut_done(bk, new)(new)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+        finally:
+            appmod._MAIN_SERVE_FUT.pop(bk, None)
+            appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+            if not old.done():
+                old.cancel()
+            if not new.done():
+                new.cancel()
+            gc.collect()
+
+    async def test_done_callback_removes_same_future_on_success(self):
+        loop = asyncio.get_running_loop()
+        bk = "mg-ok|drpy-x::A|0"
+        fut = loop.create_future()
+        appmod._MAIN_SERVE_FUT[bk] = fut
+        appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+        try:
+            fut.set_result(None)
+            appmod._main_serve_fut_done(bk, fut)(fut)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_BG_FAILS)
+            # 已取消的 fut：回调不取异常（不抛 CancelledError），仍正常清理
+            fut2 = loop.create_future()
+            appmod._MAIN_SERVE_FUT[bk] = fut2
+            fut2.cancel()
+            appmod._main_serve_fut_done(bk, fut2)(fut2)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+        finally:
+            appmod._MAIN_SERVE_FUT.pop(bk, None)
+            appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+            gc.collect()
 
 
 if __name__ == "__main__":
