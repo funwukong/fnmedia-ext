@@ -214,6 +214,50 @@ class History:
             out.sort(key=lambda r: r.get("updated_at", 0), reverse=True)
             return out[:max(1, int(limit))]
 
+    def position(self, ep_guid: str, title_guid: str | None = None,
+                 user: str | None = None, *, is_first: bool = False) -> int:
+        """某一集的续播位置（秒）。
+
+        优先用该集自己的记录；没有时，若它是该剧第 1 集、且存在一条未看完
+        的标题记录（客户端以标题/季/文件夹 guid 上报进度时落到标题键上），
+        用标题记录的位置续播第 1 集——标题记录本身带不出集身份，第 1 集是
+        唯一可安全回填的位置。已看完的标题记录不回填（不倒回）。
+        """
+        rec = self.get(ep_guid, user=user)
+        if rec:
+            return int(rec.get("ts", 0) or 0)
+        if is_first and title_guid:
+            trec = self.get(title_guid, user=user)
+            if trec and not self._finished(trec):
+                return int(trec.get("ts", 0) or 0)
+        return 0
+
+    def resume_for_title(self, og: str, ep_guids: list[str],
+                         user: str | None = None, *,
+                         latest_interaction: bool = False) -> tuple[str | None, int]:
+        """给定一部剧的标题 guid 与按顺序的全部集 guid，决定"该播哪一集"。
+
+        有集记录时与 resume_episode 完全一致（CMS 按集序续播靠后的未看完集、
+        T4 按最近一次交互）；只有当没有任何集记录、却有一条未看完的标题
+        记录时，才回填第 1 集的标题位置——对应客户端以标题/季/文件夹 guid
+        上报进度的情况。无任何记录时与旧行为一致：第 1 集 0 秒。
+        """
+        if not ep_guids:
+            return None, 0
+        with _LOCK:
+            u = current_user() if user is None else str(user or "")
+            if u:
+                bucket = self._bucket(u)
+                self._adopt_global_if_needed(u, bucket)
+            else:
+                bucket = self._users.get("", {})
+            has_ep = any(g in bucket for g in ep_guids)
+        if has_ep:
+            return self.resume_episode(
+                ep_guids, user=user, latest_interaction=latest_interaction)
+        return ep_guids[0], self.position(
+            ep_guids[0], og, user=user, is_first=True)
+
     def resume_episode(self, ep_guids: list[str],
                        user: str | None = None, *,
                        latest_interaction: bool = False) -> tuple[str | None, int]:
