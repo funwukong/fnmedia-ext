@@ -25,6 +25,9 @@ from store import make_guid
 PAGE_SIZE = 20
 # 每个大类最多可浏览的页数（页数×20=条数）。250 页 ≈ 5000 部。
 MAX_PAGES = 250
+# P1-17：分类深翻有界并发度。一批最多同时在途这么多页；CMS 源多为
+# 慢源/共享带宽，并发度取 4 既能把逐页等待折叠，又不至于冲垮源站。
+DEEP_FETCH_CONCURRENCY = 4
 CLASS_REFRESH = 6 * 3600
 PAGE_TTL = 10 * 60
 # 空页（多为慢源抖动超时）只短缓存，避免该页被长时间冻结
@@ -547,9 +550,46 @@ class Catalog:
     def routes_stale(self) -> bool:
         return (not self._updated) or (time.time() - self._updated) >= CLASS_REFRESH
 
+    async def _fetch_pages(self, scope: str, cat: str,
+                         pages: list[int]) -> list[tuple[int, list[dict]]]:
+        """P1-17：有界并发取一批 CMS 页，返回 [(页号, rows)]，按页号升序。
+
+        并发只发生在取页层：信号量把同时在途的 get_page 控制在
+        DEEP_FETCH_CONCURRENCY 以内；get_page/_load_page 内部的
+        3 轮重试与 (16, 10, 8) 三档超时回退原样不动。
+        任一页失败（get_page 本身已吞异常返 []；此处再防非常规抛错）
+        只记该页为空，不丢同批其它页；调用方按页号顺序合并，去重、
+        空页容忍与游标语义与串行逐页完全一致。
+        """
+        sem = asyncio.Semaphore(DEEP_FETCH_CONCURRENCY)
+
+        async def bound(pg: int) -> tuple[int, list[dict]]:
+            async with sem:
+                try:
+                    rows = await self.get_page(cat, pg, scope)
+                except Exception:
+                    return pg, []
+                return pg, rows if isinstance(rows, list) else []
+
+        results = await asyncio.gather(
+            *[bound(pg) for pg in pages], return_exceptions=True)
+        out: list[tuple[int, list[dict]]] = []
+        for pg, res in zip(pages, results):
+            if isinstance(res, tuple) and len(res) == 2:
+                out.append(res)
+            else:
+                out.append((pg, []))
+        return out
+
     # -------------------------------------------------- 页级抓取
     async def _extend_dense(self, scope: str, cat: str, need_count: int) -> int:
-        """顺序翻页直到去重后的累计条目数达到 need_count（或翻到该源末页）。"""
+        """顺序翻页直到去重后的累计条目数达到 need_count（或翻到该源末页）。
+
+        P1-17：按 DEEP_FETCH_CONCURRENCY 分批并发取页，批内按页号顺序
+        合并——每页的去重、游标前移、空页计数与串行版逐页体完全一致。
+        达到 need / 空页到限时停下：批次里已取到但未处理到的页只留在
+        _page_cache，不并入 dense、不前移游标，下次接着翻时从缓存取，
+        不重复请求。"""
         sk = self._scope_key(scope, cat)
         pc = self.pagecount(cat, scope)
         seen = self._seen_guids.setdefault(sk, set())
@@ -560,25 +600,33 @@ class Catalog:
         # 空页容忍放宽到 10 页，别翻两页就断。
         streak_limit = 10 if cat == "uhd" else 3
         while len(dense) < need_count and pg <= pc:
-            rows = await self.get_page(cat, pg, scope)
-            added = 0
-            for b in rows:
-                gid = b.get("guid")
-                if gid in seen:
-                    continue
-                seen.add(gid); dense.append(b); added += 1
-            if added:
-                # 只有真正取到新增才把游标前移，慢源抖动的空页下次可重试
-                self._scanned_page[sk] = pg
-                pg += 1
-                empty_streak = 0
-            else:
-                # 连续多页空（超时/末页）才停止，容忍慢源的偶发抖动
-                empty_streak += 1
-                if empty_streak >= streak_limit:
-                    self._scanned_page[sk] = pg
+            batch = list(range(pg, min(pg + DEEP_FETCH_CONCURRENCY, pc + 1)))
+            pages = await self._fetch_pages(scope, cat, batch)
+            stopped = False
+            for pg_i, rows in pages:
+                added = 0
+                for b in rows:
+                    gid = b.get("guid")
+                    if gid in seen:
+                        continue
+                    seen.add(gid); dense.append(b); added += 1
+                if added:
+                    # 只有真正取到新增才把游标前移，慢源抖动的空页下次可重试
+                    self._scanned_page[sk] = pg_i
+                    empty_streak = 0
+                else:
+                    # 连续多页空（超时/末页）才停止，容忍慢源的偶发抖动
+                    empty_streak += 1
+                    if empty_streak >= streak_limit:
+                        self._scanned_page[sk] = pg_i
+                        stopped = True
+                        break
+                pg = pg_i + 1
+                if len(dense) >= need_count:
+                    stopped = True
                     break
-                pg += 1
+            if stopped:
+                break
         self._dense_count[sk] = len(dense)
         return len(dense)
 
@@ -814,23 +862,35 @@ class Catalog:
 
         顺序取合并大页直到攒够 offset+limit；容忍慢源偶发的整页空（重试到
         连续 3 个空页才认为到底），避免一次抖动就把分页永久截断。
+
+        P1-17：按 DEEP_FETCH_CONCURRENCY 分批并发取页，批内按页号顺序
+        合并；任一页失败只记该页为空，不丢同批其它页。
         """
         out: list[dict] = []
         seen: set[str] = set()
         pg = 1
         empty_streak = 0
         while len(out) < offset + limit and pg <= MAX_PAGES and empty_streak < 3:
-            rows = await self.get_page(cat, pg, scope)
-            added = 0
-            for b in rows:
-                g = b.get("guid")
-                if g and g not in seen:
-                    seen.add(g); out.append(b); added += 1
-            if added:
-                empty_streak = 0
-            else:
-                empty_streak += 1
-            pg += 1
+            batch = list(range(pg, min(pg + DEEP_FETCH_CONCURRENCY,
+                                       MAX_PAGES + 1)))
+            pages = await self._fetch_pages(scope, cat, batch)
+            stopped = False
+            for pg_i, rows in pages:
+                added = 0
+                for b in rows:
+                    g = b.get("guid")
+                    if g and g not in seen:
+                        seen.add(g); out.append(b); added += 1
+                if added:
+                    empty_streak = 0
+                else:
+                    empty_streak += 1
+                pg = pg_i + 1
+                if len(out) >= offset + limit or empty_streak >= 3:
+                    stopped = True
+                    break
+            if stopped:
+                break
         return out[offset:offset + limit]
 
     # --------------------------------------- 单源独立库：跨四类交错窗口
