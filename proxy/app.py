@@ -2429,23 +2429,37 @@ async def _access(request: Request, call_next):
     # fnusers 带 30s 缓存，识别失败/无 token 落到全局分区，行为同旧版。
     # 前缀在上游四项之外另加 fork 自有读历史的两条路由（stream/list 续播、
     # ext/continue 继续观看），否则这两处会读不到已分区用户的进度。
+    # 收藏 / 已看同样按账号分区（P0-3）：marks 上下文在 history 前缀之外
+    # 另加 mediadb/search/favorite/ext-favorite——这些路由渲染的行会带
+    # is_favorite/is_watched 角标（_apply_marks），不设上下文会读到全局分区。
     _hist_tokens = None
+    _marks_tokens = None
+    _hist_paths = ("/v/api/v1/play/", "/v/api/v1/item/",
+                   "/v/api/v1/play", "/v/media/online",
+                   "/v/api/v1/stream/list", "/v/api/ext/continue")
     try:
-        if request.url.path.startswith(("/v/api/v1/play/", "/v/api/v1/item/",
-                                        "/v/api/v1/play", "/v/media/online",
-                                        "/v/api/v1/stream/list",
-                                        "/v/api/ext/continue")):
+        _pth = request.url.path
+        if _pth.startswith(_hist_paths + ("/v/api/v1/mediadb/",
+                                          "/v/api/v1/search/",
+                                          "/v/api/v1/favorite/",
+                                          "/v/api/ext/favorite")):
             _u = fnusersmod.resolve(request)
             if _u.get("known"):
-                _hist_tokens = histmod.set_current_user(
+                _marks_tokens = marksmod.set_current_user(
                     _u.get("guid"), bool(_u.get("is_admin")))
+                if _pth.startswith(_hist_paths):
+                    _hist_tokens = histmod.set_current_user(
+                        _u.get("guid"), bool(_u.get("is_admin")))
     except Exception:
         _hist_tokens = None
+        _marks_tokens = None
     try:
         resp = await call_next(request)
     finally:
         if _hist_tokens is not None:
             histmod.reset_current_user(_hist_tokens)
+        if _marks_tokens is not None:
+            marksmod.reset_current_user(_marks_tokens)
     p = request.url.path
     if "/api/" in p or p.startswith(ONLINE_PREFIX) or p.startswith("/v/media"):
         query = _diagnostic_query(request)
@@ -2736,15 +2750,25 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
                             timeout: float | None = None,
                             *, include_t4: bool = True,
-                            refresh: bool = False) -> list[dict]:
+                            refresh: bool = False,
+                            visible=None, viewer_key: str = "") -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
 
     结果进绑定聚合缓存池（按 片名·fast·t4 区分），TTL 内同片名的多次绑定/回源/
     搜索复用同一份聚合结果，并以单飞去重并发扇出，不重复拉取所有源。
     refresh=True 用于绑定搜索的网络重试：必须绕过缓存与旧在途任务，否则一次
     偶发空结果会被当成“无源”持续复用。
+
+    visible/viewer_key（P0-1 早返回按可见数计）：visible 是按查看者判定的
+    ``OnlineTitle -> bool`` 回调，透传给 search_all 做早返回决策；带
+    visible 的聚合结果可能因提前取消慢源而比无约束聚合少标题（缓存的是
+    未过滤 brief，但聚合本身已被该查看者的早返回截断），故缓存键须按
+    viewer_key 分账号——否则受限账号先搜会把截断结果留给管理员。
+    不带 visible 时 viewer_key 为空，缓存键与旧行为完全一致。
     """
     cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
+    if viewer_key:
+        cache_key += f"\x00{viewer_key}"
     loop = asyncio.get_event_loop()
     _hit = None if refresh else _AGG_CACHE.get(cache_key)
     if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
@@ -2759,7 +2783,8 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     _AGG_INFLIGHT[cache_key] = fut
     try:
         result = await __aggregate_briefs_inner(
-            keyword, maxn, fast_only, timeout, include_t4=include_t4)
+            keyword, maxn, fast_only, timeout, include_t4=include_t4,
+            visible=visible)
         # remember_merged 幂等：命中缓存路径也已入库，这里再确保 store 有这些 brief
         try:
             store.remember_merged(result)
@@ -2783,10 +2808,13 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
 async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                                    fast_only: bool = False,
                                    timeout: float | None = None,
-                                   *, include_t4: bool = True) -> list[dict]:
+                                   *, include_t4: bool = True,
+                                   visible=None) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
-    失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
+    失败时快速回源，避免被 redroid 慢源拖到网关超时。
+    visible：按查看者判定的 OnlineTitle 可见回调，透传给 search_all，
+    只影响早返回决策，不改聚合与过滤分层。"""
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
                if not (features.ADULT and s.get("adult"))
@@ -2806,7 +2834,8 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     # （旧写法 budget=None if timeout is not None else ... 是死三元：
     # search_all 内又会把 None 还原成 timeout。）
     budget = timeout if timeout is not None else _AGGREGATE_SEARCH_BUDGET
-    titles = await providers.search_all(keyword, sources, budget=budget)
+    titles = await providers.search_all(keyword, sources, budget=budget,
+                                        visible=visible)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
@@ -2944,13 +2973,35 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
     缓存卡片会把先搜者的可见范围漏给后搜者，故每次返回时都按当前
     request 重新过滤、重新建卡；查看者上下文（_ViewerCtx）每请求一个。
     request 为 None（无查看者上下文）时按 fail-closed 全部隐藏。
+
+    早返回按可见数计（P0-1）：把按查看者判定的可见回调传给
+    _aggregate_briefs/search_all，快源先回的隐藏库标题不再触发早返回
+    取消慢源。带回调的聚合可能被该查看者的早返回截断，故搜索缓存与
+    聚合缓存的键都按查看者分（viewer_key：已知账号用 guid，未知用
+    "unknown"）；request 为 None 时不传回调、不分键，行为与旧版一致。
     """
     # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
     # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
     # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
+    # P0-1 统一化：可见回调与 viewer_key 都取自每请求 _ViewerCtx（一次
+    # 身份解析 + memo 判定），不再逐次 fnusers.resolve / _viewer_can_open_key；
+    # 语义与 failclosed 原实现一致：request 为 None 时不传回调、不分键。
     ctx = _viewer_ctx(request)
+    visible = None
+    viewer_key = ""
+    if request is not None:
+        viewer_key = ctx.user.get("guid") if ctx.user.get("known") else "unknown"
+
+        def visible(title, _ctx=ctx):
+            try:
+                return libfiltermod.brief_visible(
+                    inj.brief_of(title), _ctx.can_open_key,
+                    gkey_of=_ctx.gkey_of_source)
+            except Exception:
+                return False
     briefs = await _aggregate_briefs(
-        keyword, fast_only=fast_only, timeout=timeout)
+        keyword, fast_only=fast_only, timeout=timeout,
+        visible=visible, viewer_key=viewer_key)
     return [_search_card(b) for b in libfiltermod.filter_briefs(
         briefs, ctx.can_open_key, gkey_of=ctx.gkey_of_source)]
 
@@ -3615,6 +3666,109 @@ def _brief_viewable(request: Request | None, brief: dict,
     if not keys:
         return False
     return any(ctx.can_open_key(k) for k in keys)
+
+
+def _denied_lib_response(status_code: int = 200):
+    """按库拒绝的标准体：与详情/媒体库的 -6 一致。JSON 接口用默认 200，
+    字节流/分片类路由传 403（播放器按 HTTP 状态判定失败）。"""
+    return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None},
+                        status_code=status_code)
+
+
+def _chart_extra_keys(chart_guid: str) -> set:
+    """榜单 guid → 其榜单库的另一扇门（详情里 chart-bound 分支同款）。"""
+    if not chart_guid:
+        return set()
+    meta = chart_cache.get_guid(chart_guid) or {}
+    return {vlibsmod.make_key(vlibsmod.K_CHART, meta.get("cat", "tv"))}
+
+
+def _chart_key_open(request: Request, chart_guid: str) -> bool:
+    """榜单库那扇门是否对当前查看者打开（未绑定榜单片的播放链守门用）。"""
+    if not chart_guid:
+        return False
+    return _viewer_can_open_key(
+        request, vlibsmod.make_key(
+            vlibsmod.K_CHART,
+            (chart_cache.get_guid(chart_guid) or {}).get("cat", "tv")))
+
+
+def _online_guid_viewable(request: Request, guid: str):
+    """在线标题 / 集 / 季 / 线路卡 guid 对当前查看者是否可见（播放链守门）。
+
+    返回 True（可见）/ False（已知在线标题但打不开任一归属库）/
+    None（不是在线标题，或父标题已被 store 淘汰——调用方走原有逻辑；
+    与 item_detail 的季/集节点处理一致：淘汰后拒绝会误伤断点续播类直达，
+    且淘汰后 store 里已无可播目标，播放链本身也走不到取流）。
+    """
+    if not guid:
+        return None
+    og = ""
+    parsed = _parse_line_item_guid(guid)
+    if parsed:
+        og = parsed[0]
+    if not og:
+        ep = store.get_episode(guid)
+        if ep:
+            og = ep.get("online_guid") or ""
+    if not og:
+        season = store.get_season(guid)
+        if season:
+            og = season.get("online_guid") or ""
+    brief = store.get_title_by_guid(og) if og \
+        else store.get_title_by_guid(guid)
+    if brief is None:
+        return None
+    extra = _chart_extra_keys(guid) if chart_cache.is_chart_guid(guid) \
+        else None
+    return _brief_viewable(request, brief, extra_keys=extra)
+
+
+def _online_target_viewable(request: Request, target: dict, mg: str = ""):
+    """已解析的播放目标（media_guid 链）对当前查看者是否可见。
+
+    返回 True / False / None（目标无归属标题，如未绑定榜单片——调用方
+    走原有逻辑，绑定完成后的 preset/main 再由 _pick_episode 目标复核）。
+    """
+    if not target:
+        return None
+    og = target.get("online_guid") or ""
+    brief = store.get_title_by_guid(og) if og else None
+    if brief is None:
+        return None
+    extra = None
+    cg = chart_guid_by_media(mg) if mg else ""
+    if cg:
+        extra = _chart_extra_keys(cg)
+    return _brief_viewable(request, brief, extra_keys=extra)
+
+
+def _favorite_viewable(request: Request, rec: dict) -> bool:
+    """一条收藏记录对当前查看者是否可见（收藏夹按库过滤）。
+
+    优先用 live brief 判定（线路变化后仍准确）；brief 已被 store 淘汰
+    时用收藏时存下的归属库键（rec["libs"]）兜底；两者都没有时隐藏
+    （fail-closed）。榜单收藏额外认榜单库那扇门，与详情一致。
+    """
+    guid = (rec or {}).get("guid", "")
+    if not guid:
+        return False
+    brief = store.get_title_by_guid(guid)
+    if brief is None:
+        ep = store.get_episode(guid) or {}
+        brief = store.get_title_by_guid(ep.get("online_guid", "")) or None
+    if brief is not None:
+        extra = _chart_extra_keys(guid) \
+            if chart_cache.is_chart_guid(guid) else None
+        return _brief_viewable(request, brief, extra_keys=extra)
+    if chart_cache.is_chart_guid(guid):
+        return any(_viewer_can_open_key(request, k)
+                   for k in _chart_extra_keys(guid))
+    stored = (rec or {}).get("libs") or []
+    if stored:
+        return any(isinstance(k, str) and _viewer_can_open_key(request, k)
+                   for k in stored)
+    return False
 
 
 @app.get("/v/api/v1/mediadb/list")
@@ -5253,6 +5407,9 @@ async def t4_range(mg: str, request: Request):
     target = store.resolve_media_guid(mg)
     if not target or not target.get("t4"):
         return Response("not found", status_code=404)
+    # P0-3：T4 选片库打不开时直接 -6（403）。
+    if _online_target_viewable(request, target, mg) is False:
+        return _denied_lib_response(status_code=403)
     if request.query_params.get("session"):
         target = t4_service.session_target(mg, request.query_params["session"])
         if target is None:
@@ -5755,6 +5912,9 @@ async def _stream_list_impl(guid: str, request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（T4 刚加载完的在此复核）。
+    if _online_guid_viewable(request, guid) is False:
+        return _denied_lib_response()
     # >>> PRIVATE:CATVOD
     if _xlib_on():
         xsl = await _xlib_stream_payload(guid)
@@ -5763,6 +5923,8 @@ async def _stream_list_impl(guid: str, request: Request):
     # <<< PRIVATE:CATVOD
     # 红果短剧 episode 线路：直链 play_link，cloud_storage_info 直连类型
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+            return _denied_lib_response()
         try:
             sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
             ep = int(ep)
@@ -5808,6 +5970,9 @@ async def _stream_list_impl(guid: str, request: Request):
             if not brief and chart_cache.is_chart_guid(guid):
                 if time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
                     return await forward_upstream(request)
+                # P0-3：榜单库本身打不开时连占位线路也不给，直接 -6。
+                if not _chart_key_open(request, guid):
+                    return _denied_lib_response()
                 # 打开详情/线路菜单也不能同步等搜源：启动后台匹配并立即返回占位线路，
                 # 真正播放时 play/info/preset 会等待同一单飞任务。
                 start_resolve_chart(guid)
@@ -5947,6 +6112,25 @@ def _attach_related(data: dict, brief: dict) -> None:
         data["recommendations"] = [inj.search_item(b) for b in items]
 
 
+def _mark_lib_keys(guid: str) -> list:
+    """收藏/已看记录的归属库键：供 brief 淘汰后仍能按库过滤
+    （见 _favorite_viewable）。live brief 优先；集节点取父标题；
+    榜单收藏取榜单库键。"""
+    brief = store.get_title_by_guid(guid)
+    if brief is None:
+        ep = store.get_episode(guid) or {}
+        brief = store.get_title_by_guid(ep.get("online_guid", "")) or None
+    if brief is not None:
+        try:
+            return sorted(libfiltermod.brief_lib_keys(
+                brief, gkey_of=_gkey_of_source))
+        except Exception:
+            return []
+    if chart_cache.is_chart_guid(guid):
+        return sorted(_chart_extra_keys(guid))
+    return []
+
+
 def _mark_extra(guid: str) -> dict:
     meta = _online_card_meta(guid) or {}
     # 集节点收藏：用所属剧集的标题/海报当收藏元信息，否则收藏夹里只有 guid。
@@ -5963,6 +6147,7 @@ def _mark_extra(guid: str) -> dict:
         "title": meta.get("title", ""), "type": meta.get("type", ""),
         "poster": meta.get("poster", ""), "year": meta.get("year", ""),
         "remarks": meta.get("remarks", ""),
+        "libs": _mark_lib_keys(guid),
     }
 
 
@@ -6110,6 +6295,9 @@ async def favorite_list(request: Request):
     ftype = str(body.get("type") or "all")
     cards: list[dict] = []
     for rec in marks.favorite_records():
+        # P0-3：收藏按账号分区（marks）+ 按库过滤；权限收回后旧记录不再出现。
+        if not _favorite_viewable(request, rec):
+            continue
         row = _favorite_card(rec)
         if not row:
             continue
@@ -6178,6 +6366,9 @@ async def play_info(request: Request):
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
     client = _client_of(request)
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6，不再往下走取流。
+    if _online_guid_viewable(request, guid) is False:
+        return _denied_lib_response()
     if _parse_line_item_guid(guid):
         line_info = _vod_play_info(guid, client)
         if line_info is not None:
@@ -6185,6 +6376,9 @@ async def play_info(request: Request):
     error = await _load_t4_detail(guid, request)
     if error is not None:
         return error
+    # T4 详情刚加载完才进 store 的标题，在此复核一次。
+    if _online_guid_viewable(request, guid) is False:
+        return _denied_lib_response()
 
     # >>> PRIVATE:CATVOD
     if _xlib_on() and guid:
@@ -6208,6 +6402,8 @@ async def play_info(request: Request):
 
     # 红果短剧 episode 播放信息：直链 play_link，MP4 wrapper
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+            return _denied_lib_response()
         try:
             sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
             ep = int(ep)
@@ -6243,6 +6439,10 @@ async def play_info(request: Request):
                 pass
         brief = store.get_title_by_guid(guid)
         if brief is None:
+            # P0-3：未绑定榜单片先给骨架、绑定完成后再由 preset/main 复核；
+            # 但榜单库本身打不开时连骨架也不给，直接 -6。
+            if not _chart_key_open(request, guid):
+                return _denied_lib_response()
             meta = chart_cache.get_guid(guid) or {}
             cat = meta.get("cat", "tv")
             typ = "Movie" if cat == "movie" else "TV"
@@ -6412,10 +6612,18 @@ async def stream_post(request: Request):
     # <<< PRIVATE:CATVOD
     # 线路卡 media_guid：先按 guid 内线路身份解析（只定选集身份，不固定线）。
     target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
-    if not target and chart_guid_by_media(mg):
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6。
+    if target is not None \
+            and _online_target_viewable(request, target, mg) is False:
+        return _denied_lib_response()
+    chart_g = chart_guid_by_media(mg)
+    if not target and chart_g:
+        # P0-3：榜单库本身打不开时连占位流也不给，直接 -6。
+        if not _chart_key_open(request, chart_g):
+            return _denied_lib_response()
         # 网页播放器会在进入播放页前连续请求 stream；这里必须瞬时返回，不能等待搜源，
         # 否则三个请求串起来仍会把用户留在海报墙。真实匹配推迟到播放器请求 preset。
-        start_resolve_chart(chart_guid_by_media(mg))
+        start_resolve_chart(chart_g)
         return _instant_stream_response(mg)
     if not target:
         return await forward_upstream(request)
@@ -6527,8 +6735,15 @@ async def media_range(mg: str, request: Request):
                                     headers={"Cache-Control": "no-store"})
     # <<< PRIVATE:CATVOD
     target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）。
+    if target is not None \
+            and _online_target_viewable(request, target, mg) is False:
+        return _denied_lib_response(status_code=403)
     chart_g = "" if target else chart_guid_by_media(mg)
     if not target and chart_g:
+        # P0-3：榜单库本身打不开时不进 preset，直接 -6（403）。
+        if not _chart_key_open(request, chart_g):
+            return _denied_lib_response(status_code=403)
         if time.time() - _CHART_FAILED_TS.get(chart_g, 0) < _CHART_FAILED_TTL:
             return Response("暂无可用在线片源", status_code=503)
         # App 原生播放器也不等待搜索：立刻进入播放器，preset 内部再等待后台匹配
@@ -6588,6 +6803,9 @@ async def play_play(request: Request):
     body = json.loads(await request.body() or b"{}")
     mg = body.get("media_guid", "")
     if hgdj_enabled() and hgdjmod.is_hgdj_media_guid(mg):
+        # P0-3：红果库打不开时不回直链，直接 -6。
+        if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+            return _denied_lib_response()
         # HGDJ 云盘直连：play_link 已是绝对直链，直接回原值即可；播放器直连。
         try:
             sg, ep = mg[len("hgdj-mg:"):].rsplit(":", 1)
@@ -6602,10 +6820,18 @@ async def play_play(request: Request):
                                  "data": clientmod.normalize_detail(info, client)})
         return JSONResponse({"code": 0, "msg": "", "data": {}})
     base_target = _seeded_media_target(mg, request) or store.resolve_media_guid(mg)
-    if not base_target and chart_guid_by_media(mg):
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6。
+    if base_target is not None \
+            and _online_target_viewable(request, base_target, mg) is False:
+        return _denied_lib_response()
+    chart_g = chart_guid_by_media(mg)
+    if not base_target and chart_g:
+        # P0-3：榜单库本身打不开时连占位 HLS 也不给，直接 -6。
+        if not _chart_key_open(request, chart_g):
+            return _denied_lib_response()
         # 未绑定榜单片：play/play 也立即返回占位 HLS，播放器先进入加载页；
         # preset/main 请求时再等待后台匹配，避免 play/info+stream+play 串行等待。
-        start_resolve_chart(chart_guid_by_media(mg))
+        start_resolve_chart(chart_g)
         return _instant_play_response(mg, body.get("video_guid", ""))
     if not base_target:
         return await forward_upstream(request)
@@ -6672,6 +6898,9 @@ async def hgdj_media_proxy(series_guid: str, request: Request):
     注意：app 底层还有一个 /{mg} 通配符路由，会优先拦截以 "/" 开头的任意 mg。
     这里显式用 /hgdj/{series_guid}.mp4，与 play_link 生成的一致。
     """
+    # P0-3：红果库打不开时不代理播放流，直接 -6（403）。
+    if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+        return _denied_lib_response(status_code=403)
     try:
         ep = int(request.query_params.get("ep", "1"))
     except ValueError:
@@ -6696,6 +6925,10 @@ async def direct_proxy(mg: str, request: Request):
     failed_g = await _await_pending_chart(mg)
     target = store.resolve_media_guid(mg)
     if not target:
+        # P0-3：榜单库本身打不开时不给占位 preset，直接 -6（403）。
+        chart_g = chart_guid_by_media(mg)
+        if chart_g and not _chart_key_open(request, chart_g):
+            return _denied_lib_response(status_code=403)
         # 未绑定/无源：302 到占位 preset（HLS），保持播放器存活、菜单可切，不报硬错误
         didx = int(request.query_params.get("index", 0) or 0)
         return RedirectResponse(
@@ -6712,6 +6945,9 @@ async def direct_proxy(mg: str, request: Request):
                 target["online_guid"], qline, int(target.get("index", 0) or 0))
         if switched:
             target = switched
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）。
+    if _online_target_viewable(request, target, mg) is False:
+        return _denied_lib_response(status_code=403)
     # 线路健康探测 + 自动换线（直链/小雅等非 HLS 线路）
     request.state._play_mg = mg
     if _autofail_on():
@@ -6898,6 +7134,10 @@ async def play_list(request: Request):
             brief = store.get_title_by_guid(ep["online_guid"])
         if not brief:
             continue  # 缓存已淘汰的标题不再展示
+        extra = _chart_extra_keys(ig) if chart_cache.is_chart_guid(ig) \
+            else None
+        if not _brief_viewable(request, brief, extra_keys=extra):
+            continue  # P0-3：权限收回后旧记录不再展示
         online_items.append(inj.history_item(brief, rec, ep))
 
     # 在线历史按最近播放排序，置顶；按 guid 与官方去重
@@ -8747,9 +8987,16 @@ async def hls_preset(mg: str, request: Request):
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
+        # P0-3：未绑定榜单片且榜单库打不开时不给占位 master，直接 -6（403）。
+        chart_g = chart_guid_by_media(mg)
+        if chart_g and not _chart_key_open(request, chart_g):
+            return _denied_lib_response(status_code=403)
         # 线路未就绪：回占位 master，由 main(phwait) 继续等待并自动切正片；
         # 播放器先进入加载页，不弹“播放出错”、线路菜单不被锁死（上游 v0.2.65）。
         return _placeholder_master_response(idx0)
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）。
+    if _online_target_viewable(request, picked, mg) is False:
+        return _denied_lib_response(status_code=403)
     # 起播即跳过已知坏线（用户显式选线除外）
     picked = _dodge_known_bad(picked, request)
     # 注意：此处不 await _resolve_if_needed —— preset 只输出线路变体菜单，
@@ -8936,6 +9183,10 @@ async def hls_main(mg: str, request: Request):
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
+        # P0-3：未绑定榜单片且榜单库打不开时不给占位，直接 -6（403）。
+        chart_g = chart_guid_by_media(mg)
+        if chart_g and not _chart_key_open(request, chart_g):
+            return _denied_lib_response(status_code=403)
         # 占位自修复通道（上游 v0.2.65/v0.2.70）：只有显式 phwait 的准备通道保留占位，
         # 期间一律回占位 HLS（200），绝不返回 4xx/5xx 锁死菜单；普通 main 仍按
         # v0.2.42 不用无限占位掩盖“未找到片源”。
@@ -8944,6 +9195,9 @@ async def hls_main(mg: str, request: Request):
         if failed_g:
             return Response("暂无可用在线片源", status_code=503)
         return Response("not found", status_code=404)
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）。
+    if _online_target_viewable(request, picked, mg) is False:
+        return _denied_lib_response(status_code=403)
 
     explicit_line = request.query_params.get("line")
     auto_play = request.query_params.get("auto") == "1" and not explicit_line
@@ -9237,6 +9491,16 @@ async def hls_seg(mg: str, request: Request):
         return Response("bad u", status_code=400)
     await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
+    # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）；未解析出
+    # 目标时沿用原有逻辑（与 item_detail 的季/集节点口径一致，淘汰后
+    # 拒绝会误伤断点续播类直达；未绑定榜单片则只在榜单库关闭时拒绝）。
+    if picked is not None:
+        if _online_target_viewable(request, picked, mg) is False:
+            return _denied_lib_response(status_code=403)
+    else:
+        chart_g = chart_guid_by_media(mg)
+        if chart_g and not _chart_key_open(request, chart_g):
+            return _denied_lib_response(status_code=403)
     headers = picked["headers"] if picked else {}
     # 透传 Range（播放器 seek）
     fwd = dict(headers)
@@ -9857,8 +10121,29 @@ async def ext_status(request: Request):
 # --------------------------------------------------------------- P2：继续观看 / 追剧 / 源健康 / 收藏元数据
 @app.get("/v/api/ext/continue")
 async def ext_continue(request: Request, limit: int = 20):
-    """继续观看：未看完的记录，按最近观看倒序，带 progress。"""
-    return {"code": 0, "msg": "", "data": history.continue_watching(limit=limit)}
+    """继续观看：未看完的记录，按最近观看倒序，带 progress。
+
+    P0-3 按库过滤：先取全量（history 按账号分区，每账号上限 500 条）
+    再按归属库过滤、最后截到 limit——权限收回后旧记录不再展示；
+    若直接在 limit 内过滤，“前 limit 条全被隐藏时”可见的旧记录就
+    永远翻不出来。无归属 brief（缓存已淘汰）的记录不再展示，与
+    play/list 的口径一致。
+    """
+    out = []
+    for rec in history.continue_watching(limit=500):
+        ig = rec.get("item_guid", "")
+        brief = store.get_title_by_guid(ig)
+        if brief is None:
+            ep = store.get_episode(ig) or {}
+            brief = store.get_title_by_guid(ep.get("online_guid", "")) or None
+        if brief is None:
+            continue
+        extra = _chart_extra_keys(ig) if chart_cache.is_chart_guid(ig) \
+            else None
+        if not _brief_viewable(request, brief, extra_keys=extra):
+            continue
+        out.append(rec)
+    return {"code": 0, "msg": "", "data": out[:max(1, int(limit))]}
 
 
 @app.get("/v/api/ext/follow")
@@ -9931,9 +10216,12 @@ async def ext_source_heal(request: Request):
 @app.post("/v/api/ext/favorite/enrich")
 async def ext_favorite_enrich(request: Request):
     """收藏元数据补全：用同名其他源的条目补齐收藏记录的空字段，不改已有值。"""
+    # P0-3：与 favorite/list 同口径——先按账号分区 + 按库过滤再补全，
+    # 否则未过滤的原始记录会经此端点漏回给无权账号。
+    recs = [r for r in marks.favorite_records()
+            if _favorite_viewable(request, r)]
     if not config.get().get("metadata_enabled", True):
-        return {"code": 0, "msg": "", "data": marks.favorite_records()}
-    recs = marks.favorite_records()
+        return {"code": 0, "msg": "", "data": recs}
     # 候选：当前已缓存的全部标题 brief。
     cands = []
     try:
