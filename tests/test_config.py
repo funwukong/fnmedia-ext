@@ -26,6 +26,18 @@ def test_defaults_load_without_file(monkeypatch, tmp_path):
     assert any(s["id"] == "baofeng" for s in cfg["sources"])
 
 
+def test_first_install_persists_default_config(monkeypatch, tmp_path):
+    # 上游 v0.2.45 / issue #39：干净安装首次加载即把默认配置落盘，
+    # 否则 status/管理页等依赖“文件存在”的路径会异常。
+    state = _patch_state(monkeypatch, tmp_path)
+    assert not state.exists()
+    config_mod.Config()
+    assert state.exists()
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["config_version"] == config_mod.CONFIG_VERSION
+    assert saved["admin_token"]
+
+
 def test_deprecated_keys_removed(monkeypatch, tmp_path):
     state = _patch_state(monkeypatch, tmp_path)
     state.parent.mkdir(parents=True)

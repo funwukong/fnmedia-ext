@@ -121,6 +121,20 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
             await appmod._aggregate_briefs("测试片", fast_only=True)
         self.assertEqual(search.call_count, 2)
 
+    async def test_online_search_defaults_to_fast_only(self):
+        # 上游 v0.2.43：全局搜索框默认只聚合秒回的在线直链源，不被少数慢源拖到超时。
+        with patch.object(appmod, "_aggregate_briefs",
+                          return_value=[]) as agg:
+            await appmod.online_search("测试片", self.client)
+        agg.assert_awaited_once()
+        self.assertIs(agg.call_args.kwargs.get("fast_only"), True)
+        # fast_only 与全量走不同缓存键，互不串味
+        with patch.object(appmod, "_aggregate_briefs",
+                          return_value=[]) as agg2:
+            await appmod.online_search("测试片", self.client, fast_only=False)
+        agg2.assert_awaited_once()
+        self.assertIs(agg2.call_args.kwargs.get("fast_only"), False)
+
     async def test_agg_cache_refresh_bypasses(self):
         with patch.object(providers, "search_all",
                           return_value=self._two_titles()) as search:

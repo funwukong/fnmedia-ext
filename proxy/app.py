@@ -2867,22 +2867,28 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
 
 
 async def online_search(keyword: str, client: httpx.AsyncClient,
-                          timeout: float | None = None) -> list:
+                        timeout: float | None = None,
+                        fast_only: bool = True) -> list:
     now = time.time()
-    if keyword in _search_cache and now - _search_cache[keyword][0] < CACHE_TTL:
-        return _search_cache[keyword][1]
-    fut = _search_inflight.get(keyword)
+    cache_key = keyword if not fast_only else keyword + "\x00fast"
+    if cache_key in _search_cache and now - _search_cache[cache_key][0] < CACHE_TTL:
+        return _search_cache[cache_key][1]
+    fut = _search_inflight.get(cache_key)
     if fut is None:
         fut = asyncio.get_event_loop().create_future()
-        _search_inflight[keyword] = fut
+        _search_inflight[cache_key] = fut
 
         async def work():
             try:
-                briefs = await _aggregate_briefs(keyword, timeout=timeout)
+                # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
+                # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
+                # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
+                briefs = await _aggregate_briefs(
+                    keyword, fast_only=fast_only, timeout=timeout)
                 items = [t4_browser.media_card(b) if
                          b.get("locator", {}).get("kind") == "t4" else inj.search_item(b)
                          for b in briefs]
-                _search_cache[keyword] = (time.time(), items)
+                _search_cache[cache_key] = (time.time(), items)
                 if not fut.done():
                     fut.set_result(items)
             except Exception:
@@ -2890,7 +2896,7 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
                 if not fut.done():
                     fut.set_result([])
             finally:
-                _search_inflight.pop(keyword, None)
+                _search_inflight.pop(cache_key, None)
 
         asyncio.create_task(work())
     return await fut
