@@ -857,6 +857,27 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
       </div>
 
+      <div class="card" id="tokenCard">
+        <div class="card-title">🔑 管理令牌
+          <button class="small" style="margin-left:auto" onclick="loadAdminToken()">刷新</button></div>
+        <p class="card-sub">登录校验用的令牌：新令牌 256 位；轮换后旧令牌在宽限期（默认 24 小时）内仍可用，宽限期过后失效。老令牌升级后继续可用；默认不按年龄强制过期（久未登录也不会被锁死）。令牌原文只在轮换成功那一次显示，请立即复制保存。</p>
+        <div class="stack sm">
+          <div>当前令牌：<code id="tokMask">…</code> <span class="muted" id="tokBits"></span></div>
+          <div id="tokAge" class="muted">读取中…</div>
+          <div id="tokGrace" class="muted"></div>
+          <div id="tokLimit" class="muted"></div>
+          <div id="tokNewWrap" style="display:none">
+            <div style="color:var(--warn,#b45309);font-weight:600">新令牌（只显示一次，请立即复制保存）：</div>
+            <div class="row"><input type="text" id="tokNew" readonly style="flex:1" onclick="this.select()"/>
+              <button class="small" onclick="copyNewToken()">复制</button></div>
+          </div>
+          <div class="row"><input type="password" id="tokTest" placeholder="粘贴令牌，验证是否有效" style="flex:1" autocomplete="off"/>
+            <button class="small" onclick="testAdminToken()">验证令牌</button></div>
+          <div id="tokTestMsg" class="hint"></div>
+          <div class="btn-row"><button class="small danger" onclick="rotateAdminToken()">重新生成令牌</button></div>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-title">⚖️ 免责声明与版权声明</div>
         <div class="stack sm muted" style="line-height:1.7">
@@ -919,7 +940,7 @@ async function switchPage(page){
   if(page==="pan"){const f=$("panFrame");if(f&&!f.src)f.src=f.dataset.src;}
   // <<< PRIVATE:GUARD
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
-  if(page==="about"){loadUpdate(false);}
+  if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
 
@@ -1029,6 +1050,61 @@ document.addEventListener("DOMContentLoaded",()=>{
     if(inp&&r.config&&r.config.update_proxy)inp.value=r.config.update_proxy;
   }catch(e){}})();
 });
+
+/* ---------- 管理令牌 ---------- */
+function fmtTokAge(sec){
+  if(sec==null)return "创建时间未知（老令牌，升级时起算）";
+  if(sec<3600)return Math.max(0,Math.floor(sec/60))+" 分钟前创建";
+  if(sec<86400)return (sec/3600).toFixed(1)+" 小时前创建";
+  return (sec/86400).toFixed(1)+" 天前创建";
+}
+async function loadAdminToken(){
+  const ageEl=$("tokAge");if(!ageEl)return;
+  try{
+    const r=await jget("/v/api/ext/admin/token");const d=r.data||r;
+    $("tokMask").textContent=d.masked||"(未配置)";
+    $("tokBits").textContent=d.length?("共 "+d.length+" 字符 · 约 "+d.bits+" 位"):"";
+    let age=fmtTokAge(d.age_seconds);
+    if(d.expires_at){age+="；有效期至 "+new Date(d.expires_at*1000).toLocaleString()
+      +(d.expired?"（已过期）":"");}
+    else{age+="；不按年龄强制过期";}
+    ageEl.textContent=age;
+    $("tokGrace").textContent=d.has_previous
+      ?("旧令牌宽限期剩余 "+Math.floor((d.grace_remaining_seconds||0)/3600)+" 小时 "
+        +Math.floor(((d.grace_remaining_seconds||0)%3600)/60)+" 分钟")
+      :"无轮换中的旧令牌。";
+    $("tokLimit").textContent="登录限流："+(d.window_seconds||900)+" 秒内连续失败 "
+      +(d.max_failures||5)+" 次后锁定 "+Math.round((d.lockout_seconds||900)/60)+" 分钟。";
+  }catch(e){ageEl.textContent="令牌状态读取失败："+e.message;}
+}
+async function rotateAdminToken(){
+  if(!confirm("将重新生成管理令牌（256 位）。\n\n旧令牌在宽限期（默认 24 小时）内仍可用，之后失效。\n新令牌只在成功后显示一次，请立即复制保存。\n\n确定重新生成？"))return;
+  try{
+    const r=await jpost("/v/api/ext/admin/token/rotate",{confirm:true});
+    if(r.code!==0){toast(r.msg||"重新生成失败","fail");return;}
+    const w=$("tokNewWrap");w.style.display="";
+    const inp=$("tokNew");inp.value=r.data.new_token||"";inp.select();
+    toast("已重新生成，请立即复制保存新令牌");
+    loadAdminToken();
+  }catch(e){toast("重新生成失败："+e.message,"fail");}
+}
+function copyNewToken(){
+  const inp=$("tokNew");if(!inp||!inp.value)return;
+  inp.select();
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(inp.value).then(()=>toast("已复制"),()=>toast("复制失败，请手动选中复制","fail"));}
+  else{document.execCommand("copy");toast("已复制");}
+}
+async function testAdminToken(){
+  const v=($("tokTest").value||"").trim();const m=$("tokTestMsg");
+  if(!v){m.textContent="请先粘贴令牌。";return;}
+  try{
+    const r=await jpost("/v/api/ext/admin/login",{token:v});
+    if(r.code===0){m.textContent="✅ 令牌有效"+(r.data&&r.data.via==="grace"?"（宽限期内旧令牌）":"")+"。";$("tokTest").value="";}
+    else{m.textContent="❌ "+(r.msg||"令牌不正确")
+      +(r.data&&r.data.retry_after_seconds?("，请 "+r.data.retry_after_seconds+" 秒后再试"):"");}
+    loadAdminToken();
+  }catch(e){m.textContent="验证失败："+e.message;}
+}
 
 /* ---------- 概览 ---------- */
 /* ---------- 本设备识别（自检） ---------- */

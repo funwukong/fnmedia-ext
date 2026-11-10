@@ -174,6 +174,22 @@ DEFAULTS = {
     # 慢的源排后），让能连通、延迟低的源默认排到更前。默认开启；关掉则只看质量权重。
     "auto_best_source": True,
     "admin_token": "",
+    # 管理令牌元数据（admin_token 加固，见 proxy/admin_auth.py）：
+    # created_at：令牌创建时间（epoch 秒）；老配置没有时升级时打戳为当前时间，
+    # 年龄从升级日起算，老令牌本身继续可用。
+    # previous/previous_expires_at：轮换下来的旧令牌及其宽限截止时间。
+    # grace_hours：轮换后旧令牌仍可用的宽限（小时，默认 24）。
+    # max_age_days：令牌最长年龄（天），0 = 不按年龄强制过期（默认，避免
+    #   用户久未登录被锁死；如需强制轮换可改成如 90，过期后须重新生成）。
+    # admin_auth_max_failures/lockout_seconds/window_seconds：登录限流阈值。
+    "admin_token_created_at": 0,
+    "admin_token_previous": "",
+    "admin_token_previous_expires_at": 0,
+    "admin_token_grace_hours": 24,
+    "admin_token_max_age_days": 0,
+    "admin_auth_max_failures": 5,
+    "admin_auth_lockout_seconds": 900,
+    "admin_auth_window_seconds": 900,
     # 仅用于「拉取订阅资源」的可选 HTTP(S) 代理（订阅配置 / spider jar / DRPY 脚本）。
     # 播放、聚合搜索、CMS 探测等一律不走此代理（产品客户端保持 trust_env=False 直连）。
     # 形如 http://user:pass@host:port ；留空表示直连。
@@ -272,12 +288,14 @@ class Config:
             self._sync_guard_defaults()
             # <<< PRIVATE:GUARD
             self._restored_from_backup = False
+            _read_missing = False
             try:
                 j = json.loads(_STATE.read_text(encoding="utf-8"))
                 if not isinstance(j, dict):
                     raise ValueError("config root is not an object")
             except FileNotFoundError:
                 j = {}
+                _read_missing = True
             except Exception as e:
                 # 主配置损坏：先试备份，备份也坏才退回默认值，绝不静默丢配置。
                 _log.error("config corrupted (%s: %s), trying backups",
@@ -364,6 +382,7 @@ class Config:
             # 旧版本（单库/小数量）保存过的热门参数自动升级到深度爬取规模；
             # 仅在检测到旧小值时迁移一次，用户之后自定义的大值不会被覆盖。
             migrated = False
+            _need_token_persist = False
             try:
                 if int(cfg.get("hot_limit", 0)) <= 120 and int(DEFAULTS["hot_limit"]) > 120:
                     cfg["hot_limit"] = DEFAULTS["hot_limit"]; migrated = True
@@ -385,7 +404,35 @@ class Config:
                                  type(e).__name__, e)
             if not cfg.get("admin_token"):
                 import secrets
-                cfg["admin_token"] = secrets.token_hex(8)
+                import time as _time
+                # 新令牌 256 bit；创建时间一并落盘（否则重启后令牌会变）。
+                cfg["admin_token"] = secrets.token_hex(32)
+                cfg["admin_token_created_at"] = int(_time.time())
+                _need_token_persist = True
+            elif not cfg.get("admin_token_created_at"):
+                # 老令牌（16 hex 字符）原样保留、继续可用，只补创建时间戳，
+                # 年龄从本次升级日起算；max_age_days 默认 0，本就不按年龄过期。
+                import time as _time
+                cfg["admin_token_created_at"] = int(_time.time())
+                _need_token_persist = True
+            # 宽限已过的旧令牌不再保留（当前令牌不受影响，不会锁死用户）。
+            _prev_exp = cfg.get("admin_token_previous_expires_at") or 0
+            if cfg.get("admin_token_previous") and _prev_exp:
+                import time as _time
+                if int(_prev_exp) <= int(_time.time()):
+                    cfg["admin_token_previous"] = ""
+                    cfg["admin_token_previous_expires_at"] = 0
+                    _need_token_persist = True
+            # load() 里只在两种情况下落盘：文件本就不存在（首次生成令牌，
+            # 否则重启后令牌会变），或刚从备份恢复（顺手修好已损坏的主配置）。
+            # 其余情况（老令牌补打戳、过期旧令牌清理）只改内存，等下一次
+            # save() 再落盘——避免覆盖用户手改后待修复的配置文件。
+            if _need_token_persist and (_read_missing or self._restored_from_backup):
+                try:
+                    self._persist(cfg, backup=False)
+                except Exception as e:
+                    _log.warning("admin token persist failed: %s: %s",
+                                 type(e).__name__, e)
             self._cfg = cfg
             try:
                 self._mtime = _STATE.stat().st_mtime
@@ -420,17 +467,72 @@ class Config:
             for k, v in patch.items():
                 if k in cfg:
                     cfg[k] = v
+            # 直接改写令牌（非轮换路径）时同步刷新创建时间、清掉旧令牌：
+            # 直接改写没有宽限期，优雅轮换请走 rotate_admin_token()。
+            if "admin_token" in patch:
+                new_tok = str(patch.get("admin_token") or "")
+                if new_tok and new_tok != str(self._cfg.get("admin_token") or ""):
+                    import time as _time
+                    cfg["admin_token_created_at"] = int(_time.time())
+                    cfg["admin_token_previous"] = ""
+                    cfg["admin_token_previous_expires_at"] = 0
             self._persist(cfg)
 
-    def _persist(self, cfg: dict):
+    # ---- 管理令牌（admin_token 加固）----
+    def admin_token_info(self, now=None):
+        """令牌状态（掩码展示，不含原文），供管理页显示年龄/过期/宽限。"""
+        import admin_auth
+        with _LOCK:
+            return admin_auth.token_info(self.get(), now)
+
+    def verify_admin_token(self, candidate: str, now=None):
+        """校验候选令牌。返回 ``(是否通过, 原因)``，见 admin_auth.verify_token。"""
+        import admin_auth
+        with _LOCK:
+            return admin_auth.verify_token(self.get(), candidate, now)
+
+    def rotate_admin_token(self, now=None):
+        """轮换管理令牌并返回 ``(新令牌原文, 令牌状态)``。
+
+        当前令牌移入 ``admin_token_previous``，在宽限期
+        （``admin_token_grace_hours``，默认 24 小时）内仍可登录；新令牌为
+        256 bit。调用方须把新令牌原文**只展示一次**给用户保存（管理页），
+        之后任何接口都不再返回原文。"""
+        import admin_auth
+        import time as _time
+        with _LOCK:
+            cfg = self.get()
+            now = int(_time.time()) if now is None else int(now)
+            old = str(cfg.get("admin_token") or "")
+            grace_hours = cfg.get("admin_token_grace_hours") or 0
+            try:
+                grace_hours = int(grace_hours)
+            except (TypeError, ValueError):
+                grace_hours = 0
+            if old and grace_hours > 0:
+                cfg["admin_token_previous"] = old
+                cfg["admin_token_previous_expires_at"] = now + grace_hours * 3600
+            else:
+                cfg["admin_token_previous"] = ""
+                cfg["admin_token_previous_expires_at"] = 0
+            new_tok = admin_auth.new_token()
+            cfg["admin_token"] = new_tok
+            cfg["admin_token_created_at"] = now
+            self._persist(cfg)
+            return new_tok, admin_auth.token_info(cfg, now)
+
+    def _persist(self, cfg: dict, backup: bool = True):
         _STATE.parent.mkdir(parents=True, exist_ok=True)
         tmp = _STATE.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                        encoding="utf-8")
         tmp.replace(_STATE)
         # 成功写入后再备份：备份 = 最近一次已知的完好配置，
-        # 主配置日后被外部写坏时可直接恢复到它。
-        _backup_config()
+        # 主配置日后被外部写坏时可直接恢复到它。load() 里首次生成令牌
+        # 的落盘不备份（backup=False），否则一份默认配置的备份会挡住
+        # 之后真正的用户配置备份。
+        if backup:
+            _backup_config()
         self._cfg = cfg
         self._mtime = _STATE.stat().st_mtime
 

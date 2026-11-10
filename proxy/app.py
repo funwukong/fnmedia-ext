@@ -77,6 +77,7 @@ import domain_heal as domain_heal_mod
 import metadata as metadata_mod
 import vlibs as vlibsmod
 import fnusers as fnusersmod
+import admin_auth as admin_authmod
 import updater
 from store import (store, make_guid, media_guid, video_guid, is_online_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
@@ -9372,6 +9373,96 @@ async def ext_cache_clear(request: Request):
         threading.Thread(target=_clear_titles_restart, daemon=True).start()
     return {"code": 0, "data": {"cleared": done, "restart": need_restart},
             "msg": "已清除：" + "、".join(done) + ("，服务重启中" if need_restart else "")}
+
+
+# --------------------------------------------------------------- 管理令牌：状态 / 登录 / 轮换
+# 注意：admin_token 历史上只生成、从不校验；本次只建校验/轮换/限流检查点，
+# 不给既有 /v/api/ext/* 接口加鉴权门——令牌此前从未向用户展示过，直接上锁
+# 会把用户锁在管理页外面。用户在管理页看到并保存令牌后，再决定是否加门。
+_ADMIN_LOGIN_LIMITER = admin_authmod.LoginAttemptLimiter()
+
+
+def _admin_client_key(request: Request) -> str:
+    """限流键用客户端 IP：X-Forwarded-For 首跳（飞牛前置代理场景），
+    否则取直连对端地址；拿不到时用 "unknown"（仍有令牌指纹键兜底）。"""
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[0].strip() or "unknown"
+    try:
+        if request.client and request.client.host:
+            return request.client.host
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _admin_limiter_from_config():
+    """按当前配置刷新限流阈值（计数不清零）。"""
+    cfg = config.get()
+    _ADMIN_LOGIN_LIMITER.configure(
+        cfg.get("admin_auth_max_failures") or admin_authmod.DEFAULT_MAX_FAILURES,
+        cfg.get("admin_auth_lockout_seconds") if cfg.get("admin_auth_lockout_seconds") is not None else admin_authmod.DEFAULT_LOCKOUT_SECONDS,
+        cfg.get("admin_auth_window_seconds") or admin_authmod.DEFAULT_WINDOW_SECONDS)
+    return _ADMIN_LOGIN_LIMITER
+
+
+@app.get("/v/api/ext/admin/token")
+async def ext_admin_token_status(request: Request):
+    """管理令牌状态：掩码、长度、年龄、过期策略、宽限剩余、限流阈值。
+    永不返回令牌原文（原文只在轮换成功那一次返回）。"""
+    return {"code": 0, "msg": "", "data": config.admin_token_info()}
+
+
+@app.post("/v/api/ext/admin/login")
+async def ext_admin_login(request: Request):
+    """管理令牌登录校验（检查点，供后续鉴权门与管理页“验证令牌”用）。
+    失败记入限流（按 IP 与令牌指纹分别计数）；锁定中返回 429。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    candidate = str((body or {}).get("token") or "")
+    ip = _admin_client_key(request)
+    limiter = _admin_limiter_from_config()
+    locked, remaining = limiter.is_locked(ip, candidate)
+    if locked:
+        return JSONResponse(
+            {"code": 429, "msg": "登录尝试过多，请稍后再试",
+             "data": {"retry_after_seconds": int(remaining) + 1}},
+            status_code=429)
+    ok, reason = config.verify_admin_token(candidate)
+    if ok:
+        limiter.record_success(ip, candidate)
+        return {"code": 0, "msg": "ok",
+                "data": {"ok": True, "via": reason,
+                         "token": config.admin_token_info()}}
+    limiter.record_failure(ip, candidate)
+    locked, remaining = limiter.is_locked(ip, candidate)
+    msg = {"empty": "令牌为空", "expired": "令牌已过期，请重新生成",
+           "no_token_configured": "未配置管理令牌"}.get(reason, "令牌不正确")
+    if locked:
+        msg += f"，已锁定，请 {int(remaining) + 1} 秒后再试"
+    return JSONResponse({"code": 401, "msg": msg,
+                         "data": {"ok": False, "reason": reason,
+                                  "retry_after_seconds": int(remaining) + 1 if locked else 0}},
+                        status_code=401)
+
+
+@app.post("/v/api/ext/admin/token/rotate")
+async def ext_admin_token_rotate(request: Request):
+    """轮换管理令牌：旧令牌在宽限期（默认 24 小时）内仍可登录。
+    须 body {"confirm": true}。新令牌原文只在本次响应里返回一次，
+    请立即复制保存；刷新页面后不再显示原文（只显示掩码）。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict) or body.get("confirm") is not True:
+        return JSONResponse({"code": 400, "msg": "轮换须显式确认（confirm=true）"},
+                            status_code=400)
+    new_token, info = config.rotate_admin_token()
+    return {"code": 0, "msg": "已重新生成，旧令牌在宽限期内仍可用",
+            "data": {"new_token": new_token, "token": info}}
 
 
 # ------------------------------------------------------- 电视直播（IPTV）管理 API
