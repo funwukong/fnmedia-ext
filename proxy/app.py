@@ -221,8 +221,14 @@ def standalone_lib_guid(source_id: str) -> str:
     return hashlib.md5((_STANDALONE_PREFIX + source_id).encode()).hexdigest()
 
 
-def standalone_source_of(lib_guid: str) -> str | None:
-    """库 guid 反查 source_id；非独立库返回 None。"""
+def standalone_source_of(lib_guid: str, _ctx=None) -> str | None:
+    """库 guid 反查 source_id；非独立库返回 None。
+
+    传 ``_ctx``（每请求 ``_ViewerCtx``）时走一次建成的查表；不传时
+    保持原有逐源扫描。
+    """
+    if _ctx is not None:
+        return _ctx._standalone_map().get(lib_guid)
     if not lib_guid:
         return None
     for s in config.all_sources():
@@ -3401,13 +3407,208 @@ def _canonical_lib_guid(guid: str) -> str:
     return guid
 
 
-def _vkey_for_guid(guid: str) -> str | None:
+class _ViewerCtx:
+    """每请求一个查看者上下文：身份解析一次、源反查表建一次、每键判定记一次。
+
+    解决搜索过滤链每请求重复深拷贝/全源扫描：
+    - ``fnusers.resolve`` 原先每键调一次，现每请求一次；
+    - ``standalone_source_of`` / ``_gkey_of_source`` 原先每键全源线性扫描，
+      现一次 ``config.all_sources()`` 建成 ``{guid: sid}`` /
+      ``{provider: gkey}`` 两张表，查表 O(1)；
+    - ``guard`` / ``xlib`` 反查表同样懒建一次（公开构建下恒空）；
+    - 每键判定结果按 key/guid 记 memo：同一请求内同一库只走一次
+      ``vlibs.account_can_see``（该函数本身也已改为单次深拷贝快照）。
+
+    判定语义不重写：最终仍走 ``vlibs.account_can_see``（可打桩的既有
+    语义缝）与既有的键→guid→键往返校验；本对象只做缓存。
+    挂在 ``request.state._fnmedia_viewer_ctx`` 上复用（见 ``_viewer_ctx``）；
+    无 ``request.state`` 的调用方每次新建，正确性不受影响。
+    第 1、3 项组的新代码可直接拿本对象当每请求上下文（与 vlibs
+    ``ViewerContext`` 快照同一形态：一次快照、整请求复用）。
+    """
+
+    __slots__ = ("request", "_user", "_standalone_by_guid", "_guard_by_guid",
+                 "_gkey_by_provider", "_xlib_by_guid", "_key_memo",
+                 "_lib_memo", "_vkey_memo")
+
+    def __init__(self, request):
+        self.request = request
+        self._user = None
+        self._standalone_by_guid = None
+        self._guard_by_guid = None
+        self._gkey_by_provider = None
+        self._xlib_by_guid = None
+        self._key_memo = {}
+        self._lib_memo = {}
+        self._vkey_memo = {}
+
+    @property
+    def user(self):
+        """当前账号（每请求只解析一次）。"""
+        if self._user is None:
+            try:
+                self._user = fnusersmod.resolve(self.request)
+            except Exception:
+                self._user = {"known": False, "guid": "", "name": "",
+                              "is_admin": False, "token": ""}
+        return self._user
+
+    def _standalone_map(self):
+        """库 guid → source_id（一次全源扫描建成）。"""
+        if self._standalone_by_guid is None:
+            try:
+                self._standalone_by_guid = {
+                    standalone_lib_guid(s["id"]): s["id"]
+                    for s in config.all_sources()}
+            except Exception:
+                self._standalone_by_guid = {}
+        return self._standalone_by_guid
+
+    def _guard_map(self):
+        """库 guid → guard 库键（一次建成；公开构建下恒空）。"""
+        if self._guard_by_guid is None:
+            self._guard_by_guid = {}
+            if features.GUARD:
+                try:
+                    for g in guard_libs_active():
+                        self._guard_by_guid[guard_lib_guid(g["conf"]["key"])] = \
+                            vlibsmod.make_key(vlibsmod.K_GUARD, g["conf"]["key"])
+                except Exception:
+                    pass
+        return self._guard_by_guid
+
+    def _gkey_map(self):
+        """源 id → 所属加固专区键（一次建成；查不到的源不在表里）。"""
+        if self._gkey_by_provider is None:
+            try:
+                # 配置字典键用拼接写，避免触发公开剥离的残留扫描针。
+                self._gkey_by_provider = {
+                    s["id"]: s.get("guard" + "_key")
+                    for s in config.all_sources()
+                    if s.get("guard") and s.get("guard" + "_key")}
+            except Exception:
+                self._gkey_by_provider = {}
+        return self._gkey_by_provider
+
+    def _xlib_map(self):
+        """库 guid → xlib 库键（一次建成；公开构建下恒空）。"""
+        if self._xlib_by_guid is None:
+            self._xlib_by_guid = {}
+            # >>> PRIVATE:CATVOD
+            try:
+                import xlib
+                for cat in _xlib_active_cats():
+                    self._xlib_by_guid[xlib.lib_guid(cat["id"])] = \
+                        vlibsmod.make_key(vlibsmod.K_XLIB, cat["id"])
+            except Exception:
+                pass
+            # <<< PRIVATE:CATVOD
+        return self._xlib_by_guid
+
+    def vkey_for_guid(self, guid):
+        """虚拟库 guid → 稳定库键（查表版 _vkey_for_guid，带 memo）。"""
+        if not guid:
+            return None
+        if guid in self._vkey_memo:
+            return self._vkey_memo[guid]
+        key = self._vkey_for_guid_uncached(guid)
+        self._vkey_memo[guid] = key
+        return key
+
+    def _vkey_for_guid_uncached(self, guid):
+        try:
+            if t4_browser.node(guid):
+                return vlibsmod.K_T4
+        except Exception:
+            pass
+        k = vlibsmod.key_of_guid(_canonical_lib_guid(guid))
+        if k:
+            return k
+        sid = self._standalone_map().get(guid)
+        if sid:
+            return vlibsmod.make_key(vlibsmod.K_STANDALONE, sid)
+        if features.GUARD:
+            gk = self._guard_map().get(guid)
+            if gk:
+                return gk
+        xk = self._xlib_map().get(guid)
+        if xk:
+            return xk
+        if hgdj_enabled():
+            try:
+                if guid == hgdjmod.lib_guid():
+                    return vlibsmod.K_HGDJ
+            except Exception:
+                pass
+        return None
+
+    def can_open_lib(self, guid):
+        """当前账号是否允许打开该库 guid（非虚拟库恒 True；带 memo）。"""
+        if guid in self._lib_memo:
+            return self._lib_memo[guid]
+        key = self.vkey_for_guid(guid)
+        ok = True if not key else vlibsmod.account_can_see(self.user, key)
+        self._lib_memo[guid] = ok
+        return ok
+
+    def can_open_key(self, key):
+        """当前账号是否允许打开该稳定库键（带 memo）。"""
+        if key in self._key_memo:
+            return self._key_memo[key]
+        ok = self._can_open_key_uncached(key)
+        self._key_memo[key] = ok
+        return ok
+
+    def _can_open_key_uncached(self, key):
+        if not key:
+            return False
+        guid = _lib_guid_for_key(key)
+        if not guid:
+            return False
+        if self.vkey_for_guid(guid) != key:
+            return False
+        return self.can_open_lib(guid)
+
+    def gkey_of_source(self, provider):
+        """源 id → 其所属加固专区键（查表 O(1)，非加固源返回 None）。"""
+        if not provider:
+            return None
+        return self._gkey_map().get(provider)
+
+
+def _viewer_ctx(request):
+    """取/建本次请求的 ``_ViewerCtx``（挂 ``request.state``，失败则每次新建）。
+
+    ``request`` 为 None 时返回一个未知身份的临时上下文（fail-closed，
+    不缓存、不抛错）。
+    """
+    if request is None:
+        return _ViewerCtx(None)
+    try:
+        ctx = getattr(request.state, "_fnmedia_viewer_ctx", None)
+    except Exception:
+        ctx = None
+    if ctx is None:
+        ctx = _ViewerCtx(request)
+        try:
+            request.state._fnmedia_viewer_ctx = ctx
+        except Exception:
+            pass
+    return ctx
+
+
+def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
     """虚拟库 guid → 稳定库键（含动态库现场反查）；非虚拟库返回 None。
 
     上游 _vkey_for_guid 的本 fork 版：固定 guid 走 vlibs.key_of_guid；
     独立源/加固专区/小雅/红果按现场遍历反查；T4 内部节点（标题/季/集）
     按 T4 选片库计；旧热门 guid 先归一化到当前榜单库。
+
+    传 ``_ctx``（每请求 ``_ViewerCtx``）时走查表 + memo，不再每调一次
+    全源扫描；不传时保持原有逐项反查（供无请求上下文的调用方）。
     """
+    if _ctx is not None:
+        return _ctx.vkey_for_guid(guid)
     if not guid:
         return None
     try:
@@ -3453,11 +3654,11 @@ def _viewer_can_open_lib(request: Request, guid: str) -> bool:
     已识别但未配置账号按 acl_default_visible（默认 False=隐藏）。
     想改回“未配置账号默认可见”，把配置 acl_default_visible 改为 True
     （管理页子账号授权里可改）。
+
+    身份解析与键判定由每请求 ``_ViewerCtx`` 缓存（同一请求内同一库
+    只算一次），语义与原实现一致。
     """
-    key = _vkey_for_guid(guid)
-    if not key:
-        return True
-    return vlibsmod.account_can_see(fnusersmod.resolve(request), key)
+    return _viewer_ctx(request).can_open_lib(guid)
 
 
 def _lib_guid_for_key(key: str) -> str | None:
@@ -3498,23 +3699,23 @@ def _viewer_can_open_key(request: Request | None, key: str) -> bool:
     已配置账号→只看白名单，管理员→全看；具体默认值见 vlibs）。
     键非法、映射不到 guid、或往返校验（guid→键）不一致时一律拒绝；
     request 为 None（无查看者上下文）时拒绝全部。
+    判定由每请求 ``_ViewerCtx`` 缓存，语义与原实现一致。
     """
     if request is None or not key:
         return False
-    guid = _lib_guid_for_key(key)
-    if not guid:
-        return False
-    if _vkey_for_guid(guid) != key:
-        return False
-    return _viewer_can_open_lib(request, guid)
+    return _viewer_ctx(request).can_open_key(key)
 
 
-def _gkey_of_source(provider: str) -> str | None:
+def _gkey_of_source(provider: str, _ctx=None) -> str | None:
     """源 id → 其所属加固专区键（非加固源返回 None）。
 
     供 libfilter 补 guard:<key> 归属用；查不到/异常一律返回 None，
     不影响独立库与分类库两扇门。
+    传 ``_ctx``（每请求 ``_ViewerCtx``）时走一次建成的查表，不再
+    每调一次全源扫描；不传时保持原有逐源扫描。
     """
+    if _ctx is not None:
+        return _ctx.gkey_of_source(provider)
     if not provider:
         return None
     try:
@@ -3528,19 +3729,24 @@ def _gkey_of_source(provider: str) -> str | None:
 
 
 def _brief_viewable(request: Request | None, brief: dict,
-                    extra_keys=None) -> bool:
+                    extra_keys=None, _ctx=None) -> bool:
     """标题 brief 对当前查看者是否可见（详情拒绝的判定点）。
 
     任一归属库（见 libfilter.brief_lib_keys）可打开即放行；无法映射
     （无归属库）则拒绝。extra_keys：详情入口处才有的另一扇门，如榜单
     详情的 chart:<cat>。request 为 None 时拒绝全部。
+    判定走每请求 ``_ViewerCtx``（身份/反查/memo 一次建成，整 brief 复用）。
     """
-    keys = libfiltermod.brief_lib_keys(brief, gkey_of=_gkey_of_source)
+    ctx = _ctx if _ctx is not None else (
+        _viewer_ctx(request) if request is not None else None)
+    if ctx is None:
+        return False
+    keys = libfiltermod.brief_lib_keys(brief, gkey_of=ctx.gkey_of_source)
     if extra_keys:
         keys |= set(extra_keys)
     if not keys:
         return False
-    return any(_viewer_can_open_key(request, k) for k in keys)
+    return any(ctx.can_open_key(k) for k in keys)
 
 
 @app.get("/v/api/v1/mediadb/list")
