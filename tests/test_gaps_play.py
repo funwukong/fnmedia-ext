@@ -177,7 +177,7 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
     async def test_auto_best_sorts_healthy_first(self):
         # dead-src 连续失败进熔断（grade 3），good-src 健康（grade 0）；
         # dead 组直链更多（2 集），只看质量权重时会排前面。
-        for _ in range(3):
+        for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0)
         sourcehealth.record("good-src", True, 0.5)
         with patch.object(providers, "search_all",
@@ -187,7 +187,7 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(titles, ["好片", "差片"])
 
     async def test_auto_best_off_ignores_health(self):
-        for _ in range(3):
+        for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0)
         sourcehealth.record("good-src", True, 0.5)
         self.config.save({"auto_best_source": False})
@@ -200,11 +200,13 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
 
     # ---------- 取流级熔断（上游 v0.2.70，接已有 sourcehealth）----------
 
-    # ---------- 熔断阈值拆分：搜索级 3 次/15 分钟，取流级 5 次/3 分钟 ----------
+    # ---------- 熔断阈值：搜索级与取流级均为 5 次/3 分钟（搜索级对齐上游 v0.2.71） ----------
 
-    def test_search_breaker_still_trips_after_3_failures(self):
-        # 搜索级（默认 level="search"）：阈值与拆分前一致，3 次失败即熔断。
+    def test_search_breaker_trips_after_5_failures(self):
+        # 搜索级（默认 level="search"）：4 次不触发，第 5 次才熔断。
         self.assertFalse(sourcehealth.is_dead("dead-src"))
+        sourcehealth.record("dead-src", False, 1.0)
+        sourcehealth.record("dead-src", False, 1.0)
         sourcehealth.record("dead-src", False, 1.0)
         sourcehealth.record("dead-src", False, 1.0)
         self.assertFalse(sourcehealth.is_dead("dead-src"))  # 未触发
@@ -231,7 +233,7 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sourcehealth.is_dead("dead-src", level="stream"))
         self.assertFalse(sourcehealth.is_dead("dead-src"))  # 搜索级未触发
         sourcehealth.reset("dead-src")
-        for _ in range(3):
+        for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0)
         self.assertTrue(sourcehealth.is_dead("dead-src"))
         self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
@@ -240,13 +242,13 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sourcehealth.is_dead("dead-src"))
 
     def test_breaker_cooldowns(self):
-        # 冷却窗：搜索级 15 分钟，取流级 3 分钟（now 注入，精确到秒）。
+        # 冷却窗：搜索级与取流级均为 3 分钟（now 注入，精确到秒）。
         import time as _time
-        for _ in range(3):
+        for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0)
         t = _time.time()
-        self.assertTrue(sourcehealth.is_dead("dead-src", now=t + 899))
-        self.assertFalse(sourcehealth.is_dead("dead-src", now=t + 901))
+        self.assertTrue(sourcehealth.is_dead("dead-src", now=t + 179))
+        self.assertFalse(sourcehealth.is_dead("dead-src", now=t + 181))
         sourcehealth.reset("dead-src")
         for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0, level="stream")
@@ -257,7 +259,7 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
             "dead-src", now=t + 181, level="stream"))
 
     def test_dodge_known_bad_skips_melted_source(self):
-        # 取流熔断：取流级 5 次失败才跳过（3 次搜索失败不触发取流换线）。
+        # 取流熔断：取流级 5 次失败才跳过（搜索级失败不触发取流换线）。
         for _ in range(5):
             sourcehealth.record("dead-src", False, 1.0, level="stream")
         picked = {"line": "dead-src::A", "online_guid": "og1",

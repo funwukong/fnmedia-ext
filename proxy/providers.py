@@ -323,7 +323,7 @@ def _site_root(api: str) -> str:
 
 async def search_source(client: httpx.AsyncClient, source: dict,
                         keyword: str) -> list[OnlineTitle]:
-    # P2 源健康自动降级：连续失败 3 次的源在 15 分钟冷却窗内直接跳过，
+    # P2 源健康自动降级：连续失败 5 次的源在 3 分钟冷却窗内直接跳过，
     # 不再每次都等超时拖慢整体搜索；冷却过后自动放行一次试探。
     if _health is not None and not _health.usable(source.get("id", "")):
         _log.info("source skipped (dead cooldown): id=%s", source.get("id"))

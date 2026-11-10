@@ -39,9 +39,9 @@ def test_dedupe_titles():
     assert main["overview"] == "很长很长的简介"
 
 
-def test_source_health_dead_after_3_fails():
+def test_source_health_dead_after_5_fails():
     sourcehealth.reset("p2-test-src")
-    for _ in range(2):
+    for _ in range(4):
         sourcehealth.record("p2-test-src", False, 1.0)
     assert sourcehealth.usable("p2-test-src") is True
     sourcehealth.record("p2-test-src", False, 1.0)
@@ -56,7 +56,7 @@ def test_source_health_dead_after_3_fails():
 def test_source_health_ordered_dead_last():
     sourcehealth.reset("p2-a")
     sourcehealth.reset("p2-b")
-    for _ in range(3):
+    for _ in range(5):
         sourcehealth.record("p2-a", False, 1.0)
     sourcehealth.record("p2-b", True, 0.5)
     ordered = sourcehealth.ordered(["p2-a", "p2-b"])
