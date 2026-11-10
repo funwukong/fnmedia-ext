@@ -24,11 +24,12 @@ import time
 import urllib.parse
 import zlib
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
-                               StreamingResponse)
+                               StreamingResponse, FileResponse)
 
 import features
 # 构建戳（打包时由 build.sh 生成 proxy/build_info.py；源码树里没有时为开发版）
@@ -140,6 +141,15 @@ def _self_url(url: str) -> str:
 _search_cache: dict[str, tuple[float, list]] = {}
 _search_inflight: dict[str, asyncio.Future] = {}
 CACHE_TTL = 120
+# 绑定聚合缓存池（上游 v0.2.69）：同一(片名·是否快源·是否含T4)在 TTL 内复用聚合后
+# 的 briefs，榜单绑定 / 播放回源 / 搜索等多次调用同一片名时不重复扇出所有源。
+# 注意：缓存的是 remember_merged 之后的 brief（含线路），命中即等价一次完整聚合。
+# 与已有的 _search_cache（120 秒，缓存搜索卡片）+ _search_inflight 单飞互不干扰，
+# 只补聚合层这一层，不动现有搜索缓存。
+_AGG_CACHE: dict[str, tuple[float, list]] = {}
+_AGG_INFLIGHT: dict[str, asyncio.Future] = {}
+AGG_CACHE_TTL = 180
+_AGG_CACHE_MAX = 800
 T4_STREAM_READY_BUDGET = 8.0
 # 在线热门按内容拆成 4 个虚拟媒体库。guid 由固定串 md5 派生，保持稳定。
 HOT_CATEGORIES = [
@@ -2689,7 +2699,55 @@ async def forward_upstream_streaming(request: Request) -> Response:
 async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
                             timeout: float | None = None,
-                            *, include_t4: bool = True) -> list[dict]:
+                            *, include_t4: bool = True,
+                            refresh: bool = False) -> list[dict]:
+    """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
+
+    结果进绑定聚合缓存池（按 片名·fast·t4 区分），TTL 内同片名的多次绑定/回源/
+    搜索复用同一份聚合结果，并以单飞去重并发扇出，不重复拉取所有源。
+    refresh=True 用于绑定搜索的网络重试：必须绕过缓存与旧在途任务，否则一次
+    偶发空结果会被当成“无源”持续复用。
+    """
+    cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
+    loop = asyncio.get_event_loop()
+    _hit = None if refresh else _AGG_CACHE.get(cache_key)
+    if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
+        return [dict(b) for b in _hit[1]]
+    _fut = None if refresh else _AGG_INFLIGHT.get(cache_key)
+    if _fut is not None and not _fut.done():
+        try:
+            return [dict(b) for b in await _fut]
+        except Exception:
+            pass  # 前次扇出失败则自己重试
+    fut = loop.create_future()
+    _AGG_INFLIGHT[cache_key] = fut
+    try:
+        result = await __aggregate_briefs_inner(
+            keyword, maxn, fast_only, timeout, include_t4=include_t4)
+        # remember_merged 幂等：命中缓存路径也已入库，这里再确保 store 有这些 brief
+        try:
+            store.remember_merged(result)
+        except Exception:
+            pass
+        _AGG_CACHE[cache_key] = (time.time(), result)
+        if len(_AGG_CACHE) > _AGG_CACHE_MAX:
+            for _old in list(_AGG_CACHE)[:_AGG_CACHE_MAX // 2]:
+                _AGG_CACHE.pop(_old, None)
+        if not fut.done():
+            fut.set_result(result)
+        return [dict(b) for b in result]
+    except Exception as exc:
+        if not fut.done():
+            fut.set_exception(exc)
+        raise
+    finally:
+        _AGG_INFLIGHT.pop(cache_key, None)
+
+
+async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
+                                   fast_only: bool = False,
+                                   timeout: float | None = None,
+                                   *, include_t4: bool = True) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
     失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
@@ -2768,16 +2826,28 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
             if cur is None or nd_new > nd_cur or \
                     (nd_new == nd_cur and len(play) > len(cur)):
                 g["lines"][lkey] = [e.__dict__ for e in play]
-    # 排序：热门资源优先高质量源（源质量权重），同权重再按可播直链总数（跨线路）降序
+    # 排序：热门资源优先高质量源（源质量权重），同权重再按可播直链总数（跨线路）降序；
+    # 开启「自动优选」时叠加实测健康度（死亡/高失败率/慢源排后，上游 v0.2.47）。
     prefer_q = bool(config.get().get("prefer_quality_source", True))
+    auto_best = bool(config.get().get("auto_best_source", True))
     overrides = config.get().get("source_priority") or {}
+    _now_h = time.time()
 
     def _group_key(g) -> tuple:
         lines_n = sum(len(v) for v in g["lines"].values())
         if not prefer_q:
-            return (0, lines_n)
-        pr = providers.source_priority({"id": g["rep"].provider}, overrides)
-        return (pr, lines_n)
+            base = (0, lines_n)
+        else:
+            pr = providers.source_priority({"id": g["rep"].provider}, overrides)
+            base = (pr, lines_n)
+        if auto_best:
+            # 用该标题首个线路对应的源 key 取健康权重；不健康源的组整体下沉
+            any_line = next(iter(g["lines"].keys()), "")
+            sk = sourcehealth.source_key_of(any_line)
+            grade, avg_lat, fail = sourcehealth.weight(sk, _now_h) if sk else (1, 5.0, 1.0)
+            # 把健康档放在质量权重之后、直链数之前：高质量死源也不会排到健康源前太多
+            return (base[0], -grade, lines_n, -fail, -avg_lat)
+        return base
 
     ordered = sorted(groups.values(), key=_group_key, reverse=True)[:maxn]
     briefs = []
@@ -6323,9 +6393,11 @@ async def direct_proxy(mg: str, request: Request):
     failed_g = await _await_pending_chart(mg)
     target = store.resolve_media_guid(mg)
     if not target:
-        if failed_g:
-            return Response("暂无可用在线片源", status_code=503)
-        return Response("not found", status_code=404)
+        # 未绑定/无源：302 到占位 preset（HLS），保持播放器存活、菜单可切，不报硬错误
+        didx = int(request.query_params.get("index", 0) or 0)
+        return RedirectResponse(
+            f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index={didx}", status_code=302,
+            headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
     # direct 的 query 会显式带线路（HLS 预判为 MP4 时回跳而来）；必须解析该线路，
     # 不能沿用默认线路，否则可能拿到另一资源站的 HLS 而再次弹回，形成重定向环。
     qline = request.query_params.get("line")
@@ -6410,12 +6482,11 @@ async def direct_proxy(mg: str, request: Request):
                         "GET", target["url"], headers=fwd)
                     r = await ext_client(request).send(req, stream=True)
                 except Exception as exc2:
-                    return Response(f"direct fail {type(exc2).__name__}",
-                                    status_code=502)
+                    return _direct_to_placeholder(mg, request)
             else:
-                return Response(f"direct fail {type(exc).__name__}", status_code=502)
+                return _direct_to_placeholder(mg, request)
         else:
-            return Response(f"direct fail {type(exc).__name__}", status_code=502)
+            return _direct_to_placeholder(mg, request)
     # 上游明确 4xx/5xx（文件被删/鉴权失败）：记忆坏线，换线重定向重试
     if r.status_code >= 400 and _autofail_on():
         await r.aclose()
@@ -6431,7 +6502,7 @@ async def direct_proxy(mg: str, request: Request):
                                             "index": alt.get("index", 0)})
                 return RedirectResponse(
                     f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}", status_code=302)
-        return Response(f"direct upstream {r.status_code}", status_code=502)
+        return _direct_to_placeholder(mg, request)
     h = _safe_response_headers(r.headers, {"content-security-policy"})
     h["Access-Control-Allow-Origin"] = "*"
 
@@ -6676,16 +6747,29 @@ def _client_direct_only(t: dict) -> bool:
 
 
 def _dodge_known_bad(picked: dict, request: Request) -> dict:
-    """零成本换线：当前线在坏线记忆中、且用户没有显式指定该线时，换到非坏线候选。
+    """零成本换线：当前线在坏线记忆/源级熔断中、且用户没有显式指定该线时，换到健康候选。
     让“退出重放”不再黏在上一次切坏的线路上（不发起任何探测网络请求）。"""
-    if not picked or not _autofail_on() or not _line_is_bad(picked):
+    if not picked or not _autofail_on():
+        return picked
+
+    def _is_bad(p: dict) -> bool:
+        if _line_is_bad(p):
+            return True
+        # 源级取流熔断（上游 v0.2.70）：整站取流域名不可达时，该源所有线路同样零成本跳过
+        try:
+            sk = sourcehealth.source_key_of(p.get("line"), p)
+            return bool(sk) and sourcehealth.is_dead(sk)
+        except Exception:
+            return False
+
+    if not _is_bad(picked):
         return picked
     # 用户在播放器里明确选了这条坏线（query 带 line）则尊重其选择，交给探测逻辑
     if request.query_params.get("line"):
         return picked
     for c in _episode_candidates(picked):
-        if not _line_is_bad(c):
-            _log.info("跳过已知坏线 %s -> %s", picked.get("line"), c.get("line"))
+        if not _is_bad(c):
+            _log.info("跳过已知坏线/熔断源 %s -> %s", picked.get("line"), c.get("line"))
             return c
     return picked
 
@@ -7892,8 +7976,20 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
         n = 6
     cands = cands[:max(2, n)]
 
+    def _src_dead(c: dict) -> bool:
+        # 源级取流熔断（上游 v0.2.70）：某资源站取流域名整片不可达时（搜索域可能
+        # 仍正常），其所有线路在竞速里沉底，避免每部片都先撞长超时再换线。
+        # 关键：熔断源只沉底、绝不排除——健康候选不足 n 时用它们补足，保证竞速总有
+        # 候选，避免“源被熔断→候选只剩 1 条且恰好是死链→起播直接失败”。
+        try:
+            sk = sourcehealth.source_key_of(c.get("line"), c)
+            return bool(sk) and sourcehealth.is_dead(sk)
+        except Exception:
+            return False
+
     def rank(c: dict) -> tuple:
-        return (-round(_line_score(c), 1),           # 实测/先验吞吐高的线优先
+        return (_src_dead(c),                          # 熔断源沉底（仍在候选内）
+                -round(_line_score(c), 1),           # 实测/先验吞吐高的线优先
                 c["line"] != fast if fast else True,
                 c["line"] != pred if pred else True,
                 c["line"] != default if default else True,
@@ -8301,14 +8397,32 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     asyncio.create_task(_get_playlist_cached(mg, picked, request))
 
 
+def _is_slow_line(p: dict) -> bool:
+    """是否为解析很慢的非标准源（加固/爬虫/drpy/专有解码/小雅），需先占位后台自愈。
+    普通 CMS 直链（暴风/量子等 m3u8）返回 False，走直接秒播。（上游 v0.2.70）"""
+    if not isinstance(p, dict):
+        return False
+    if p.get("guard") or p.get("spider_src") or p.get("drpy") \
+            or p.get("catvod"):
+        return True
+    if p.get("xsrc"):
+        return True
+    ln = str(p.get("line") or "")
+    return ln.startswith(("guard-", "spider-", "drpy-"))
+
+
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
 async def hls_preset(mg: str, request: Request):
+    idx0 = int(request.query_params.get("index", 0) or 0)
+    # direct/mp4 取流失败回跳入口：直接给占位 master，不再枚举可能同样失效的线路
+    if request.query_params.get("ph") == "1":
+        return _placeholder_master_response(idx0)
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
-        if failed_g:
-            return Response("暂无可用在线片源", status_code=503)
-        return Response("not found", status_code=404)
+        # 线路未就绪：回占位 master，由 main(phwait) 继续等待并自动切正片；
+        # 播放器先进入加载页，不弹“播放出错”、线路菜单不被锁死（上游 v0.2.65）。
+        return _placeholder_master_response(idx0)
     # 起播即跳过已知坏线（用户显式选线除外）
     picked = _dodge_known_bad(picked, request)
     # 注意：此处不 await _resolve_if_needed —— preset 只输出线路变体菜单，
@@ -8481,9 +8595,15 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
+    phwait = request.query_params.get("phwait") == "1"
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
+        # 占位自修复通道（上游 v0.2.65/v0.2.70）：只有显式 phwait 的准备通道保留占位，
+        # 期间一律回占位 HLS（200），绝不返回 4xx/5xx 锁死菜单；普通 main 仍按
+        # v0.2.42 不用无限占位掩盖“未找到片源”。
+        if phwait:
+            return _placeholder_playlist_response(mg)
         if failed_g:
             return Response("暂无可用在线片源", status_code=503)
         return Response("not found", status_code=404)
@@ -8539,6 +8659,10 @@ async def hls_main(mg: str, request: Request):
                 # <<< PRIVATE:CATVOD
                 body = await _get_playlist_cached(mg, picked, request)
     if body is None:
+        # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
+        # 加固/爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
+        if _is_slow_line(picked):
+            return _placeholder_playlist_response(mg)
         return Response("fetch fail upstream", status_code=502)
     if body is _NOT_HLS:
         # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
@@ -8562,6 +8686,10 @@ async def hls_main(mg: str, request: Request):
         if status == "fail":
             return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
                             status_code=502)
+        # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
+        # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
+        if _is_slow_line(picked):
+            return _placeholder_playlist_response(mg)
         # running：让客户端稍候重试，不返回错误清单
         return Response("正在为你寻找可用线路…", status_code=503,
                         headers={"Retry-After": "3",
@@ -8664,6 +8792,73 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     return StreamingResponse(
         pump(), status_code=rs.status_code, headers=h,
         media_type=rs.headers.get("content-type") or "video/mp2t")
+
+
+# ---- 线路未就绪占位视频（上游 v0.2.65；保持播放器存活、线路菜单可切，不弹“播放出错”）----
+_PH_DIR = Path(__file__).resolve().parent / "assets" / "placeholder"
+_PH_SEG_TS = "_placeholder/placeholder.ts"
+_PH_SEG_DUR = 2.0
+_PH_WIN = 3  # 直播式滑动窗口分片数（3×2s≈6s：缩短冷片占位后的转正重拉间隔）
+
+
+def _placeholder_playlist_response(mg: str = "", live: bool = True) -> Response:
+    """返回循环提示 HLS（HTTP 200）。飞牛对 4xx/5xx 清单会弹“播放出错”并锁死
+    线路菜单；200 的有效 HLS 让播放器停在提示画面、菜单仍可切换。
+
+    用直播式滑动窗口（无 ENDLIST、带 MEDIA-SEQUENCE）：客户端只预取窗口内少数分片
+    并周期性重拉 main，后台转存/搜索完成后下一次轮询即可自动切回正片。分片用相对
+    路径，相对 /{mg}/main.m3u8 解析为 /{mg}/_placeholder/placeholder.ts。"""
+    seq = int(time.time() // int(_PH_SEG_DUR))
+    lines = ["#EXTM3U", "#EXT-X-VERSION:3",
+             f"#EXT-X-TARGETDURATION:{int(_PH_SEG_DUR)}",
+             f"#EXT-X-MEDIA-SEQUENCE:{seq}",
+             "#EXT-X-DISCONTINUITY-SEQUENCE:0"]
+    for i in range(_PH_WIN):
+        lines.append(f"#EXTINF:{_PH_SEG_DUR:.3f},")
+        lines.append(f"{_PH_SEG_TS}?n={seq + i}")
+    body = "\n".join(lines) + "\n"
+    return Response(content=body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store",
+                             "Access-Control-Allow-Origin": "*",
+                             "X-fnmedia-Placeholder": "1"})
+
+
+def _placeholder_master_response(idx: int = 0) -> Response:
+    """线路未就绪时的【master】占位（HTTP 200）。返回单变体，其 main 带 phwait=1，
+    hls_main 见到该标记会持续返回占位媒体清单（不挑线路、不报 4xx/5xx），后台绑定/
+    找线完成后由后续正常请求自动切回正片。保证任何情况下播放器都不弹“播放出错”、
+    线路菜单不被锁死。"""
+    q = urllib.parse.urlencode({"index": idx, "phwait": "1"})
+    body = ("#EXTM3U\n#EXT-X-VERSION:3\n"
+            '#EXT-X-STREAM-INF:BANDWIDTH=1000000,PROGRAM-ID=1,NAME="正在准备线路…"\n'
+            f"main.m3u8?{q}\n")
+    return Response(content=body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-store",
+                             "Access-Control-Allow-Origin": "*",
+                             "X-fnmedia-Placeholder": "1"})
+
+
+def _placeholder_ts_response() -> Response:
+    p = _PH_DIR / "placeholder.ts"
+    if not p.exists():
+        return Response("not found", status_code=404)
+    return FileResponse(p, media_type="video/mp2t",
+                        headers={"Cache-Control": "public, max-age=86400",
+                                 "Access-Control-Allow-Origin": "*"})
+
+
+@app.get(f"{ONLINE_PREFIX}/{{mg}}/_placeholder/placeholder.ts")
+async def placeholder_ts(mg: str, request: Request):
+    return _placeholder_ts_response()
+
+
+def _direct_to_placeholder(mg: str, request: Request) -> RedirectResponse:
+    """直链(mp4)取流失败：302 回占位 master，播放器不弹错、线路菜单可手动切换。
+    带 ph=1，preset 见此标记直接回占位（不再给同一条坏线，避免重定向环）。"""
+    didx = int(request.query_params.get("index", 0) or 0)
+    return RedirectResponse(
+        f"{ONLINE_PREFIX}/{mg}/preset.m3u8?index={didx}&ph=1", status_code=302,
+        headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
 
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/seg")
@@ -9427,7 +9622,7 @@ async def ext_set_config(request: Request):
                     cur[sid]["adult"] = ch["adult"] and bool(cur[sid].get("standalone"))
         patch["sources"] = list(cur.values())
     config.save(patch)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     # 方案B 开关切换：即时启用/停用冠军线记忆持久化
     if "prewarm_mode" in patch:
         try:
@@ -9479,7 +9674,7 @@ async def ext_junk_keywords(request: Request):
         kws = config.reset_junk_keywords()
     else:
         kws = config.set_junk_keywords(body.get("keywords", []))
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     return {"code": 0, "msg": "saved", "data": {"junk_keywords": kws}}
 
 
@@ -9551,7 +9746,7 @@ async def ext_source_add(request: Request):
                                  bool(body.get("standalone", False)))
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     if body.get("standalone"):
         _schedule_routes_refresh()
     return {"code": 0, "msg": "added", "data": {"id": info}}
@@ -9623,7 +9818,7 @@ async def ext_source_delete(request: Request):
     ok, info = config.remove_source(body.get("id", ""))
     if not ok:
         return JSONResponse({"code": 404, "msg": info}, status_code=404)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "deleted"}
 
@@ -9631,7 +9826,7 @@ async def ext_source_delete(request: Request):
 @app.post("/v/api/ext/source/restore")
 async def ext_source_restore(request: Request):
     config.restore_builtin()
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     return {"code": 0, "msg": "restored"}
 
 
@@ -9754,7 +9949,7 @@ async def ext_import_tvbox(request: Request):
             break
     t4_report = config.import_t4_sources(t4_candidates)
     if added_names or t4_report["added"]:
-        _search_cache.clear()
+        _search_cache.clear(); _AGG_CACHE.clear()
         if standalone:
             _schedule_routes_refresh()
         else:
@@ -9982,7 +10177,7 @@ async def ext_import_subscription(request: Request):
     if cms_added or t4_report["added"] or (guard_report and guard_report.get("enabled_count")) \
             or (csp_report and csp_report.get("added")) \
             or (drpy_report and drpy_report.get("added")):
-        _search_cache.clear()
+        _search_cache.clear(); _AGG_CACHE.clear()
         _schedule_routes_refresh()
 
     return {"code": 0, "msg": "", "data": {

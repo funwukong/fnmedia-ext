@@ -173,6 +173,9 @@ DEFAULTS = {
     "source_priority": {},
     # 热门资源解析是否优先高质量源（关闭则只按可播直链数）
     "prefer_quality_source": True,
+    # 自动优选（上游 v0.2.47）：在源质量权重基础上，叠加实测健康度（死亡/高失败率/
+    # 慢的源排后），让能连通、延迟低的源默认排到更前。默认开启；关掉则只看质量权重。
+    "auto_best_source": True,
     "admin_token": "",
     # 仅用于「拉取订阅资源」的可选 HTTP(S) 代理（订阅配置 / spider jar / DRPY 脚本）。
     # 播放、聚合搜索、CMS 探测等一律不走此代理（产品客户端保持 trust_env=False 直连）。
