@@ -8597,6 +8597,31 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
 # 请求只等到预算，超时回占位但后台任务继续跑完并写播放列表缓存，后续轮询直接命中。
 # （上游 v1.0.0；键与上游一致：mg 是 URL 路径参数，index 为原值拼串。）
 _MAIN_SERVE_FUT: dict[str, asyncio.Future] = {}
+# 后台 _serve_normal 异常次数（bk -> 次数）：_serve_normal 体内无 try/except，
+# 超时后等待者已拿到占位、引用丢弃，异常若无人取回只在 fut 被 GC 时打一条
+# "Future exception was never retrieved"；done 回调取回后记在这里。
+_MAIN_SERVE_BG_FAILS: dict[str, int] = {}
+
+
+def _main_serve_fut_done(bk: str, fut: asyncio.Future):
+    """_MAIN_SERVE_FUT 的 done 回调工厂。
+
+    两件事，缺一不可：
+    1. 取回异常：fut 若以异常结束，在此取回并记日志/统计（_MAIN_SERVE_BG_FAILS），
+       不再等 GC 时才报 "Future exception was never retrieved"。已超时的等待者
+       早已拿到占位，这里只记日志，不把异常抛回给任何人。
+    2. 仅当字典里仍是同一个 future 才清理：窄窗口下若同键已建新 fut，无条件
+       pop 会删掉新 fut，致单飞失效、后台重复启动昂贵解析。
+    """
+    def _drop(done: asyncio.Future) -> None:
+        if not done.cancelled():
+            exc = done.exception()
+            if exc is not None:
+                _MAIN_SERVE_BG_FAILS[bk] = _MAIN_SERVE_BG_FAILS.get(bk, 0) + 1
+                _log.warning("慢线后台取流失败 %s: %s", bk, exc, exc_info=exc)
+        if _MAIN_SERVE_FUT.get(bk) is fut:
+            _MAIN_SERVE_FUT.pop(bk, None)
+    return _drop
 # 仅【慢源】（加固/爬虫/drpy/专有解码/小雅，常需十几秒解析）才用短预算先占位；普通
 # CMS 直链不用预算、直接等出正片（恢复秒播），只在真正抓不到时才回占位。
 # 配置 key：main_ready_budget；改配置后需重启进程才生效（模块常量不热重载）。
@@ -8944,7 +8969,7 @@ async def hls_main(mg: str, request: Request):
     if fut is None:
         fut = asyncio.ensure_future(_serve_normal(picked))
         _MAIN_SERVE_FUT[bk] = fut
-        fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
+        fut.add_done_callback(_main_serve_fut_done(bk, fut))
     try:
         return await asyncio.wait_for(asyncio.shield(fut),
                                       timeout=_budget_left(floor=0.2))
