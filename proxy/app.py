@@ -4544,7 +4544,7 @@ def _vod_resume_index(brief: dict) -> int:
         return 0
     try:
         ep_guids = store.tv_episode_guids(brief.get("guid", ""), regular_only=True)
-        target_eg, _ = history.resume_episode(ep_guids)
+        target_eg, _ = history.resume_for_title(brief.get("guid", ""), ep_guids)
         ep = store.get_episode(target_eg) if target_eg else None
         return int((ep or {}).get("index", 0) or 0)
     except Exception:
@@ -4768,18 +4768,28 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
                     f"以该线路为优先种子起播，仍走竞速选最快线。\n\n{brief.get('overview') or ''}",
     })
     info["item"] = item
-    rec = history.get(base_guid)
-    if rec:
-        info["ts"] = rec.get("ts", 0)
+    # 续播位置：优先该集自己的记录；第 1 集没有集记录时回填标题记录的位置
+    #（客户端以标题/季/文件夹 guid 上报进度时落到标题键上，见 history.position）。
+    info["ts"] = history.position(base_guid, og, is_first=(index == 0))
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
 
 
 def _normalize_history_guid(guid: str) -> str:
-    """把带线路身份的复合 guid 归一化为基础影片/集 guid，保证历史、收藏、已看
-    都按原片身份记录，不按资源站拆分；非复合 guid 原样返回。"""
+    """把带线路/文件夹身份的复合 guid 归一化为基础影片/集 guid，保证历史、收藏、已看
+    都按原片身份记录，不按资源站拆分；非复合 guid 原样返回。
+
+    文件夹卡（首页/热门/分类/榜单的 _vod_directory_card，guid 为
+    fnmedia-line-folder:<og>）与线路季卡（fnmedia-line-season:…）本身不是
+    可播身份：前者归一化到所属标题，后者同样归一化到所属标题——否则
+    play/record 与收藏/已看端点在 store 里查不到它们，会把进度/收藏
+    直接透传给官方后端丢掉（官方回 -6，客户端提示失败）。
+    """
     if not isinstance(guid, str):
         return guid or ""
+    folder_og = _parse_line_folder_guid(guid)
+    if folder_og:
+        return folder_og
     parsed = _parse_line_item_guid(guid)
     if parsed:
         og, _line, index = parsed
@@ -4789,7 +4799,7 @@ def _normalize_history_guid(guid: str) -> str:
         return og
     season = _parse_line_season_guid(guid)
     if season:
-        return season_guid(season[0], season[2])
+        return season[0]
     return guid
 
 
@@ -5755,7 +5765,7 @@ async def _stream_list_impl(guid: str, request: Request):
                 # 标题播放键实际播放智能续播集，线路菜单也以该集为准
                 egs = store.tv_episode_guids(guid, regular_only=True)
                 if egs:
-                    resume_guid, _ = history.resume_episode(egs)
+                    resume_guid, _ = history.resume_for_title(guid, egs)
                     target = store.get_episode_target(resume_guid)
             else:
                 target = store.resolve_media_guid(media_guid(guid))
@@ -6079,9 +6089,11 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
     ep = store.get_episode(guid)
     if ep:
         info = inj.episode_play_info(ep)
-        rec0 = history.get(guid)
-        if rec0:
-            info["ts"] = rec0.get("ts", 0)
+        # 续播位置：优先该集自己的记录；第 1 集没有集记录时回填标题记录的位置
+        #（客户端以标题/季/文件夹 guid 上报进度时落到标题键上）。
+        info["ts"] = history.position(
+            guid, ep.get("online_guid"),
+            is_first=(int(ep.get("index", 0) or 0) == 0))
         return info
     brief = store.get_title_by_guid(guid)
     if not brief:
@@ -6090,10 +6102,11 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
     if inj.is_tv(brief):
         ep_guids = store.tv_episode_guids(guid, regular_only=True)
         if ep_guids:
-            # T4 远程剧集采用“回看最近交互”语义；普通 CMS 保持按集序续播
+            # T4 远程剧集采用“回看最近交互”语义；普通 CMS 保持按集序续播。
+            # 没有任何集记录时，resume_for_title 会回填未看完的标题记录位置。
             t4_rewatch = brief.get("locator", {}).get("kind") == "t4"
-            target_eg, resume_ts = history.resume_episode(
-                ep_guids, latest_interaction=t4_rewatch)
+            target_eg, resume_ts = history.resume_for_title(
+                guid, ep_guids, latest_interaction=t4_rewatch)
             if target_eg:
                 ep = store.get_episode(target_eg)
                 if ep:
@@ -6156,11 +6169,12 @@ async def play_info(request: Request):
                              "data": clientmod.normalize_detail(info, client)})
 
     ep = store.get_episode(guid)
-    rec = history.get(guid)
     if ep:
         info = inj.episode_play_info(ep)
-        if rec:
-            info["ts"] = rec.get("ts", 0)
+        # 续播位置：优先该集自己的记录；第 1 集没有集记录时回填标题记录的位置
+        info["ts"] = history.position(
+            guid, ep.get("online_guid"),
+            is_first=(int(ep.get("index", 0) or 0) == 0))
         _prewarm_from_info(info)
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(info, client)})
