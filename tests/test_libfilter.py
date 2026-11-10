@@ -135,12 +135,19 @@ def test_gkey_mapping_via_callback():
 
 
 def test_type_mapping_matches_hot_category():
-    # 与 inject.hot_category 同规则；类型缺失也按 tv（hot_category 默认）。
-    for typ in ("动漫", "日本动漫", "综艺", "真人秀", "动作片", "纪录片",
+    # 与 inject.hot_category 同规则（纪录片除外，见下）；类型缺失也按 tv（hot_category 默认）。
+    for typ in ("动漫", "日本动漫", "综艺", "真人秀", "动作片",
                 "韩剧", "国产剧", "连续剧", "", "  "):
         assert libfiltermod.catalog_cat_for_type(typ) == \
             injmod.hot_category({"type_name": typ})
     assert catalogmod.AGG_SCOPE == libfiltermod.AGG_SCOPE
+
+
+def test_documentary_type_goes_to_documentary_not_movie():
+    # P0-6 修正错放：类型名含“纪录片”归 catalog:documentary 而非 movie。
+    # 与 hot_category 有意分歧：热门库只有四张，纪录片在热门侧仍归 movie。
+    assert libfiltermod.catalog_cat_for_type("纪录片") == "documentary"
+    assert injmod.hot_category({"type_name": "纪录片"}) == "movie"
 
 
 def test_filter_briefs_keeps_order_and_needs_any_door():

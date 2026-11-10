@@ -263,6 +263,9 @@ class OnlineTitle:
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
     locator: dict = field(default_factory=dict)
+    # 苹果 CMS 分类 id（vod 的 type_id；_map_vod 保留，聚合搜索用它反查
+    # 该源的分类路由，见 catalog.cat_for_source_type）。非 CMS 源为空。
+    type_id: str = ""
 
     @property
     def online_id(self) -> str:
@@ -322,6 +325,7 @@ def _map_vod(v: dict, source: dict) -> OnlineTitle | None:
         vod_id=str(v.get("vod_id")),
         title=v.get("vod_name", "").strip(),
         type_name=v.get("type_name", ""),
+        type_id=str(v.get("type_id") or ""),
         year=str(v.get("vod_year", "") or ""),
         area=v.get("vod_area", "") or "",
         updated=str(v.get("vod_time", "") or v.get("vod_time_add", "") or ""),

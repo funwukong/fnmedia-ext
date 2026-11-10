@@ -2957,6 +2957,20 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     for g in ordered:
         brief = inj.brief_of(g["rep"])
         brief["lines"] = g["lines"]
+        # P0-6：聚合搜索 brief 补来源分类路由，供 libfilter 归属扩展分类库。
+        # type_id 来自搜索 vod（providers._map_vod 保留），cat 由 catalog
+        # 路由表反查；路由未加载/无匹配时 cat 为 ""，libfilter 回退到
+        # 类型名映射（旧行为，旧缓存无此字段亦然）。
+        try:
+            _route_cat = catalog.cat_for_source_type(
+                g["rep"].provider, getattr(g["rep"], "type_id", "") or "")
+        except Exception:
+            _route_cat = None
+        brief["catalog_route"] = {
+            "source": g["rep"].provider,
+            "type_id": str(getattr(g["rep"], "type_id", "") or ""),
+            "cat": _route_cat or "",
+        }
         # 预算海报角标：网盘资源名 + 最优线路健康等级（搜索/媒体库海报通用）
         try:
             _pl, _hg, _ = _brief_line_flags(brief)
