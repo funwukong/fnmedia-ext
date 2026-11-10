@@ -21,7 +21,8 @@ def test_defaults_load_without_file(monkeypatch, tmp_path):
     assert cfg["config_version"] == config_mod.CONFIG_VERSION
     assert cfg["hot_library_enabled"] is True
     assert cfg["admin_token"]  # 首次加载自动生成
-    assert len(cfg["admin_token"]) >= 16
+    assert len(cfg["admin_token"]) == 64  # token_hex(32) = 256 bit
+    assert cfg["admin_token_created_at"] > 0
     assert any(s["id"] == "baofeng" for s in cfg["sources"])
 
 
