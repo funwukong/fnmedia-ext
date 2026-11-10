@@ -95,7 +95,7 @@ class GkeyOfSourceTests(unittest.TestCase):
         self.assertEqual(appmod._gkey_of_source("g-src"), "zone2")
         self.assertEqual(appmod._gkey_of_source("g-src", _ctx=ctx), "zone1")
 
-    def test_guard_key_feeds_libfilter_guard_door(self):
+    def test_gkey_feeds_libfilter_guard_door(self):
         self._patch_sources()
         brief = {"guid": "g1", "online_id": "g-src:v1", "title": "动作大片",
                  "type_name": "动作片", "lines": {"g-src::线路1": []},
