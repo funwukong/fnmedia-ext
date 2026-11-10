@@ -375,6 +375,28 @@ class SlowLineBudgetTests(unittest.IsolatedAsyncioTestCase):
                 new.cancel()
             gc.collect()
 
+    async def test_done_callback_removes_same_future_on_success(self):
+        loop = asyncio.get_running_loop()
+        bk = "mg-ok|drpy-x::A|0"
+        fut = loop.create_future()
+        appmod._MAIN_SERVE_FUT[bk] = fut
+        appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+        try:
+            fut.set_result(None)
+            appmod._main_serve_fut_done(bk, fut)(fut)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_BG_FAILS)
+            # 已取消的 fut：回调不取异常（不抛 CancelledError），仍正常清理
+            fut2 = loop.create_future()
+            appmod._MAIN_SERVE_FUT[bk] = fut2
+            fut2.cancel()
+            appmod._main_serve_fut_done(bk, fut2)(fut2)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+        finally:
+            appmod._MAIN_SERVE_FUT.pop(bk, None)
+            appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+            gc.collect()
+
     async def test_done_callback_unregistered_future_exception_counted(self):
         # P1-23(4)：此前 3 个测试只覆盖已注册 fut 的异常/成功/取消。
         # 未注册过（字典里无此键）的 fut 抛错：回调仍取回异常记统计、不抛错、
