@@ -375,27 +375,54 @@ class SlowLineBudgetTests(unittest.IsolatedAsyncioTestCase):
                 new.cancel()
             gc.collect()
 
-    async def test_done_callback_removes_same_future_on_success(self):
+    async def test_done_callback_unregistered_future_exception_counted(self):
+        # P1-23(4)：此前 3 个测试只覆盖已注册 fut 的异常/成功/取消。
+        # 未注册过（字典里无此键）的 fut 抛错：回调仍取回异常记统计、不抛错、
+        # 不动字典；两次失败累计计数为 2。
         loop = asyncio.get_running_loop()
-        bk = "mg-ok|drpy-x::A|0"
-        fut = loop.create_future()
-        appmod._MAIN_SERVE_FUT[bk] = fut
+        bk = "mg-ghost|drpy-x::A|0"
+        appmod._MAIN_SERVE_FUT.pop(bk, None)
         appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
         try:
-            fut.set_result(None)
-            appmod._main_serve_fut_done(bk, fut)(fut)
-            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
-            self.assertNotIn(bk, appmod._MAIN_SERVE_BG_FAILS)
-            # 已取消的 fut：回调不取异常（不抛 CancelledError），仍正常清理
-            fut2 = loop.create_future()
-            appmod._MAIN_SERVE_FUT[bk] = fut2
-            fut2.cancel()
-            appmod._main_serve_fut_done(bk, fut2)(fut2)
-            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+            for i in (1, 2):
+                fut = loop.create_future()
+                fut.set_exception(RuntimeError("ghost boom %d" % i))
+                with self.assertLogs("fnmedia.app", level="WARNING") as cm:
+                    appmod._main_serve_fut_done(bk, fut)(fut)
+                self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+                self.assertEqual(appmod._MAIN_SERVE_BG_FAILS.get(bk), i)
+                self.assertIn("ghost boom %d" % i, "\n".join(cm.output))
         finally:
             appmod._MAIN_SERVE_FUT.pop(bk, None)
             appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
             gc.collect()
+
+    async def test_done_callback_keeps_new_future_on_old_success(self):
+        # P1-23(4)：stale 分支此前只测了“旧 fut 抛错”；旧 fut 正常成功时
+        # 同样不得删掉字典里已建的新 fut（否则单飞失效、后台重复解析）。
+        loop = asyncio.get_running_loop()
+        bk = "mg-stale-ok|drpy-x::A|0"
+        old = loop.create_future()
+        new = loop.create_future()
+        appmod._MAIN_SERVE_FUT[bk] = new
+        appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+        try:
+            old.set_result(None)
+            appmod._main_serve_fut_done(bk, old)(old)
+            self.assertIs(appmod._MAIN_SERVE_FUT.get(bk), new)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_BG_FAILS)
+            new.set_result(None)
+            appmod._main_serve_fut_done(bk, new)(new)
+            self.assertNotIn(bk, appmod._MAIN_SERVE_FUT)
+        finally:
+            appmod._MAIN_SERVE_FUT.pop(bk, None)
+            appmod._MAIN_SERVE_BG_FAILS.pop(bk, None)
+            if not old.done():
+                old.cancel()
+            if not new.done():
+                new.cancel()
+            gc.collect()
+
 
 
 if __name__ == "__main__":
