@@ -8211,15 +8211,6 @@ _PLAYLIST_TTL = 120.0
 # 单飞：同一「集+线路」只允许一次在途抓取，预热与真正取 main 共用同一个 Future
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
 
-# TV 起播清单硬顶（对齐上游 v0.2.69 的 8s 宽预算 + _MAIN_SERVE_FUT 单飞结构）：
-# main.m3u8 的整条“竞速+建清单+验首片”服务以 mg|line|index 为键单飞，后台任务
-# 用 shield 保护、超时也不取消；预算 8.0s 从首个请求的进入时刻起计、由同键的
-# 后续轮询共用同一 deadline——迟到的轮询只等剩余预算，不再各等满 8s（上游
-# v0.2.69 CHANGELOG 记过“TV 端轮询每次等满 8s 变慢”的教训）。
-_TV_MAIN_BUDGET = 8.0
-# mg|line|index -> (在途服务 Future, 该任务的预算截止 monotonic 时间)
-_MAIN_SERVE_FUT: dict[str, tuple[asyncio.Future, float]] = {}
-
 # 紧凑分片注册表：夸克/UC 转码 HLS 的签名分片 URL 极长（~600 字符，base64 后近千），
 # 一部 90 分钟的片子上千分片会撑出 1MB+ 的清单，且每个分片 URL 超长，经外网网关
 # （Lucky/nginx/fngateway）容易被长度/缓冲限制拦掉，播放器拿到清单却拉不到分片。
@@ -8639,28 +8630,9 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
     return text, cur
 
 
-def _cached_real_playlist(picked: dict) -> str | None:
-    """预算耗尽时的部分结果：_PLAYLIST_CACHE 里同键的新鲜真实清单。
-
-    只要带分片的真清单、不要占位（占位不含 #EXTINF、且前 400 字符含 _placeholder/）。
-    """
-    hit = _PLAYLIST_CACHE.get(_playlist_cache_key(picked))
-    if not hit:
-        return None
-    ts, body = hit
-    if time.time() - ts >= _PLAYLIST_TTL:
-        return None
-    if not isinstance(body, str) or not body.startswith("#EXTM3U"):
-        return None
-    if "_placeholder/" in body[:400] or "#EXTINF" not in body:
-        return None
-    return body
-
-
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
     phwait = request.query_params.get("phwait") == "1"
-    _req_t0 = time.monotonic()  # 起播预算起点：本请求的进入时刻
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
     if not picked:
@@ -8679,130 +8651,92 @@ async def hls_main(mg: str, request: Request):
     request.state._play_mg = mg  # 供探测复用播放列表构建、填充缓存
     # 起播即跳过已知坏线（用户显式选线除外），避免无谓探测延迟
     picked = _dodge_known_bad(picked, request)
-    async def _serve() -> Response:
-        """整条起播服务（竞速选线 + 建清单 + 验首片），跑在单飞 future 里。
-        预算只约束 main.m3u8 的等待：_ensure_playable 内的竞速逻辑本身不动，
-        超时只打断等待、不取消后台竞速/建清单。"""
-        nonlocal picked
-        if _autofail_on():
-            picked = await _ensure_playable(picked, request, auto=auto_play)
-            # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
-            request.state._failover_picked = picked
+    if _autofail_on():
+        picked = await _ensure_playable(picked, request, auto=auto_play)
+        # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
+        request.state._failover_picked = picked
 
-        # >>> PRIVATE:CATVOD
-        # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
-        if features.CATVOD and picked.get("catvod"):
-            if await _resolve_catvod(picked):
-                # 再探一次死活，小雅“文件不存在”会回 200+JSON 假活；坏则换线
-                if not (await _probe_target(picked, request)):
-                    _mark_line_bad(picked)
-                    alt = await _find_playable(picked, request, skip_current=True)
-                    if alt is not None:
-                        picked = alt
-                        request.state._failover_picked = picked
-                        _log.info("小雅文件不可用，自动切换线路 -> %s", picked.get("line"))
-                    else:
-                        return Response("该线路文件不存在，且暂无其他可用线路",
-                                        status_code=502)
-                if picked.get("catvod_direct"):
-                    return RedirectResponse(picked["url"], status_code=302,
-                                            headers={"Cache-Control": "no-store"})
-        # <<< PRIVATE:CATVOD
-
-        body = await _get_playlist_cached(mg, picked, request)
-        if body is None:
-            # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
-            if _autofail_on():
+    # >>> PRIVATE:CATVOD
+    # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
+    if features.CATVOD and picked.get("catvod"):
+        if await _resolve_catvod(picked):
+            # 再探一次死活，小雅“文件不存在”会回 200+JSON 假活；坏则换线
+            if not (await _probe_target(picked, request)):
                 _mark_line_bad(picked)
                 alt = await _find_playable(picked, request, skip_current=True)
                 if alt is not None:
-                    _log.info("播放列表抓取失败，自动换线 %s -> %s",
-                              picked.get("line"), alt.get("line"))
                     picked = alt
-                    request.state._failover_picked = alt
-                    # 小雅等非 HLS 直链
-                    # >>> PRIVATE:CATVOD
-                    if features.CATVOD and picked.get("catvod"):
-                        if await _resolve_catvod(picked) and picked.get("catvod_direct"):
-                            return RedirectResponse(picked["url"], status_code=302,
-                                                    headers={"Cache-Control": "no-store"})
-                    # <<< PRIVATE:CATVOD
-                    body = await _get_playlist_cached(mg, picked, request)
-        if body is None:
-            # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
-            # 加固/爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
-            if _is_slow_line(picked):
-                return _placeholder_playlist_response(mg)
-            return Response("fetch fail upstream", status_code=502)
-        if body is _NOT_HLS:
-            # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
-            q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
-            return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
-        # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
-        # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
-        # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
-        # 经 _MEDIA_REDIRECT 命中新记录。
-        if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
-            _mark_line_bad(picked)
-            status = await _resurrect_start(picked, mg)
-            if status == "ok":
-                alt = _pick_episode(mg, request)
-                if alt:
-                    body2 = await _get_playlist_cached(mg, alt, request)
-                    if body2 and body2 is not _NOT_HLS:
-                        return Response(body2, media_type="application/vnd.apple.mpegurl",
-                                        headers={"Cache-Control": "no-cache",
-                                                 "Access-Control-Allow-Origin": "*"})
-            if status == "fail":
-                return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
-                                status_code=502)
-            # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
-            # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
-            if _is_slow_line(picked):
-                return _placeholder_playlist_response(mg)
-            # running：让客户端稍候重试，不返回错误清单
-            return Response("正在为你寻找可用线路…", status_code=503,
-                            headers={"Retry-After": "3",
-                                     "Access-Control-Allow-Origin": "*"})
-        _sk = sourcehealth.source_key_of(picked.get("line"), picked)
-        if _sk:
-            # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
-            sourcehealth.record(_sk, True, level="stream")
-        return Response(body, media_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-cache",
-                                 "Access-Control-Allow-Origin": "*"})
+                    request.state._failover_picked = picked
+                    _log.info("小雅文件不可用，自动切换线路 -> %s", picked.get("line"))
+                else:
+                    return Response("该线路文件不存在，且暂无其他可用线路",
+                                    status_code=502)
+            if picked.get("catvod_direct"):
+                return RedirectResponse(picked["url"], status_code=302,
+                                        headers={"Cache-Control": "no-store"})
+    # <<< PRIVATE:CATVOD
 
-    # 起播策略（对齐上游 v0.2.69：单飞 future + 8s 硬顶预算）：
-    #  - 同一份清单（mg|line|index）的并发请求合并为一次在途服务，不各起一套等待；
-    #  - 预算 8s 从首个请求起计、同键轮询共用同一 deadline，耗尽即回已有部分结果
-    #    或明确错误，后台任务继续跑完并写 _PLAYLIST_CACHE，下次轮询直接命中；
-    #  - 普通 CMS 不再像上游 v1.0.0 那样无界直等：TV 轮询曾因等满 8s 变慢，
-    #    这里的硬顶保证任何一次 main.m3u8 最多等 8s。
-    bk = f"{mg}|{picked.get('line')}|{picked.get('index', 0)}"
-    ent = _MAIN_SERVE_FUT.get(bk)
-    if ent is None:
-        fut = asyncio.ensure_future(_serve())
-        ent = (fut, _req_t0 + _TV_MAIN_BUDGET)
-        _MAIN_SERVE_FUT[bk] = ent
-        fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
-    else:
-        fut = ent[0]
-    try:
-        return await asyncio.wait_for(
-            asyncio.shield(fut),
-            timeout=max(0.0, ent[1] - time.monotonic()))
-    except asyncio.TimeoutError:
-        pass
-    # 预算耗尽：先回已有的部分结果（缓存里的新鲜真实清单），没有则按线路给明确答复。
-    partial = _cached_real_playlist(picked)
-    if partial is not None:
-        return Response(partial, media_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-cache",
+    body = await _get_playlist_cached(mg, picked, request)
+    if body is None:
+        # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
+        if _autofail_on():
+            _mark_line_bad(picked)
+            alt = await _find_playable(picked, request, skip_current=True)
+            if alt is not None:
+                _log.info("播放列表抓取失败，自动换线 %s -> %s",
+                          picked.get("line"), alt.get("line"))
+                picked = alt
+                request.state._failover_picked = alt
+                # 小雅等非 HLS 直链
+                # >>> PRIVATE:CATVOD
+                if features.CATVOD and picked.get("catvod"):
+                    if await _resolve_catvod(picked) and picked.get("catvod_direct"):
+                        return RedirectResponse(picked["url"], status_code=302,
+                                                headers={"Cache-Control": "no-store"})
+                # <<< PRIVATE:CATVOD
+                body = await _get_playlist_cached(mg, picked, request)
+    if body is None:
+        # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
+        # 加固/爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
+        if _is_slow_line(picked):
+            return _placeholder_playlist_response(mg)
+        return Response("fetch fail upstream", status_code=502)
+    if body is _NOT_HLS:
+        # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
+        q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
+        return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+    # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
+    # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
+    # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
+    # 经 _MEDIA_REDIRECT 命中新记录。
+    if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
+        _mark_line_bad(picked)
+        status = await _resurrect_start(picked, mg)
+        if status == "ok":
+            alt = _pick_episode(mg, request)
+            if alt:
+                body2 = await _get_playlist_cached(mg, alt, request)
+                if body2 and body2 is not _NOT_HLS:
+                    return Response(body2, media_type="application/vnd.apple.mpegurl",
+                                    headers={"Cache-Control": "no-cache",
+                                             "Access-Control-Allow-Origin": "*"})
+        if status == "fail":
+            return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                            status_code=502)
+        # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
+        # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
+        if _is_slow_line(picked):
+            return _placeholder_playlist_response(mg)
+        # running：让客户端稍候重试，不返回错误清单
+        return Response("正在为你寻找可用线路…", status_code=503,
+                        headers={"Retry-After": "3",
                                  "Access-Control-Allow-Origin": "*"})
-    if _is_slow_line(picked):
-        return _placeholder_playlist_response(mg)
-    return Response("起播清单超时，正在为你寻找可用线路…", status_code=503,
-                    headers={"Retry-After": "3",
+    _sk = sourcehealth.source_key_of(picked.get("line"), picked)
+    if _sk:
+        # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
+        sourcehealth.record(_sk, True, level="stream")
+    return Response(body, media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "no-cache",
                              "Access-Control-Allow-Origin": "*"})
 
 
