@@ -1,10 +1,10 @@
 """媒体库可见权限（上游 vlibs + fnusers 设计）：按稳定库键授权、只读 SQLite 识身份。
 
-行为（fail-closed，decisions-2-failclosed）：管理员始终可见；识别不出身份
-的会话（known=False）始终看不到任何虚拟库、不能在线搜索；已识别但未配置
-的账号默认不可见（acl_default_visible=False）；只有已配置账号的允许列表
-内的库才可见，管理员隐藏的库对所有人不可见。测试绝不碰真实 NAS 路径：
-配置用内存替身，身份库用 tmp_path 里现建的 SQLite。
+行为（fail-open，decisions-2 的 fail-closed 已回滚）：管理员始终可见；
+识别不出身份的会话（known=False）按默认开关处理（默认可见、可在线搜索）；
+已识别但未配置的账号默认可见（acl_default_visible=True）；只有已配置账号
+的允许列表内的库才可见，管理员隐藏的库对所有人不可见。测试绝不碰真实
+NAS 路径：配置用内存替身，身份库用 tmp_path 里现建的 SQLite。
 """
 from __future__ import annotations
 
@@ -79,20 +79,19 @@ def test_hidden_beats_everyone():
     assert vlibsmod.account_can_see(ADMIN, CHART_MOVIE) is True
 
 
-def test_fail_closed_default_admin_only_visible():
-    # fail-closed 默认：只有管理员可见；未知身份与未配置账号都不可见，
-    # 在线搜索同样受限。
-    assert vlibsmod.acl_default_visible() is False
-    assert vlibsmod.acl_default_online() is False
+def test_fail_open_default_everyone_visible():
+    # fail-open 默认：管理员、未知身份与未配置账号都可见，在线搜索同样放行。
+    assert vlibsmod.acl_default_visible() is True
+    assert vlibsmod.acl_default_online() is True
     assert vlibsmod.account_can_see(ADMIN, CHART_TV) is True
     assert vlibsmod.account_online_allowed(ADMIN) is True
-    assert vlibsmod.account_can_see(UNKNOWN, CHART_TV) is False
-    assert vlibsmod.account_online_allowed(UNKNOWN) is False
-    assert vlibsmod.account_can_see(_user("u9"), CHART_TV) is False
-    assert vlibsmod.account_online_allowed(_user("u9")) is False
-    # user=None 同样按未知身份处理
-    assert vlibsmod.account_can_see(None, CHART_TV) is False
-    assert vlibsmod.account_online_allowed(None) is False
+    assert vlibsmod.account_can_see(UNKNOWN, CHART_TV) is True
+    assert vlibsmod.account_online_allowed(UNKNOWN) is True
+    assert vlibsmod.account_can_see(_user("u9"), CHART_TV) is True
+    assert vlibsmod.account_online_allowed(_user("u9")) is True
+    # user=None 同样按未知身份处理（按默认开关放行）
+    assert vlibsmod.account_can_see(None, CHART_TV) is True
+    assert vlibsmod.account_online_allowed(None) is True
 
 
 def test_configured_account_allowlist():
@@ -103,23 +102,22 @@ def test_configured_account_allowlist():
     # 没给 __online__ 标记的账号不能在线搜索
     assert vlibsmod.set_account_acl("u2", ["chart:movie"])[0] is True
     assert vlibsmod.account_online_allowed(_user("u2")) is False
-    # 取消限制（allow=None）后回到默认：fail-closed 下默认不可见/禁在线搜索
+    # 取消限制（allow=None）后回到默认：fail-open 下默认可见/允许在线搜索
     assert vlibsmod.set_account_acl("u1", None)[0] is True
-    assert vlibsmod.account_can_see(_user("u1"), CHART_TV) is False
-    assert vlibsmod.account_online_allowed(_user("u1")) is False
+    assert vlibsmod.account_can_see(_user("u1"), CHART_TV) is True
+    assert vlibsmod.account_online_allowed(_user("u1")) is True
 
 
-def test_default_can_be_switched_back_on():
-    # 管理员在管理页把默认改回 True：已识别但未配置的账号恢复可见/可在线搜索；
-    # 已配置账号的允许列表不受影响；管理员仍可见。但完全识别不到身份的会话
-    # （known=False）始终隐藏/禁在线搜索，不受该开关影响。
-    config_mod.config.save({"acl_default_visible": True,
-                            "acl_default_online": True})
-    assert vlibsmod.acl_default_visible() is True
+def test_default_can_be_switched_off():
+    # 管理员在管理页把默认改成 False：已识别但未配置的账号与未知身份的会话
+    # 恢复隐藏/禁在线搜索；已配置账号的允许列表不受影响；管理员仍可见。
+    config_mod.config.save({"acl_default_visible": False,
+                            "acl_default_online": False})
+    assert vlibsmod.acl_default_visible() is False
     assert vlibsmod.account_can_see(UNKNOWN, CHART_TV) is False
     assert vlibsmod.account_online_allowed(UNKNOWN) is False
-    assert vlibsmod.account_can_see(_user("u9"), CHART_TV) is True
-    assert vlibsmod.account_online_allowed(_user("u9")) is True
+    assert vlibsmod.account_can_see(_user("u9"), CHART_TV) is False
+    assert vlibsmod.account_online_allowed(_user("u9")) is False
     assert vlibsmod.account_can_see(ADMIN, CHART_TV) is True
     vlibsmod.set_account_acl("u1", [CHART_TV])
     assert vlibsmod.account_can_see(_user("u1"), CHART_TV) is True
@@ -256,18 +254,18 @@ def test_viewer_can_open_lib(monkeypatch):
         vlibsmod.set_hidden(CHART_TV, False)
     with patch.object(appmod.fnusersmod, "resolve",
                       return_value=_user("u1")):
-        # 已识别但未配置的账号：fail-closed 默认下看不到虚拟库
+        # 已识别但未配置的账号：fail-open 默认下能看到虚拟库
         assert appmod._viewer_can_open_lib(_req_for_viewer(None),
-                                           appmod.CHART_LIB_GUIDS["tv"]) is False
+                                           appmod.CHART_LIB_GUIDS["tv"]) is True
         vlibsmod.set_account_acl("u1", [CHART_MOVIE])
         assert appmod._viewer_can_open_lib(_req_for_viewer(None),
                                            appmod.CHART_LIB_GUIDS["tv"]) is False
         assert appmod._viewer_can_open_lib(_req_for_viewer(None),
                                            appmod.CHART_LIB_GUIDS["movie"]) is True
-    # 未知身份：任何虚拟库都打不开；非虚拟库恒 True；T4 选片库按 t4 键计
+    # 未知身份：fail-open 默认下虚拟库可打开；非虚拟库恒 True；T4 选片库按 t4 键计
     with patch.object(appmod.fnusersmod, "resolve", return_value=UNKNOWN):
         assert appmod._viewer_can_open_lib(_req_for_viewer(None),
-                                           appmod.CHART_LIB_GUIDS["tv"]) is False
+                                           appmod.CHART_LIB_GUIDS["tv"]) is True
         assert appmod._viewer_can_open_lib(_req_for_viewer(None), "local-lib") is True
         vlibsmod.set_hidden("t4", True)
         assert appmod._viewer_can_open_lib(_req_for_viewer(None),
@@ -338,7 +336,7 @@ class _AclEndpointTests(unittest.IsolatedAsyncioTestCase):
             item = patch.object(appmod, name, value)
             item.start()
             self._patches.append(item)
-        # fail-closed 下未识别会话看不到任何虚拟库；本类测的是管理端点与
+        # fail-open 下未识别会话默认可见；本类测的是管理端点与
         # 显隐过滤本身，以管理员身份请求。
         item = patch.object(appmod.fnusersmod, "resolve", return_value=ADMIN)
         item.start()
@@ -412,9 +410,9 @@ class _AclEndpointTests(unittest.IsolatedAsyncioTestCase):
         accts = r.json()["data"]["accounts"]
         assert [a["username"] for a in accts] == ["admin", "kid"]
         assert all(a["configured"] is False for a in accts)
-        # fail-closed 默认：新配置两项均为 False
-        assert r.json()["data"]["acl_default_visible"] is False
-        assert r.json()["data"]["acl_default_online"] is False
+        # fail-open 默认：新配置两项均为 True
+        assert r.json()["data"]["acl_default_visible"] is True
+        assert r.json()["data"]["acl_default_online"] is True
 
         r = await self.client.post("/v/api/ext/account/acl", json={
             "guid": "u-kid", "allow": ["chart:movie", "__online__"]})
@@ -438,7 +436,7 @@ class _AclEndpointTests(unittest.IsolatedAsyncioTestCase):
         assert r.json()["code"] == 0
         assert vlibsmod.acl_default_visible() is False
         assert vlibsmod.acl_default_online() is False
-        # 管理员手动改回 True 后生效（fail-closed 只改默认，不锁死开关）
+        # 管理员手动改成 False 后生效（fail-open 只改默认，不锁死开关）
         r = await self.client.post("/v/api/ext/account/defaults", json={
             "acl_default_visible": True, "acl_default_online": True})
         assert r.json()["code"] == 0

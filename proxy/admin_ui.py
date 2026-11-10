@@ -351,16 +351,16 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
       <div class="card">
         <div class="card-title">⑤ 子账号可见权限</div>
-        <p class="card-sub">按飞牛账号勾选能看到的虚拟库；不勾选任何人表示该账号看不到任何虚拟库，点「恢复默认」取消该账号的限制。账号从飞牛官方数据库读取（只读）。识别不到会话的账号始终看不到虚拟库（不受下方默认开关影响）。</p>
+        <p class="card-sub">按飞牛账号勾选能看到的虚拟库；不勾选任何人表示该账号看不到任何虚拟库，点「恢复默认」取消该账号的限制。账号从飞牛官方数据库读取（只读），识别不到会话的账号按下方默认处理。</p>
         <label class="switch-row">
           <input type="checkbox" id="aclDefVis"/>
           <span>未设置过权限的账号默认能看到虚拟库
-            <span class="sub">关掉后，未设置权限的账号默认看不到虚拟库；管理员始终可见；识别不到会话的账号始终看不到虚拟库（与此开关无关）</span></span>
+            <span class="sub">关掉后，未设置权限的账号默认看不到虚拟库；管理员始终可见，识别不到会话时按此开关处理</span></span>
         </label>
         <label class="switch-row">
           <input type="checkbox" id="aclDefOnline"/>
           <span>未设置过权限的账号默认能用在线搜索
-            <span class="sub">关掉后，未设置权限的账号搜不到在线片源（只搜本地库）；识别不到会话的账号始终不能在线搜索</span></span>
+            <span class="sub">关掉后，未设置权限的账号搜不到在线片源（只搜本地库）</span></span>
         </label>
         <div class="btn-row">
           <button class="primary small" onclick="saveAclDefaults()">保存默认权限</button>
@@ -1289,7 +1289,7 @@ function libCards(chartCounts,cats){
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
 let ACCOUNTS=[];
-let ACLDEF={visible:false,online:false};
+let ACLDEF={visible:true,online:true};
 let LIBPLACE="front",LIBANCHOR="",LIBORDER=[];
 async function loadLibs(){
   try{const r=await jget("/v/api/ext/libs");LIBS=(r.data&&r.data.libs)||[];
@@ -1304,8 +1304,8 @@ async function loadLibs(){
 async function loadAccounts(){
   try{const r=await jget("/v/api/ext/accounts");
     ACCOUNTS=(r.data&&r.data.accounts)||[];
-    ACLDEF={visible:r.data&&r.data.acl_default_visible===true,
-            online:r.data&&r.data.acl_default_online===true};
+    ACLDEF={visible:r.data&&r.data.acl_default_visible!==false,
+            online:r.data&&r.data.acl_default_online!==false};
     if($("aclDefVis"))$("aclDefVis").checked=ACLDEF.visible;
     if($("aclDefOnline"))$("aclDefOnline").checked=ACLDEF.online;
   }catch(e){ACCOUNTS=[];}
@@ -1375,8 +1375,8 @@ async function resetAcl(guid,btn){
   }catch(e){toast("保存失败","fail");}
 }
 async function saveAclDefaults(){
-  const body={acl_default_visible:$("aclDefVis")?$("aclDefVis").checked:false,
-    acl_default_online:$("aclDefOnline")?$("aclDefOnline").checked:false};
+  const body={acl_default_visible:$("aclDefVis")?$("aclDefVis").checked:true,
+    acl_default_online:$("aclDefOnline")?$("aclDefOnline").checked:true};
   try{
     const r=await jpost("/v/api/ext/account/defaults",body);
     if(r.code===0){ACLDEF={visible:body.acl_default_visible,online:body.acl_default_online};toast("默认权限已保存");}

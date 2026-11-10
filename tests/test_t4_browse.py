@@ -96,8 +96,8 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(r.url.host == "t4.test" for r in self.calls))
 
     async def test_t4_library_visible_without_acl_layer_in_fork(self):
-        # fail-closed（decisions-2-failclosed）：T4 选片只对已识别且有权限的
-        # 账号可见；本类 setUp 已把 viewer 打成管理员，故对所有请求可见。
+        # fail-open：T4 选片默认对所有身份可见；本类 setUp 已把 viewer
+        # 打成管理员，故对所有请求可见。
         plugin = await self.plugin()
         self.calls.clear()
         libraries = (await self.client.get("/v/api/v1/mediadb/list")).json()["data"]
@@ -303,8 +303,9 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(appmod, "_search_cache", {}), \
                 patch.object(appmod, "_search_inflight", {}):
             # 搜索已按查看者过滤（decisions-2-libfilter）：无 request 即无
-            # 查看者上下文，按 fail-closed 全部隐藏；本类 setUp 已把 viewer
-            # 打成管理员，用它跑——测的仍是“库关掉也不影响搜到未定型 T4 标题”。
+            # 查看者上下文，全部隐藏（与身份默认无关）；本类 setUp 已把
+            # viewer 打成管理员，用它跑——测的仍是“库关掉也不影响搜到未定型
+            # T4 标题”。
             cards = await appmod.online_search(
                 "Untyped", self.network,
                 request=SimpleNamespace(headers={}))

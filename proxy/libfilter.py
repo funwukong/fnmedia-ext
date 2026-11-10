@@ -72,7 +72,7 @@
    四分类有意分歧：热门库只有 movie/tv/anime/variety 四张，
    纪录片在热门侧仍归 movie，搜索过滤侧归 documentary）。
 
-三、无法映射的处理：拒绝（fail-closed）
+三、无法映射的处理：拒绝（防御性兜底，与身份默认无关）
 ----------------------------------------
 ``brief_lib_keys`` 返回空集时，``brief_visible`` 返回 False：标题不
 在搜索里出现，详情返回 -6。空集只发生在两类情形：brief 不是 dict，
@@ -80,8 +80,8 @@
 聚合搜索 brief 一定有归属（分类库门按 hot_category 规则，类型缺失
 也默认归 tv，见上），正常标题不会走到这条分支；这只是防御性兜底。
 理由：
-- 无法证明查看者能打开它所属的库；按第 1 项的 fail-closed 语义
-  （未知身份→隐藏，未配置账号→隐藏），“不知道归属”只能按隐藏算，
+- 无法证明查看者能打开它所属的库；按 fail-open 语义（未知身份/
+  未配置账号按默认开关放行），“不知道归属”仍只能按隐藏算，
   否则一张被隐藏的库的标题会经由“无归属”漏网。
 - 实践中搜索 brief 一定有 ``online_id``（``brief_of`` 必填），
   正常标题不会走到这条分支；这只是防御性兜底。
@@ -211,7 +211,7 @@ def brief_visible(brief: dict, can_open_key, *, gkey_of=None) -> bool:
     ``can_open_key``：调用方提供的 ``库键 -> bool``（app 层传
     ``_viewer_can_open_key`` 的偏应用，身份逻辑全在那一侧）。
     任一归属库可打开即可见；无归属（无法映射）或 ``can_open_key``
-    为 None（无查看者上下文）时一律不可见（fail-closed）。
+    为 None（无查看者上下文）时一律不可见（与身份默认无关）。
     """
     if can_open_key is None:
         return False

@@ -7,10 +7,10 @@
   online_search 按查看者过滤（含缓存复用时按人重滤）、item_detail
   隐藏库 -6（标题 / 库根 / 榜单绑定 / 季 / 集 / 红果）、search_list 红果门。
 
-身份语义与第 1 项（decisions-2-failclosed）一致，但本文件不依赖它
-的合入顺序：account_can_see / fnusers.resolve 一律用桩代替——桩按
-目标 fail-closed 语义实现（未知身份→隐藏，未配置账号→隐藏，
-已配置账号→只看白名单，管理员→全看）。第 1 项合入前后本文件行为一致。
+身份语义与 fail-open 一致，但本文件不依赖它的合入顺序：
+account_can_see / fnusers.resolve 一律用桩代替——桩按
+目标 fail-open 语义实现（未知身份→按默认放行，未配置账号→
+按默认放行，已配置账号→只看白名单，管理员→全看）。
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def _user(guid="u1"):
 
 
 def _can_see(allow_map, hidden=()):
-    """目标 fail-closed 语义的 account_can_see 桩（见模块文档）。"""
+    """目标 fail-open 语义的 account_can_see 桩（见模块文档）。"""
     hidden = set(hidden)
 
     def fake(user, key):
@@ -49,13 +49,13 @@ def _can_see(allow_map, hidden=()):
             return True
         if key in hidden:
             return False
+        if user and user.get("is_admin"):
+            return True
         if not user or not user.get("known"):
-            return False
-        if user.get("is_admin"):
             return True
         allow = allow_map.get(user.get("guid", ""))
         if allow is None:
-            return False
+            return True
         return key in allow
 
     return fake
@@ -197,7 +197,7 @@ class ViewerKeyTests(unittest.TestCase):
         assert appmod._viewer_can_open_key(req, "standalone:baofeng") is True
         assert appmod._viewer_can_open_key(req, "t4") is True
         req = self._viewer(UNKNOWN, {})
-        assert appmod._viewer_can_open_key(req, "catalog:movie") is False
+        assert appmod._viewer_can_open_key(req, "catalog:movie") is True
         req = self._viewer(_user("u1"), {"u1": {"catalog:movie"}})
         assert appmod._viewer_can_open_key(req, "catalog:movie") is True
         assert appmod._viewer_can_open_key(req, "catalog:tv") is False
@@ -255,10 +255,10 @@ class OnlineSearchTests(unittest.IsolatedAsyncioTestCase):
         assert self._titles(admin) == ["动作大片", "国产剧集", "T4剧集"]
         unknown = await appmod.online_search(
             kw, None, request=self._viewer(UNKNOWN, {}))
-        assert unknown == []
+        assert self._titles(unknown) == ["动作大片", "国产剧集", "T4剧集"]
         u9 = await appmod.online_search(
             kw, None, request=self._viewer(_user("u9"), {}))
-        assert u9 == []
+        assert self._titles(u9) == ["动作大片", "国产剧集", "T4剧集"]
         u1 = await appmod.online_search(
             kw, None, request=self._viewer(
                 _user("u1"), {"u1": {"catalog:movie"}}))
@@ -328,15 +328,17 @@ class DetailTests(unittest.IsolatedAsyncioTestCase):
         assert (await self._item("test-title-a"))["code"] == 0
         self._viewer(_user("u1"), {"u1": {"catalog:tv"}})
         assert (await self._item("test-title-a"))["code"] == -6
+        # fail-open：未知身份与未配置账号按默认放行
         self._viewer(UNKNOWN, {})
-        assert (await self._item("test-title-a"))["code"] == -6
+        assert (await self._item("test-title-a"))["code"] == 0
         self._viewer(_user("u9"), {})
-        assert (await self._item("test-title-a"))["code"] == -6
+        assert (await self._item("test-title-a"))["code"] == 0
 
     async def test_detail_lib_root_denied_and_allowed(self):
         guid = appmod.CHART_LIB_GUIDS["movie"]
+        # fail-open：未知身份按默认放行，库根可见
         self._viewer(UNKNOWN, {})
-        assert (await self._item(guid))["code"] == -6
+        assert (await self._item(guid))["code"] == 0
         self._viewer(_user("u1"), {"u1": {"catalog:movie"}})
         assert (await self._item(guid))["code"] == -6
         self._viewer(ADMIN, {})

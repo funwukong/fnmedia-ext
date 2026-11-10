@@ -2972,7 +2972,7 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
     它存的是**未过滤的 brief**，同一关键词可能被不同账号先后搜到，
     缓存卡片会把先搜者的可见范围漏给后搜者，故每次返回时都按当前
     request 重新过滤、重新建卡；查看者上下文（_ViewerCtx）每请求一个。
-    request 为 None（无查看者上下文）时按 fail-closed 全部隐藏。
+    request 为 None（无查看者上下文）时全部隐藏（与身份默认无关）。
 
     早返回按可见数计（P0-1）：把按查看者判定的可见回调传给
     _aggregate_briefs/search_all，快源先回的隐藏库标题不再触发早返回
@@ -3462,7 +3462,14 @@ class _ViewerCtx:
         return None
 
     def can_open_lib(self, guid):
-        """当前账号是否允许打开该库 guid（非虚拟库恒 True；带 memo）。"""
+        """当前账号是否允许打开该库 guid（非虚拟库恒 True；带 memo）。
+
+        无请求上下文（request 为 None）时拒绝全部，与身份默认无关：
+        这是“没有查看者”而非“身份未知”，fail-open 的默认直通只对
+        真实请求里的未知身份生效。
+        """
+        if self.request is None:
+            return False
         if guid in self._lib_memo:
             return self._lib_memo[guid]
         key = self.vkey_for_guid(guid)
@@ -3569,10 +3576,11 @@ def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
 def _viewer_can_open_lib(request: Request, guid: str) -> bool:
     """当前账号是否允许打开该虚拟库（隐藏/无权限返回 False）。非虚拟库恒 True。
 
-    fail-closed 默认：识别不出身份的会话始终不可见；管理员始终可见；
-    已识别但未配置账号按 acl_default_visible（默认 False=隐藏）。
-    想改回“未配置账号默认可见”，把配置 acl_default_visible 改为 True
-    （管理页子账号授权里可改）。
+    fail-open 默认：识别不出身份的会话按 acl_default_visible 处理
+    （默认 True=可见）；管理员始终可见；已识别但未配置账号按
+    acl_default_visible（默认 True=可见）。想改回“未配置账号默认隐藏”，
+    把配置 acl_default_visible 改为 False（管理页子账号授权里可改）。
+    无请求上下文（request 为 None）时拒绝全部，与身份默认无关。
 
     身份解析与键判定由每请求 ``_ViewerCtx`` 缓存（同一请求内同一库
     只算一次），语义与原实现一致。
@@ -3613,8 +3621,8 @@ def _viewer_can_open_key(request: Request | None, key: str) -> bool:
     """当前账号是否允许打开该稳定库键（搜索/详情按库过滤用）。
 
     身份逻辑不重写：键→guid 后走既有的 _viewer_can_open_lib（它再调
-    vlibs.account_can_see + fnusers.resolve），语义与第 1 项的
-    fail-closed 保持一致（未知身份→隐藏，未配置账号→隐藏，
+    vlibs.account_can_see + fnusers.resolve），语义与 fail-open 保持一致
+    （未知身份→按默认开关放行，未配置账号→按默认开关放行，
     已配置账号→只看白名单，管理员→全看；具体默认值见 vlibs）。
     键非法、映射不到 guid、或往返校验（guid→键）不一致时一律拒绝；
     request 为 None（无查看者上下文）时拒绝全部。
@@ -3786,7 +3794,7 @@ async def mediadb_list(request: Request):
     # 仍应展示，故这里只判断“聚合四库”开关）。
     if not any_virtual_lib_enabled():
         return upstream
-    # 当前账号（用于按账号显隐；识别失败按 fail-closed 隐藏，管理员始终可见）
+    # 当前账号（用于按账号显隐；识别失败按默认开关处理，管理员始终可见）
     viewer = fnusersmod.resolve(request)
     payload = await _json_from_upstream(upstream)
     dbs = payload.get("data") if payload else None
@@ -10398,7 +10406,7 @@ async def ext_accounts(request: Request):
 @app.post("/v/api/ext/account/acl")
 async def ext_account_acl(request: Request):
     """设置某账号允许看到的虚拟库（allow: [库键, ...]，空列表=不允许看任何
-    虚拟库；不传/传 null=取消限制，改回默认：fail-closed 下默认不可见）。"""
+    虚拟库；不传/传 null=取消限制，改回默认：fail-open 下默认可见）。"""
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     ok, msg = vlibsmod.set_account_acl(body.get("guid"), body.get("allow", None))
     return {"code": 0 if ok else 1, "msg": msg}
