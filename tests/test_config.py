@@ -188,7 +188,7 @@ def test_unparsable_version_skips_destructive_migration(monkeypatch, tmp_path):
     # 只把版本号归一化为当前版本并落盘。
     for bad in ("abc", 2.5, "2.5", None, True, ""):
         state = _patch_state(monkeypatch, tmp_path)
-        state.parent.mkdir(parents=True)
+        state.parent.mkdir(parents=True, exist_ok=True)
         state.write_text(json.dumps({"config_version": bad,
                                      "acl_default_visible": False,
                                      "acl_default_online": False}),
