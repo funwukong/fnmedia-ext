@@ -622,9 +622,10 @@ async def dduo_probe_source(source: dict, keyword: str = "庆余年",
     import dduo
     t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(follow_redirects=True,
-                                     trust_env=False,
-                                     timeout=timeout) as client:
+        # 上游 v1.0.0 probe_source 做法：探测经 netutil.async_client
+        #（按代理模式直连/走代理/自动切代理）；DDUO 是 fork 私有模块，
+        # 上游无同名函数，这里搬的是上游通用探测的客户端构造方式。
+        async with netutil.async_client(timeout=timeout) as client:
             vods = await dduo.search(client, source, keyword)
             ms = int((time.monotonic() - t0) * 1000)
             if vods:

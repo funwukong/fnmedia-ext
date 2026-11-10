@@ -17,6 +17,7 @@ import asyncio
 import sys
 import types
 from pathlib import Path
+from unittest import mock
 
 import httpx
 
@@ -57,6 +58,37 @@ class _FakeExt:
 def _fake_request(fake_ext):
     return types.SimpleNamespace(
         app=types.SimpleNamespace(state=types.SimpleNamespace(ext=fake_ext)))
+
+
+class _FakeNetutilClient:
+    """模拟 netutil.async_client(timeout=...) 造出的客户端。"""
+
+    def __init__(self, script, calls):
+        self.script = list(script)
+        self.calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def get(self, url, headers=None, timeout=None):
+        self.calls.append((url, dict(headers or {})))
+        step = self.script.pop(0) if self.script else _Resp()
+        if isinstance(step, Exception):
+            raise step
+        return step
+
+
+def _netutil_factory(script, calls, timeouts):
+    """替代 netutil.async_client：记录 timeout，返回假客户端。"""
+
+    def _make(*, timeout=None, **kwargs):
+        timeouts.append(timeout)
+        return _FakeNetutilClient(script, calls)
+
+    return _make
 
 
 def _tok(url=IMG_URL):
@@ -104,13 +136,64 @@ def test_serve_online_poster_403_retries_with_own_origin_referer():
 
 
 def test_serve_online_poster_failure_returns_jpeg_fallback():
+    # 主客户端 3 次都连不上；netutil 重试也失败 → JPEG 占位。
+    # netutil.async_client 必须打桩，否则会真的去联网抓图。
     fake = _FakeExt([httpx.ConnectError("down", request=None)] * 3)
-    r = asyncio.run(appmod._serve_online_poster(
-        _tok(), _fake_request(fake)))
+    calls, timeouts = [], []
+    with mock.patch.object(
+            appmod.netutil, "async_client",
+            _netutil_factory([httpx.ConnectError("down", request=None)],
+                             calls, timeouts)):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
     assert r.status_code == 200
     assert r.media_type == "image/jpeg"
     assert r.body[:2] == b"\xff\xd8"
     assert b"<svg" not in r.body
+    assert len(calls) == 1  # netutil 按上游做法只再试一次
+    assert calls[0][0] == IMG_URL
+    assert timeouts == [12.0]
+
+
+def test_serve_online_poster_netutil_retry_succeeds():
+    """上游 _poster_fetch 做法：主客户端网络异常后，经 netutil 再取一次成功。"""
+    fake = _FakeExt([httpx.ConnectError("boom", request=None)] * 3)
+    calls, timeouts = [], []
+    with mock.patch.object(
+            appmod.netutil, "async_client",
+            _netutil_factory([_Resp()], calls, timeouts)):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
+    assert r.status_code == 200
+    assert r.media_type == "image/jpeg"
+    assert r.body == JPEG
+    assert len(fake.calls) == 3  # 主客户端内部重试 3 次都失败
+    assert len(calls) == 1
+    assert calls[0][0] == IMG_URL
+    assert timeouts == [12.0]
+
+
+def test_serve_online_poster_netutil_retry_not_used_on_http_error():
+    """正常 HTTP 错误（非网络异常）不触发 netutil 重试：403 仍走 Referer 重试。"""
+    class _Gate(_FakeExt):
+        async def get(self, url, headers=None, timeout=None):
+            self.calls.append((url, dict(headers or {})))
+            if "Referer" not in (headers or {}):
+                return _Resp(status=403, content=b"forbidden",
+                             ctype="text/html")
+            return _Resp()
+
+    fake = _Gate([])
+    calls, timeouts = [], []
+    with mock.patch.object(
+            appmod.netutil, "async_client",
+            _netutil_factory([_Resp()], calls, timeouts)):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
+    assert r.status_code == 200
+    assert r.body == JPEG
+    assert calls == []  # 没走 netutil
+    assert timeouts == []
 
 
 def test_poster_url_is_upstream_online_format():

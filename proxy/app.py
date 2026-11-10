@@ -8888,19 +8888,39 @@ def _poster_fetch_headers(url: str) -> dict:
     return headers
 
 
+# 上游 v1.0.0 _poster_fetch 的网络错误集：直连出现连接级异常时才重试，
+# 正常 HTTP 错误（4xx/5xx）不重试。
+_POSTER_NETWORK_ERRORS = (
+    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
+    httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+    httpx.PoolTimeout,
+)
+
+
 async def _poster_upstream_get(request: Request, url: str):
     """带重试抓一张上游海报；返回 httpx 响应，网络失败返回 None。
 
     先用常规头重试 3 次；若返回 403（图床防盗链），再带图床自身 origin
     作 Referer 重试一次——多数防盗链只认同源 Referer。
+    主客户端网络异常时，按上游 _poster_fetch（v1.0.0）的做法经
+    netutil.async_client(timeout=12.0) 再取一次（按代理模式直连/走代理/
+    自动切代理；未配置代理时也相当于一条全新直连）；仍失败返回 None。
+    地址格式、JPEG 占位、纯透传均不动。
     """
+    host = urllib.parse.urlsplit(url).netloc.lower()
     try:
         r = await ext_get_retry(request, url,
                                 headers=_poster_fetch_headers(url))
+    except _POSTER_NETWORK_ERRORS:
+        _log.info("poster netutil retry host=%s", host)
+        try:
+            async with netutil.async_client(timeout=12.0) as cli:
+                r = await cli.get(url, headers=_poster_fetch_headers(url))
+        except Exception:  # noqa: BLE001
+            return None
     except Exception:  # noqa: BLE001
         return None
     if r is not None and r.status_code == 403:
-        host = urllib.parse.urlsplit(url).netloc.lower()
         scheme = urllib.parse.urlsplit(url).scheme or "https"
         headers = _poster_fetch_headers(url)
         headers["Referer"] = f"{scheme}://{host}/"

@@ -18,6 +18,7 @@ from typing import Any
 
 import httpx
 
+import netutil
 import providers
 from store import make_guid
 
@@ -722,9 +723,10 @@ class Catalog:
             sem = asyncio.Semaphore(10)
 
             async def once(timeout):
-                async with httpx.AsyncClient(follow_redirects=True,
-                                             trust_env=False,
-                                             verify=False) as client:
+                # 上游 v1.0.0 做法：深翻经 netutil.async_client（按代理模式
+                # 直连/走代理/自动切代理），与 providers.py 已有用法一致。
+                async with netutil.async_client(verify=False,
+                                               timeout=HTTP_TIMEOUT) as client:
                     async def bound(r):
                         async with sem:
                             return await fetch_one(client, r, timeout)
@@ -751,8 +753,8 @@ class Catalog:
             return []
 
         # 跨源聚合：串行回退（不同源结果应一致，并发会无谓翻倍请求）
-        async with httpx.AsyncClient(follow_redirects=True, trust_env=False,
-                                     verify=False) as client:
+        async with netutil.async_client(verify=False,
+                                       timeout=HTTP_TIMEOUT) as client:
             for route in routes:
                 got = await fetch_one(client, route, HTTP_TIMEOUT)
                 if not got:
