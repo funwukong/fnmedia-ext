@@ -87,6 +87,10 @@ class Store:
         self._play: dict[str, dict] = {}
         self._detail_cache: dict[str, providers.OnlineTitle] = {}
         self._dirty = False
+        # P1-18：写盘代际。每次真实内容变化 +1；_flush_now 只在快照
+        # 期间无人再改时才清脏，避免“快照已取、落盘中途又变脏”时把新
+        # 数据的脏标记误清、导致新数据迟迟不落盘。
+        self._dirty_seq = 0
         # —— 后台防抖落盘（issue #42：机械盘同步全量写 20+MB 会让搜索卡 10s）——
         self._dirty_at = 0.0
         self._writer_started = False
@@ -123,12 +127,17 @@ class Store:
                 pass
 
     def _schedule_flush(self):
-        """标记脏并请求后台合并写；搜索热路径不做任何磁盘 IO。"""
+        """标记脏并请求后台合并写；搜索热路径不做任何磁盘 IO。
+
+        P1-18：调用方只在内容真实变化时调这里（见 remember_* 的
+        changed 判断）；无变化的重复写入不再记脏、不再排队写盘。
+        调用时须已持 _lock（各 mutator 内调用，RLock 可重入）。"""
         now = time.time()
         with self._lock:
             if not self._dirty:
                 self._dirty_at = now
             self._dirty = True
+            self._dirty_seq += 1
         self._ensure_writer()
 
     def _load(self):
@@ -492,12 +501,19 @@ class Store:
         return dict(g_items), dict(o_items)
 
     def _flush_now(self) -> bool:
-        """实际落盘：锁内取裁剪快照，锁外序列化+原子替换（写盘不阻塞搜索/读）。"""
+        """实际落盘：锁内取裁剪快照，锁外序列化+原子替换（写盘不阻塞搜索/读）。
+
+        P1-18：快照时记下 _dirty_seq；落盘后只有代际未变才清脏——
+        写盘期间若又有新变化，脏标记保留，后台防抖线程会再写一次，
+        不丢数据。无变化时直接返回 False，不碰磁盘。"""
         if not self._dirty:
             return False
         with self._lock:
             if not self._dirty:
                 return False
+            # 代际必须在快照之前取：快照期间的变脏要计入新一代，
+            # 落盘后才不被误清（先快照后取代际会让保护失效）。
+            seq = self._dirty_seq
             titles, orig = self._snapshot_capped()
         try:
             self._state.parent.mkdir(parents=True, exist_ok=True)
@@ -507,26 +523,40 @@ class Store:
             tmp.write_text(data, encoding="utf-8")
             os.replace(tmp, self._state)
             with self._lock:
-                self._dirty = False
+                if self._dirty_seq == seq:
+                    self._dirty = False
             return True
         except Exception:
             return False
 
     def flush(self, wait: bool = True) -> bool:
-        """对外的立即落盘（关闭进程时调用）。wait=True 时同步写完。"""
+        """对外的立即落盘（关闭进程时调用）。wait=True 时同步写完。
+
+        P1-18：写盘期间若又有新变化落进来，补写一次（最多 3 轮），
+        避免刚落盘的快照丢新数据；无变化时直接返回 True，不碰磁盘。"""
         with self._lock:
             if not self._dirty:
                 return True
         if wait:
-            return self._flush_now()
+            for _ in range(3):
+                self._flush_now()
+                with self._lock:
+                    if not self._dirty:
+                        return True
+            return False
         self._ensure_writer()
         return True
 
     def close(self):
-        """进程关闭：停掉防抖线程并尽力把最后一批脏数据写盘。"""
+        """进程关闭：停掉防抖线程并尽力把最后一批脏数据写盘。
+
+        P1-18：写盘期间若又有新变化，补写（最多 3 轮）；无变化时不碰磁盘。"""
         self._closing = True
         try:
-            self._flush_now()
+            for _ in range(3):
+                if not self._dirty:
+                    break
+                self._flush_now()
         except Exception:
             pass
 
@@ -535,17 +565,23 @@ class Store:
         now = time.time()
         briefs = []
         with self._lock:
+            # P1-18：只有标题/来源真实变化才记脏；内容完全相同的重复
+            # 写入（如同一搜索结果反复入库）不再触发写盘。_detail_cache
+            # 与 _play 只在内存，不计入脏判断。
+            changed = False
             for t in titles:
                 g = make_guid(t)
                 b = inject.brief_of(t)
+                if self._titles.get(g) != b or self._orig.get(g) != t.online_id:
+                    changed = True
                 self._titles[g] = b
                 self._orig[g] = t.online_id
                 self._detail_cache[t.online_id] = t
                 briefs.append(b)
             self._play = {k: v for k, v in self._play.items() if now - v["ts"] < _TTL}
             self._prune_memory_locked({make_guid(t) for t in titles})
-            self._dirty = True
-            self._schedule_flush()
+            if changed:
+                self._schedule_flush()
             self._rebuild_index()
         return briefs
 
@@ -558,12 +594,17 @@ class Store:
         """
         with self._lock:
             t4_touched = False
+            # P1-18：只有标题/来源真实变化才记脏；T4 分支先按旧线路归一化
+            # 再比较，避免“线路沿用旧值”这种无实质变化也触发写盘。
+            changed = False
             for b in briefs:
                 old = self._titles.get(b["guid"])
                 if b.get("locator", {}).get("kind") == "t4" and old and old.get("lines"):
                     # A search card must not erase loaded detail or historical episode IDs.
                     locator = dict(b["locator"], loaded_at=0)
                     b = dict(b, lines=old["lines"], locator=locator)
+                if b["guid"] not in self._orig or old is None or old != b:
+                    changed = True
                 if old is not None:
                     if old.get("locator", {}).get("kind") == "t4":
                         self._drop_t4(b["guid"])
@@ -573,8 +614,8 @@ class Store:
                 self._titles[b["guid"]] = b
                 self._orig.setdefault(b["guid"], b.get("online_id", ""))
             self._prune_memory_locked({b["guid"] for b in briefs})
-            self._dirty = True
-            self._schedule_flush()
+            if changed:
+                self._schedule_flush()
             for b in briefs:
                 if b.get("locator", {}).get("kind") == "t4":
                     self._media_index[media_guid(b["guid"])] = "t:" + json.dumps(
@@ -593,10 +634,13 @@ class Store:
         import inject
         with self._lock:
             brief = dict(inject.brief_of(title), guid=guid)
+            # P1-18：内容无变化不记脏
+            changed = (self._titles.get(guid) != brief
+                       or self._orig.get(guid) != title.online_id)
             self._titles[guid] = brief
             self._orig[guid] = title.online_id
-            self._dirty = True
-            self._schedule_flush()
+            if changed:
+                self._schedule_flush()
             self._rebuild_index()
             return brief
 
@@ -633,12 +677,16 @@ class Store:
         import inject
         with self._lock:
             g = make_guid(t)
-            self._titles[g] = inject.brief_of(t)
+            brief = inject.brief_of(t)
+            # P1-18：内容无变化不记脏
+            changed = (self._titles.get(g) != brief
+                       or self._orig.get(g) != t.online_id)
+            self._titles[g] = brief
             self._orig[g] = t.online_id
             self._detail_cache[t.online_id] = t
             self._prune_memory_locked({g})
-            self._dirty = True
-            self._schedule_flush()
+            if changed:
+                self._schedule_flush()
             self._rebuild_index()
         return g
 
