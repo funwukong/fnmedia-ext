@@ -4889,7 +4889,7 @@ async def search_list(request: Request):
     try:
         import json
         data = json.loads(local.body)
-    except Exception:
+    except ValueError:
         return local
     if not isinstance(data, dict):
         return local
@@ -4906,14 +4906,17 @@ async def search_list(request: Request):
                 online_search(q, ext_client(request), timeout=6.0), timeout=8.5)
         except asyncio.TimeoutError:
             online = []
-        except Exception:
+        except Exception as exc:
+            # 在线聚合搜索整体失败即只剩本地结果；记异常类型，不记搜索关键词。
+            _log.warning("online search failed: %s", type(exc).__name__)
             online = []
     # 红果短剧搜索并入（仅查本地已缓存标题，不再打 upstream）
     hgdj_online = []
     if q and hgdj_enabled():
         try:
             hgdj_online = hgdjmod.search_items(q)
-        except Exception:
+        except Exception as exc:
+            _log.debug("hgdj search failed: %s", type(exc).__name__)
             hgdj_online = []
     if hgdj_online:
         hgdj_online = clientmod.normalize_cards(hgdj_online, _client_of(request))
@@ -5452,7 +5455,7 @@ async def stream_list(guid: str, request: Request):
 async def stream_list_post(request: Request):
     try:
         body = await request.json()
-    except Exception:
+    except ValueError:
         body = {}
     guid = str(body.get("guid") or body.get("item_guid") or "")
     if not guid:
@@ -5551,8 +5554,8 @@ async def _stream_list_impl(guid: str, request: Request):
             _mg = (sl.get("video_streams") or [{}])[0].get("media_guid")
             if _mg:
                 _warm_playlist(_mg, target, request)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("stream list preheat failed: %s", type(exc).__name__)
     return JSONResponse({"code": 0, "msg": "", "data": sl})
 
 
@@ -5628,18 +5631,29 @@ def _attach_related(data: dict, brief: dict) -> None:
     """详情页下方挂关联作品（recommendations 字段）。
 
     只用 store 里已收录的片（用户浏览过的分类/搜索结果），不调外部接口。
+    冷启动兜底：已浏览池入选不足 12 条时，再用分类 dense（catalog 已物化、
+    纯本地、零网络）补候选、统一打分；打分、门槛、上限、海报要求不变。
     字段名按“官方详情响应常嵌套相关推荐数组”的公开观察推断，未在官方
     文档里核实；客户端是否渲染以真机实测为准。关掉 related_enabled 即停用。
     """
     try:
         if not config.get().get("related_enabled", True):
             return
-    except Exception:
+    except Exception as exc:
+        _log.debug("related config check failed: %s", type(exc).__name__)
         return
     try:
-        from related import related_for
-        items = related_for(brief, store._titles.values())
-    except Exception:
+        from related import DEFAULT_LIMIT, related_for, related_for_with_dense
+        pool = list(store._titles.values())
+        items = related_for(brief, pool)
+        if len(items) < DEFAULT_LIMIT:
+            dense: list[dict] = []
+            for _cat in catalogmod.CATS:
+                dense.extend(catalog.cached_dense(_cat, 40))
+            if dense:
+                items = related_for_with_dense(brief, pool, dense)
+    except Exception as exc:
+        _log.debug("related failed: %s", type(exc).__name__)
         return
     if items:
         data["recommendations"] = [inj.search_item(b) for b in items]
@@ -5901,8 +5915,8 @@ async def play_info(request: Request):
             picked = _pick_episode(mg, request)
             if picked:
                 _warm_playlist(mg, picked, request)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("play info preheat failed: %s", type(exc).__name__)
 
     # 红果短剧 episode 播放信息：直链 play_link，MP4 wrapper
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
@@ -6349,8 +6363,8 @@ async def play_play(request: Request):
         # 后台立刻预热该线路（含解析 + 播放列表），播放器取 main 时大概率已就绪
         try:
             _warm_playlist(mg, target, request)
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("play preheat failed: %s", type(exc).__name__)
     else:
         play_link = f"{ONLINE_PREFIX}/{mg}/direct?{q}"
     return JSONResponse({"code": 0, "msg": "", "data": {
@@ -8286,7 +8300,8 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
                 ext_client(request), text, cur, headers)
             if parsed:
                 decrypt_key, explicit_iv = parsed
-        except Exception:
+        except Exception as exc:
+            _log.warning("hls key parse failed: error=%s", type(exc).__name__)
             decrypt_key = None
 
     media_seq = 0
@@ -8582,7 +8597,9 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
     for _ in range(4):
         try:
             r = await ext_get_retry(request, cur, headers, tries=tries, timeout=15.0)
-        except Exception:
+        except Exception as exc:
+            # 抓取失败即整表失败，调用方据此换线；记异常类型，不记完整地址。
+            _log.warning("playlist fetch failed: error=%s", type(exc).__name__)
             return None, cur
         if r.status_code != 200:
             return None, cur

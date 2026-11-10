@@ -365,13 +365,22 @@ async def search_source(client: httpx.AsyncClient, source: dict,
     if not isinstance(j, dict) or j.get("code") not in (1, "1"):
         return []
     out = []
+    dropped = 0
+    first_err = ""
     for v in j.get("list", []) or []:
         try:
             t = _map_vod(v, source)
-        except Exception:
+        except Exception as exc:
+            # 单条 vod 映射失败只丢该条（上游 JSON 字段不可信），按调用汇总记一条日志。
+            dropped += 1
+            if not first_err:
+                first_err = type(exc).__name__
             continue
         if t and t.title:
             out.append(t)
+    if dropped:
+        _log.warning("source search dropped unmappable vods: id=%s dropped=%d error=%s",
+                     source.get("id"), dropped, first_err)
     return out
 
 
@@ -411,7 +420,9 @@ async def resolve_redirect(client: httpx.AsyncClient, jump_url: str,
             if loc and _MEDIA_RE.search(loc):
                 found = urllib.parse.urljoin(jump_url, loc)
                 break
-        except Exception:
+        except httpx.HTTPError as exc:
+            _log.debug("resolve_redirect attempt failed: attempt=%d error=%s",
+                       attempt, type(exc).__name__)
             found = None
         if attempt < 2:
             await _aio.sleep(0.3 * (2 ** attempt))
@@ -441,15 +452,16 @@ async def resolve_share(client: httpx.AsyncClient, page_url: str,
         found = await _sniff.sniff(client, page_url, referer)
         if found:
             return found
-    except Exception:
-        pass
+    except Exception as exc:
+        _log.debug("resolve_share sniff failed: error=%s", type(exc).__name__)
     try:
         r = await client.get(page_url, headers=headers, timeout=10,
                              follow_redirects=True)
         if r.status_code != 200:
             return None
         html = r.text
-    except Exception:
+    except httpx.HTTPError as exc:
+        _log.debug("resolve_share fetch failed: error=%s", type(exc).__name__)
         return None
     found = None
     for rx in _EMBED_URL_RES:
@@ -521,8 +533,8 @@ async def probe_source(api: str, keyword: str = "庆余年",
                 return {"ok": True, "status": 200, "elapsed_ms": ms,
                         "count": 0, "sample": "",
                         "error": "接口正常（该词无结果）"}
-        except Exception:
-            pass
+        except Exception as exc:
+            _log.debug("probe list fallback failed: error=%s", type(exc).__name__)
         return {"ok": False, "status": 200, "elapsed_ms": ms, "count": 0,
                 "sample": "", "error": "无返回结果"}
     return {"ok": True, "status": 200, "elapsed_ms": ms,
@@ -1087,6 +1099,13 @@ async def search_all(keyword: str, sources=None,
                     r = t.result()
                     if isinstance(r, list) and r not in results:
                         results.append(r)
+    # 汇总：聚合搜索里单个源抛异常会被上面的结果过滤悄悄丢掉，这里按源记一条日志
+    # （只记源 id 与数量，不记搜索关键词）。
+    failed = [s.get("id", "?") for s, t in zip(scheduled, tasks)
+              if t.done() and not t.cancelled() and t.exception() is not None]
+    if failed:
+        _log.warning("search_all: %d/%d sources failed: ids=%s",
+                     len(failed), len(scheduled), failed)
     titles: list[OnlineTitle] = []
     for r in results:
         if isinstance(r, list):

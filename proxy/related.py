@@ -9,6 +9,11 @@
 "recommendations" 字段上。该字段名是按“官方详情响应常嵌套相关推荐
 数组”这一公开观察（fnos-desktop 作者的注释）推断的，未在官方文档
 里核实；飞牛客户端是否渲染，以真机实测为准。
+
+冷启动：related_for 只看已浏览池（store._titles），新装/未浏览时池子
+是空的。related_for_with_dense 在入选不足时把分类 dense（catalog 已
+物化的去重 brief，纯本地、零网络）并入同一池再统一打分；打分、门槛、
+上限、海报要求与 related_for 完全一致。
 """
 from __future__ import annotations
 
@@ -112,3 +117,26 @@ def related_for(brief: dict, pool, limit: int = DEFAULT_LIMIT) -> list[dict]:
         key=lambda p: (-p[0], -_float_score(p[1].get("score")), p[1].get("title", "")),
     )
     return [c for _, c in ranked[:max(1, limit)]]
+
+
+def related_for_with_dense(brief: dict, pool, dense_pool=None,
+                           limit: int = DEFAULT_LIMIT) -> list[dict]:
+    """关联作品（含冷启动兜底）：先按 pool（已浏览）打分；入选不足 limit
+    时，把 dense_pool（分类 dense 已物化的 brief，纯本地、零网络）并入
+    同一池再统一打分、统一排序、统一截断。
+
+    触发条件是入选不足（池子为空/过小，或池内无匹配），不是池子大小本身；
+    打分、MIN_SCORE、limit 上限、必须有海报、同名去重规则与 related_for
+    完全一致；pool 与 dense_pool 里同一 guid 只算一次。
+    """
+    pool = [b for b in (pool or []) if isinstance(b, dict)]
+    items = related_for(brief, pool, limit=limit)
+    if len(items) >= limit or not dense_pool:
+        return items
+    seen = {b.get("guid") for b in pool}
+    merged = list(pool)
+    for cand in dense_pool:
+        if isinstance(cand, dict) and cand.get("guid") not in seen:
+            merged.append(cand)
+            seen.add(cand.get("guid"))
+    return related_for(brief, merged, limit=limit)

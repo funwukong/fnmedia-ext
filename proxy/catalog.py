@@ -523,6 +523,18 @@ class Catalog:
         with self._lock:
             return len(self._dense.get(self._scope_key(scope, cat)) or [])
 
+    def cached_dense(self, cat: str, limit: int = 40,
+                     scope: str = AGG_SCOPE) -> list[dict]:
+        """纯本地、零网络：取某大类已物化的去重密集列表前 limit 条。
+
+        只返回已在内存里的 brief（浏览分类时由 _extend_dense 填入），
+        未物化的分类返回 []，不触发任何网络拉取。供详情页关联作品冷启动
+        兜底用：新装/未浏览时已浏览池为空，靠它补候选。
+        """
+        with self._lock:
+            dense = self._dense.get(self._scope_key(scope, cat)) or []
+            return list(dense[:max(0, int(limit))])
+
     def total(self, cat: str, scope: str = AGG_SCOPE) -> int:
         # 用规范源页数估算 total；最后一页条数未知，前端以空页自然停止。
         # 例外：4K 没有原生路由时是派生库，电影页数 × 20 是虚数——源备注里
