@@ -258,6 +258,25 @@ class EarlyReturnVisibleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cards), 10)  # 10 组快片归并结果
         self.assertLess(elapsed, 4.0)
 
+    async def test_online_search_restricted_visible_titles_still_early_return(self):
+        # P1-23(5)：此前只测了受限账号“可见数不足→不截断”的方向。
+        # 反方向：受限账号但快片全部可见（catalog:tv 也在白名单内），
+        # 30 条可见即触发早返回，慢源被取消、慢片不出——早返回对受限账号
+        # 不是失效，只是按可见数计；与管理员的截断行为一致。
+        cancelled = asyncio.Event()
+        req = self._viewer(_user("u1"),
+                           {"u1": {"catalog:tv", "catalog:movie"}})
+        t0 = time.monotonic()
+        with patch.object(providers, "_dispatch_search",
+                          new=AsyncMock(
+                              side_effect=self._dispatch(1.5, cancelled))):
+            cards = await appmod.online_search("受限截断", None, request=req)
+        elapsed = time.monotonic() - t0
+        self.assertTrue(cancelled.is_set())
+        self.assertFalse(any(t.startswith("慢片") for t in self._titles(cards)))
+        self.assertEqual(len(cards), 10)  # 10 组快片归并结果
+        self.assertLess(elapsed, 4.0)
+
     async def test_online_search_cache_isolated_per_viewer(self):
         # 同一关键词先后被受限账号与管理员搜：缓存按查看者分键，
         # 谁先搜都不污染对方的聚合结果（受限的截断/完整结果不漏给管理员，
