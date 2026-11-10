@@ -120,5 +120,38 @@ class BuildWorkflowTagTests(unittest.TestCase):
                 self.assertIn("FAIL", proc.stdout)
 
 
+    @unittest.skipUnless((REPO / "tools/check_tag_version.py").exists(),
+                          "公开构建已剥离 tools/，校验脚本不存在时跳过")
+    def test_check_tag_version_no_tag_skips_ok(self):
+        # P1-23(6)：无 tag 输入（且环境里无 GITHUB_REF_NAME）直接测脚本本身：
+        # 返回 0 并打印 SKIP，不依赖 workflow 的 if 兜底。
+        env = dict(os.environ)
+        env.pop("GITHUB_REF_NAME", None)
+        proc = subprocess.run(
+            [sys.executable, "tools/check_tag_version.py"],
+            cwd=REPO, capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("SKIP", proc.stdout)
+
+    @unittest.skipUnless((REPO / "tools/check_tag_version.py").exists(),
+                          "公开构建已剥离 tools/，校验脚本不存在时跳过")
+    def test_check_tag_version_rejects_bad_and_mismatched_tags(self):
+        # P1-23(6)：非法格式与版本不匹配都返回非零并打印 FAIL。
+        version = (REPO / "VERSION").read_text(
+            encoding="utf-8").splitlines()[0].strip()
+        env = dict(os.environ)
+        env.pop("GITHUB_REF_NAME", None)
+        for tag in ("v1.2-fpk", "v1.2.3", "not-a-tag",
+                    "v9.9.9-fpk", f"v{version}-beta"):
+            proc = subprocess.run(
+                [sys.executable, "tools/check_tag_version.py",
+                 "--tag", tag],
+                cwd=REPO, capture_output=True, text=True, timeout=60,
+                env=env)
+            self.assertNotEqual(proc.returncode, 0,
+                                f"{tag}: {proc.stdout}")
+            self.assertIn("FAIL", proc.stdout, tag)
+
+
 if __name__ == "__main__":
     unittest.main()
