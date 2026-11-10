@@ -119,7 +119,7 @@ sudo bash deploy/install.sh
 | `hot_library_enabled` | 开 | 在线热门四库（豆瓣榜单） |
 | `catalog_library_enabled` | 开 | 海量分类四库 + 纪录片/4K/短剧/海外剧集/AI漫剧/TED学习 |
 | `follow_enabled` | 开 | 追剧提醒（收藏的剧集数变多时提醒） |
-| `source_health_enabled` | 开 | 源健康自动降级（连续失败 3 次，冷却 15 分钟内搜索跳过） |
+| `source_health_enabled` | 开 | 源健康自动降级（连续失败 5 次，冷却 3 分钟内搜索跳过） |
 | `domain_heal_enabled` | 开 | 域名自愈（主域名失效时按 `source_domain_backups` 自动试备用域名） |
 | `metadata_enabled` | 开 | 收藏元数据补全（同名其他源补齐空字段，不改已有值） |
 | `related_enabled` | 开 | 详情页关联作品（详情下方挂 recommendations，同系列/同分类优先；字段名按官方详情嵌套相关推荐数组的公开观察推断，是否渲染以真机实测为准） |

@@ -25,9 +25,9 @@ _LOCK = threading.RLock()
 # 连续失败达到阈值进入“死亡冷却”：该窗口内该源降权/可被跳过。
 # 搜索级与取流级分开记：搜索域正常时取流域仍可能整片不可达，反之亦然，
 # 两级共用同一计数会互相误杀（取流抖动拖垮搜索、搜索抖动拖垮播放）。
-# 搜索级（默认）：3 次失败 / 冷却 15 分钟，行为与拆分前完全一致。
-DEAD_FAILS = 3
-DEAD_COOLDOWN = 15 * 60          # 判死后冷却 15 分钟，之后给一次试探
+# 搜索级（默认，上游 v0.2.71）：5 次失败 / 冷却 3 分钟，与取流级数值一致但独立计数。
+DEAD_FAILS = 5
+DEAD_COOLDOWN = 3 * 60           # 判死后冷却 3 分钟，之后给一次试探
 # 取流级（上游 v0.2.70）：5 次失败 / 冷却 3 分钟。
 STREAM_DEAD_FAILS = 5
 STREAM_DEAD_COOLDOWN = 3 * 60
@@ -148,7 +148,7 @@ def stats(key: str) -> dict:
 
 def is_dead(key: str, now: float | None = None,
             level: str = "search") -> bool:
-    """本级死亡冷却窗内返回 True。level 默认为 "search"（搜索级 3 次/15 分钟）；
+    """本级死亡冷却窗内返回 True。level 默认为 "search"（搜索级 5 次/3 分钟）；
     取流熔断传 level="stream"（5 次/3 分钟）。"""
     _, dead_key, _, _ = _level_fields(level)
     now = now if now is not None else time.time()

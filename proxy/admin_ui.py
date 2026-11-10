@@ -485,7 +485,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
       <div class="card">
         <div class="card-title">源健康画像
-          <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 15 分钟</span>
+          <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 3 分钟</span>
           <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
         </div>
         <table>
