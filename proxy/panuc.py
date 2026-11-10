@@ -680,6 +680,120 @@ def list_dir(fid: str = "") -> dict:
     return {"fid": fid, "title": "转存目录 · " + SAVE_DIR, "items": items}
 
 
+# ------------------------------------------------- 过期转存清理（P1-8）
+# 与 pan.py（夸克）同一设计，见该文件注释：上游只有调用点、实现 fork
+# 自写；年龄以云端 file/sort 条目的 created_at 为准，无可信时间戳永不删；
+# 只删 SAVE_DIR 内的过期文件，不碰目录与 SAVE_DIR 以外的位置。
+_CLEANUP_PAGE_SIZE = 200
+_CLEANUP_MAX_PAGES = 50  # 最多扫 10000 条，防异常大目录拖垮清理
+_CLEANUP_DELETE_BATCH = 50
+_CLEANUP_TS_FIELDS = ("created_at", "updated_at", "file_created_at")
+
+
+def _created_ts(item: dict, now: int | None = None) -> int | None:
+    """取云端文件条目的创建时间（epoch 秒）。毫秒时间戳自动折算；
+    数字串与 ISO 8601 也接受；取不到或不在合理范围返回 None。"""
+    import datetime as _dt
+    now = _now() if now is None else int(now)
+    for key in _CLEANUP_TS_FIELDS:
+        v = item.get(key)
+        if v is None or v == "":
+            continue
+        ts = None
+        if isinstance(v, (int, float)):
+            ts = float(v)
+        elif isinstance(v, str):
+            s = v.strip()
+            if s.replace(".", "", 1).isdigit():
+                ts = float(s)
+            else:
+                try:
+                    ts = _dt.datetime.fromisoformat(
+                        s.replace("Z", "+00:00")).timestamp()
+                except Exception:
+                    continue
+        else:
+            continue
+        if ts > 1e12:  # 毫秒时间戳
+            ts /= 1000.0
+        if 946684800 <= ts <= now + 3600:  # 2000-01-01 至今 +1h 容差
+            return int(ts)
+    return None
+
+
+def _list_save_dir_files(cookie: str) -> list[dict]:
+    """分页列出 SAVE_DIR 内的全部条目（原始 file/sort 记录）。"""
+    fid = save_dir_fid(cookie)
+    out: list[dict] = []
+    for page in range(1, _CLEANUP_MAX_PAGES + 1):
+        j = _pc("GET", f"{BASE}/file/sort?pr={_PR}&fr=pc", cookie,
+                params={"pdir_fid": fid, "_page": page,
+                        "_size": _CLEANUP_PAGE_SIZE, "_fetch_total": 1,
+                        "_sort": "file_name:asc"})
+        lst = (j.get("data") or {}).get("list") or []
+        out.extend(lst)
+        if len(lst) < _CLEANUP_PAGE_SIZE:
+            break
+    return out
+
+
+def _delete_fids(cookie: str, fids: list[str]) -> None:
+    """批量删除云端文件（UC 网页端 file/delete，action_type=2 移入回收站）。
+    失败抛 PanError，由调用方按批计数、不中断其余批次。"""
+    _pc("POST", f"{BASE}/file/delete?pr={_PR}&fr=pc", cookie,
+        json={"action_type": 2, "fid_list": list(fids), "exclude_fids": []})
+
+
+def cleanup_expired(ttl_seconds: int = 6 * 3600,
+                    now: int | None = None) -> dict:
+    """删除 SAVE_DIR 内超过 TTL 的转存文件。
+
+    返回 {deleted, freed(字节), kept, unknown(无可信时间戳而保留),
+    errors}；未登录返回全 0；内部失败不抛异常（只记 error 字段），
+    绝不影响正常播放。过期判定：年龄 > TTL（年龄恰好等于 TTL 保留）。
+    ttl_seconds 须 > 0，否则 ValueError。
+    """
+    result = {"deleted": 0, "freed": 0, "kept": 0, "unknown": 0, "errors": 0}
+    if ttl_seconds is None or int(ttl_seconds) <= 0:
+        raise ValueError("ttl_seconds 须 > 0")
+    if not logged_in():
+        return result
+    now = _now() if now is None else int(now)
+    cutoff = now - int(ttl_seconds)
+    try:
+        cookie = _active_cookie()
+        items = _list_save_dir_files(cookie)
+    except Exception as exc:  # noqa: BLE001
+        result["errors"] += 1
+        result["error"] = f"{type(exc).__name__}: {exc}"
+        return result
+    expired: list[dict] = []
+    for it in items:
+        if it.get("dir"):
+            continue  # 目录永不删除
+        ts = _created_ts(it, now)
+        if ts is None:
+            result["unknown"] += 1
+            result["kept"] += 1
+            continue
+        if ts < cutoff:
+            expired.append(it)
+        else:
+            result["kept"] += 1
+    for i in range(0, len(expired), _CLEANUP_DELETE_BATCH):
+        batch = expired[i:i + _CLEANUP_DELETE_BATCH]
+        try:
+            _delete_fids(cookie, [it.get("fid") for it in batch
+                                  if it.get("fid")])
+        except Exception:  # noqa: BLE001
+            result["errors"] += len(batch)
+            result["kept"] += len(batch)
+            continue
+        result["deleted"] += len(batch)
+        result["freed"] += sum(int(it.get("size") or 0) for it in batch)
+    return result
+
+
 # v2/play 各档优先级：super=原画（与源文件等大），其后按清晰度递减。
 _PLAY_RES_ORDER = ("super", "2k", "4k", "high", "normal", "low")
 

@@ -213,6 +213,13 @@ DEFAULTS = {
     # 检查/下载插件更新安装包时可选的 HTTP(S) 代理（仅更新用途）。
     # 留空则回退 subscription_proxy，再不行直连。仅存于本机 state，不随包分发。
     "update_proxy": "",
+    # —— 网盘过期转存清理（P1-8，与上游调用点默认值一致）——
+    # 默认开启：转存只是可随时重新生成的缓存副本，过期不清理会无限占用
+    # 用户网盘空间；TTL 6h：覆盖一次正常观影（点播时实时换链，清理只删
+    # 云端副本、不碰进行中的播放会话），又不至于让缓存长期堆积。
+    # 清理每小时跑一次（lifespan 内 _pan_cache_loop），开关关则不跑。
+    "pan_cache_cleanup_enabled": True,
+    "pan_cache_ttl_hours": 6,
     # m3u8 流层去广告总开关（TVBox/OK影视 Pro rules 引擎 + 通用启发式）。
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。

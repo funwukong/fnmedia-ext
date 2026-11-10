@@ -2279,6 +2279,51 @@ def b64d(s: str) -> str:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4)).decode()
 
 
+async def _pan_cache_cleanup_once() -> dict:
+    """对已登录的夸克/UC 各执行一次过期转存清理（P1-8）。
+
+    调用点照搬上游 app.py:805-866（开关 pan_cache_cleanup_enabled 默认开、
+    TTL pan_cache_ttl_hours 默认 6h、每小时跑一次）；但上游把
+    @asynccontextmanager 误贴在这个普通 async 函数上（它没有 yield，
+    await 调用会 TypeError，循环里的 except 会静默吞掉、清理实际从不跑），
+    这里不抄那个装饰器。开关除循环里判断外，在这里也再判一次（单点关口，
+    直接调本函数同样受开关约束）。执行实现是 fork 自写的
+    pan/panuc.cleanup_expired；公开构建已删除 pan/panuc 模块时跳过。
+    单模块失败只记日志，不影响播放。
+    """
+    out = {}
+    try:
+        cfg = config.get()
+    except Exception:
+        return out
+    if not bool(cfg.get("pan_cache_cleanup_enabled", True)):
+        return out
+    try:
+        ttl = int(float(cfg.get("pan_cache_ttl_hours", 6) or 6)) * 3600
+    except (TypeError, ValueError):
+        ttl = 6 * 3600
+    for name, modname in (("quark", "pan"), ("uc", "panuc")):
+        try:
+            mod = __import__(modname)
+        except Exception:
+            continue
+        try:
+            if not getattr(mod, "logged_in", lambda: False)():
+                continue
+            res = await asyncio.to_thread(mod.cleanup_expired, ttl)
+            if res and res.get("deleted"):
+                _log.info("网盘缓存清理 %s 删除=%d 释放=%.1fMB",
+                          name, res.get("deleted", 0),
+                          res.get("freed", 0) / 1048576)
+            if res and res.get("error"):
+                _log.info("网盘缓存清理 %s 出错 errors=%s error=%s",
+                          name, res.get("errors", 0), res.get("error"))
+            out[name] = res
+        except Exception:
+            _log.info("网盘缓存清理失败 %s", name, exc_info=True)
+    return out
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.up = httpx.AsyncClient(
@@ -2288,6 +2333,21 @@ async def lifespan(app: FastAPI):
         timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
     app.state.stop_hot = asyncio.Event()
     app.state.hot_task = asyncio.create_task(_hot_worker(app))
+
+    # 网盘转存缓存定时清理（默认保留 6h，每小时检查；配置关闭则不跑）。
+    async def _pan_cache_loop():
+        try:
+            await asyncio.sleep(90)  # 启动后等服务稳定再首轮
+            while True:
+                try:
+                    if bool(config.get().get("pan_cache_cleanup_enabled", True)):
+                        await _pan_cache_cleanup_once()
+                except Exception:
+                    pass
+                await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+    app.state.pan_cache_task = asyncio.create_task(_pan_cache_loop())
 
     # 方案B（上游 v0.2.69 chartbind）：persist 模式下从磁盘恢复榜单绑定（线路），
     # 重启后热门片无需重新全网搜源。恢复的绑定只作起播种子，起播仍走竞速。
@@ -2359,6 +2419,10 @@ async def lifespan(app: FastAPI):
     finally:
         app.state.stop_hot.set()
         app.state.hot_task.cancel()
+        try:
+            app.state.pan_cache_task.cancel()
+        except Exception:
+            pass
         # >>> PRIVATE:GUARD
         try:
             app.state.stop_guard_native.set()
@@ -10078,6 +10142,7 @@ async def ext_set_config(request: Request):
         "line_fastest_prefer", "line_autofail",
         "main_ready_budget",  # 慢线起播预算（秒），改后需重启进程才生效
         "prewarm_mode",
+        "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
         "update_proxy",
     }
     # >>> PRIVATE:CATVOD
@@ -10104,6 +10169,16 @@ async def ext_set_config(request: Request):
     if "update_proxy" in patch:
         pu = str(patch["update_proxy"]).strip()[:300]
         patch["update_proxy"] = pu if re.match(r"^(https?|socks5h?)://", pu) else ""
+    if "pan_cache_ttl_hours" in patch:
+        try:
+            # 允许 1 小时 ~ 30 天（与上游钳制一致）
+            patch["pan_cache_ttl_hours"] = max(
+                1, min(720, int(float(patch["pan_cache_ttl_hours"]))))
+        except (TypeError, ValueError):
+            patch.pop("pan_cache_ttl_hours", None)
+    if "pan_cache_cleanup_enabled" in patch:
+        patch["pan_cache_cleanup_enabled"] = bool(
+            patch["pan_cache_cleanup_enabled"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}
