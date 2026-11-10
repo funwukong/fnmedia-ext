@@ -2,10 +2,56 @@
 
 本文件记录 fnmedia-ext（飞牛影视在线扩展）每个版本的更新内容，最新版本在最前。
 
-## v1.1.0 — 未发布
+## v1.1.0 — 2026-11-10（P0/P1 优化 + 续播修复 + 多用户 fail-open 回归）
 
+自 v0.2.42 以来的全部改动（上游 v1.0.0 之后无新提交，fork 已追平）。
+
+### 续播记忆修复（三轮）
+
+- 播放记录无记忆：第 1 轮修文件夹/季卡 guid 归一化到标题 + 标题级位置回填第 1 集；第 2 轮修 `play/record` 守门只认标题/集 guid——客户端若用 video/media guid 上报会被透传丢掉，现三个字段任一能解析就算；第 3 轮修两处：(a) 真实 duration——CMS 的 `vod_duration`（兼容 `vod_length`/`duration`，支持秒数/`45分钟`/`01:30:00` 形态）此前根本没取，现取了；没有则从 HLS 清单 EXTINF 求和兜底（不新增请求，2 秒上限，按集缓存、随 `titles.json` 持久化），接进 play/info、stream/list 与继续观看；(b) 跨线身份统一——同一集的历史身份改成“归一化标题 + 季 + 集号”，换线路（ffzy↔dytt）也能接上，旧记录读时迁移、不丢数据。诊断端点 `GET /v/api/ext/diag/resume`（内存最近 20 条续播事件 + 按分区查记录，info 带 duration、record 带规范键）。
+- 首页收藏失败：第 1 轮修文件夹卡 guid（`fnmedia-line-folder:<og>`）不被收藏端点识别、直通官方返回 -6 的问题，现归一化到标题；收藏按账号分区存储。
+
+### 搜索与过滤
+
+- 搜索早返回按**可见**数算（≥25 条且 ≥0.8 秒）：受限账号不再因早返回系统性变空；缓存键按查看者拆分。
+- 每请求 ViewerContext：一次搜索的配置全量深拷贝从约 70–100 次降到个位数。
+- 收藏/继续观看/播放链按库过滤（play/info、stream、play/play、分片代理、T4、红果均加库检查，沿用 -6 未授权模式）；收藏按账号分区，与 history 分区机制一致。
+- libfilter 扩展分类库缺口：brief 补 `catalog_route` 字段，11 个扩展分类库（纪录片/4K/短剧/海外/AI 漫剧/TED/扩展资源等）进入搜索过滤并集；修正 `type_name` 含“纪录片”被错归 `catalog:movie`。
+- 搜索聚合缓存合并为单层（TTL 统一 180 秒），去重改任务身份集合；`budget=None if timeout` 死三元清理。
 - 搜索级判死阈值对齐上游 v0.2.71：连续失败 5 次 / 冷却 3 分钟（原 3 次 / 15 分钟）；取流级仍为 5 次 / 3 分钟，两级继续独立计数、独立复活。
-- **多用户默认行为改回 fail-open**：decisions-2 曾把 `acl_default_visible` / `acl_default_online` 默认改成 fail-closed（未知身份/未配置账号默认隐藏），现改回上游原样的 fail-open（两项默认 `True`，未知身份按默认开关处理）；已在真机跑过 v1→v2 迁移、两项已落盘为 `False` 的存量配置，首次加载经 v2→v3 迁移一次性翻回 `True` 并写回版本 3，之后手动改回 `False` 会保留。想改回隐藏：管理页“子账号可见权限”里关掉“未设置过权限的账号默认能看到虚拟库”，或把配置 `acl_default_visible` 改为 `false`。
+
+### 订阅、网盘与海报
+
+- XML 订阅源：补 `parse_cms_xml` 解析（映射为同一 `{code:1, list:[...]}` 结构），`/at/xml` 搜索/探测分流，`add_source` 入库自动归一 `/at/xml`→`/at/json`。
+- 网盘过期转存清理（自写实现，上游只有调用点、无执行实现）：每小时循环（启动 90 秒后开始）、开关默认开、TTL 默认 6 小时，只删带可信 created_at 时间戳的过期文件，永不删目录、无时间戳不删、失败不抛。删除端点形状按夸克/UC 网页端惯例推断，**需真机 + 真实网盘账号验证**。
+- 海报重试收敛：网络异常最坏从 7 次 GET 降到 ≤3 次；无服务端缓存（有意设计，与上游一致）；403 带图床自身 origin 作 Referer 的重试保留。
+
+### 配置、迁移与清理
+
+- `main_ready_budget`（慢线预算，默认 2.4 秒，夹取 [0.8, 2.8]）进 DEFAULTS：管理页 POST 真正生效、改值无需重启。
+- CONFIG_VERSION 稳健解析：接受 int、整数 float、`"2"`、`"2.0"`，不可解析时记警告、跳过破坏性迁移、只规范化版本号；降级记警告、保留原值；迁移分支加日志。
+- 死配置开关接线：`source_health_enabled` 门控源健康降级（跳过死源 + 全部 `record()` 调用）；`domain_heal_enabled` 门控唯一的自愈调用点。注意：两开关不在 `POST /v/api/ext/config` 白名单内，管理页不能直接切换。
+- 死函数清理 16 个；日志噪音降级（中间件与 mediadb/list 采样 1/100，慢/错必记）；夸克/UC 四个重复函数（`_auth_cookie`/`_api`/`_fresh`/`_pc`）抽公共。
+- 慢线 future 异常取回并记日志/计数，done 回调 pop 时校验仍是同一 future 才删；`_MAIN_SERVE_FUT` 异常取回与 stale-pop 竞态补测试。
+
+### 性能
+
+- 分类深翻有界并发 4（页顺序保持不变）；标题存储改脏跟踪写盘（不再每 5 秒静默期满全量写 MB 级 `titles.json`）；fnusers 锁外查库（锁内只换缓存）。
+
+### 管理页与 CI
+
+- 资源站分页（20/页）+ 筛选、开关失败回滚状态、切出总览页后 3 秒轮询停止；默认权限开关显示与后端一致。
+- CI：Release 步 dispatch 时派生 `TAG="v$(VERSION)-fpk"`（之前拼错成 `v<VERSION>`）；full 冒烟覆盖全部新合入测试，两 smoke 脚本公共逻辑合并为 `tools/smoke_common.py`；full/public 两 job 加 tag/VERSION 一致性校验与 fnpack sha256 校验；`check_tag_version.py` 无 tag 时返回 0 SKIP。
+- 测试：全量 766 通过（v0.2.42 时 373）；新增覆盖 `_gkey_of_source` 真实路径、fnusers 缓存/TTL/淘汰、CONFIG_VERSION 矩阵、慢线 future 异常、早返回 × 受限账号组合等盲区。
+
+### 多用户与版本
+
+- **多用户默认行为改回 fail-open**：decisions-2 曾把 `acl_default_visible` / `acl_default_online` 默认改成 fail-closed（未知身份/未配置账号默认隐藏），现改回上游原样的 fail-open（两项默认 `True`，未知身份按默认开关处理）；已在真机跑过 v1→v2 迁移、两项已落盘为 `False` 的存量配置，首次加载经 v2→v3 迁移一次性翻回 `True` 并写回版本 3，之后手动改回 `False` 会保留。想改回隐藏：管理页“子账号可见权限”里关掉“未设置过权限的账号默认能看到虚拟库”，或把配置 `acl_default_visible` 改为 `false`。过滤机制本身（libfilter、按库过滤、已配置白名单）全部保留。
+- 版本号对齐：0.2.42 → **1.1.0**（fork 基线 = 上游 1.0.0 + 大量 fork 功能；1.1.0 既对齐上游 1.x、又不冒充上游 1.0.0）。
+
+### 未动
+
+- Turbo 播放竞速冻结（`_race_fastest` 与四个打分常量零改动）；冻结五项（固定线直出、零竞速秒播、播放中静默换线、浏览时探活、海报角标）；P2 项（except 收敛、app.py 拆分、README 补齐等）；`/v/api/ext/*` 写端点仍无鉴权门（已明确决定不加）；收藏/已看的跨线碎裂（与历史同源，需另开任务）；跨形态取消收藏缺口（PUT 标题 guid 收藏、DELETE 用 video guid 取消时删不掉）。
 
 ## v0.2.42 — 2026-11-09（海报修复 + 多用户上游设计 + 上游 v1.0.0 移植 + 缺口补齐）
 
