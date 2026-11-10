@@ -82,6 +82,21 @@ jobs:
           curl -fsSL -o .tools/fnpack "$FNPACK_URL"
           chmod +x .tools/fnpack
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 冒烟：先组装并剥离出暂存树，验证剥离后的树能启动、测试子集能过，
+      # 再正式打包。打包步骤会重新组装一次，与冒烟用的是同一份源码。
+      - name: 组装并剥离(公开构建，暂存)
+        run: bash packaging/fpk/build.sh --public --stage-only packaging/fpk/.build/fpk --fnpack "$PWD/.tools/fnpack"
+
+      - name: 安装冒烟依赖
+        run: python -m pip install -q -r packaging/fpk/.build/fpk/app/repo/requirements-dev.txt
+
+      - name: 冒烟：剥离后启动验证
+        run: python3 tools/post_strip_smoke.py packaging/fpk/.build/fpk/app/repo
+
       - name: 打包(公开构建,剥离私有特性)
         run: bash packaging/fpk/build.sh --public --fnpack "$PWD/.tools/fnpack"
 
