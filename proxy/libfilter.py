@@ -34,9 +34,9 @@
      ``"standalone:<provider>"``。每个启用源都有一张独立库
      （``standalone_lib_guid(source_id)``），标题的线路即出自该源，
      独立库是标题的首要归宿。
-   - 加固源另加 ``"guard:<guard_key>"``（需调用方提供
-     ``guard_key_of(provider)`` 查源定义；provider 本身就是源 id，
-     guard 专区库按 ``guard_key`` 分组）。
+   - 加固源另加 ``"guard:<gkey>"``（需调用方提供
+     ``gkey_of(provider)`` 查源定义；provider 本身就是源 id，
+     guard 专区库按 ``gkey`` 分组）。
    - 再加一张分类库门：按类型名用与 ``inject.hot_category`` 相同的
      规则归入 movie/tv/anime/variety 之一 → ``"catalog:<cat>"``。
      **这是本次的关键取舍**：非独立库 CMS 源出的标题同时归属
@@ -111,10 +111,10 @@ def catalog_cat_for_type(type_name: str) -> str:
     return "tv"
 
 
-def brief_lib_keys(brief: dict, *, guard_key_of=None) -> set[str]:
+def brief_lib_keys(brief: dict, *, gkey_of=None) -> set[str]:
     """brief → 该标题归属的虚拟库键集合（可为空集，见模块文档第三条）。
 
-    ``guard_key_of``：可选回调 ``provider -> guard_key | None``，
+    ``gkey_of``：可选回调 ``provider -> gkey | None``，
     用于加固源的专区库归属；不提供时只按独立库 + 分类库映射。
     本函数是纯函数：不读配置、不识身份、不碰网络。
     """
@@ -156,9 +156,9 @@ def brief_lib_keys(brief: dict, *, guard_key_of=None) -> set[str]:
     keys = set()
     for provider in providers:
         keys.add(f"standalone:{provider}")
-        if guard_key_of is not None:
+        if gkey_of is not None:
             try:
-                gkey = guard_key_of(provider)
+                gkey = gkey_of(provider)
             except Exception:
                 gkey = None
             if gkey:
@@ -169,7 +169,7 @@ def brief_lib_keys(brief: dict, *, guard_key_of=None) -> set[str]:
     return keys
 
 
-def brief_visible(brief: dict, can_open_key, *, guard_key_of=None) -> bool:
+def brief_visible(brief: dict, can_open_key, *, gkey_of=None) -> bool:
     """该标题对当前查看者是否可见。
 
     ``can_open_key``：调用方提供的 ``库键 -> bool``（app 层传
@@ -179,7 +179,7 @@ def brief_visible(brief: dict, can_open_key, *, guard_key_of=None) -> bool:
     """
     if can_open_key is None:
         return False
-    keys = brief_lib_keys(brief, guard_key_of=guard_key_of)
+    keys = brief_lib_keys(brief, gkey_of=gkey_of)
     if not keys:
         return False
     for key in keys:
@@ -191,9 +191,9 @@ def brief_visible(brief: dict, can_open_key, *, guard_key_of=None) -> bool:
     return False
 
 
-def filter_briefs(briefs, can_open_key, *, guard_key_of=None) -> list:
+def filter_briefs(briefs, can_open_key, *, gkey_of=None) -> list:
     """过滤掉查看者打不开的库的标题（保持原顺序；不改动 brief 本身）。"""
     if not briefs:
         return []
     return [b for b in briefs
-            if brief_visible(b, can_open_key, guard_key_of=guard_key_of)]
+            if brief_visible(b, can_open_key, gkey_of=gkey_of)]

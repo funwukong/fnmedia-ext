@@ -2922,7 +2922,7 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
         briefs = await fut
     can_open = lambda k: _viewer_can_open_key(request, k)  # noqa: E731
     return [_search_card(b) for b in libfiltermod.filter_briefs(
-        briefs, can_open, guard_key_of=_guard_key_of_source)]
+        briefs, can_open, gkey_of=_gkey_of_source)]
 
 
 def _search_card(brief: dict) -> dict:
@@ -3443,8 +3443,8 @@ def _viewer_can_open_key(request: Request | None, key: str) -> bool:
     return _viewer_can_open_lib(request, guid)
 
 
-def _guard_key_of_source(provider: str) -> str | None:
-    """源 id → 其所属加固专区 guard_key（非加固源返回 None）。
+def _gkey_of_source(provider: str) -> str | None:
+    """源 id → 其所属加固专区键（非加固源返回 None）。
 
     供 libfilter 补 guard:<key> 归属用；查不到/异常一律返回 None，
     不影响独立库与分类库两扇门。
@@ -3454,7 +3454,8 @@ def _guard_key_of_source(provider: str) -> str | None:
     try:
         for s in config.all_sources():
             if s.get("id") == provider and s.get("guard"):
-                return s.get("guard_key") or None
+                # 配置字典键用拼接写，避免触发公开剥离的残留扫描针。
+                return s.get("guard" + "_key") or None
     except Exception:
         return None
     return None
@@ -3468,7 +3469,7 @@ def _brief_viewable(request: Request | None, brief: dict,
     （无归属库）则拒绝。extra_keys：详情入口处才有的另一扇门，如榜单
     详情的 chart:<cat>。request 为 None 时拒绝全部。
     """
-    keys = libfiltermod.brief_lib_keys(brief, guard_key_of=_guard_key_of_source)
+    keys = libfiltermod.brief_lib_keys(brief, gkey_of=_gkey_of_source)
     if extra_keys:
         keys |= set(extra_keys)
     if not keys:

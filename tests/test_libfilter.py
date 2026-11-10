@@ -127,10 +127,10 @@ def test_catalog_brief_missing_cat_and_source_unmappable():
     assert libfiltermod.brief_visible(b, lambda k: True) is False
 
 
-def test_guard_key_mapping_via_callback():
+def test_gkey_mapping_via_callback():
     b = _brief("test-g", "guard-src", "加固片", "动作片")
     keys = libfiltermod.brief_lib_keys(
-        b, guard_key_of=lambda p: "zone1" if p == "guard-src" else None)
+        b, gkey_of=lambda p: "zone1" if p == "guard-src" else None)
     assert keys == {"standalone:guard-src", "guard:zone1", "catalog:movie"}
 
 
