@@ -101,6 +101,8 @@ class BuildWorkflowTagTests(unittest.TestCase):
                     tag = called[0].split()[3]
                     self.assertEqual(tag, expected, f"{job}/{label}")
 
+    @unittest.skipUnless((REPO / "tools/check_tag_version.py").exists(),
+                          "公开构建已剥离 tools/，校验脚本不存在时跳过")
     def test_check_tag_version_accepts_fpk_and_rejects_bare(self):
         version = (REPO / "VERSION").read_text(
             encoding="utf-8").splitlines()[0].strip()

@@ -23,6 +23,8 @@ import 检查、pytest 子集）由本文件传入，见 ``main()``。剥离版�
 兼容子集的排除项（按构造不兼容，不是按“这次没过”）：
   - tests/test_public_strip.py：它 import 已剥离的 tools/ 剥离器；
   - tests/test_verify_tls.py：它 import 已剥离的网盘模块；
+  - tests/test_p1_pan_cleanup.py、tests/test_pan_shared.py：同上，
+    测的是已剥离的网盘模块（P1-8/P1-15），公开构建里无此模块可 import；
   - 名含 dduo_probe_source 的两个测试：它们直接调已剥离的私有源探测函数。
 
 注意：本文件故意不出现任何残留扫描的原样关键字（针列表见剥离器源码），
@@ -100,6 +102,8 @@ _PYTEST_CMD = [
     "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider",
     "--ignore=tests/test_public_strip.py",
     "--ignore=tests/test_verify_tls.py",
+    "--ignore=tests/test_p1_pan_cleanup.py",
+    "--ignore=tests/test_pan_shared.py",
     "-k", "not dduo_probe_source",
 ]
 
