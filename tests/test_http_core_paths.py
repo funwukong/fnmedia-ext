@@ -159,8 +159,8 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
             item = patch.object(module, name, value)
             item.start()
             self.addCleanup(item.stop)
-        # fail-closed（decisions-2-failclosed）：未识别会话看不到虚拟库、
-        # 不能在线搜索；本类测的是核心路径全流程，以管理员身份请求。
+        # fail-open：未识别会话默认可见；本类测的是核心路径全流程，
+        # 以管理员身份请求。
         _admin = patch.object(appmod.fnusersmod, "resolve", return_value={
             "known": True, "guid": "admin-guid", "name": "admin",
             "is_admin": True, "token": "tok-admin"})

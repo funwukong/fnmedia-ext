@@ -41,8 +41,8 @@ class IngressTests(unittest.IsolatedAsyncioTestCase):
             item = patch.object(appmod, name, value)
             item.start()
             self.addCleanup(item.stop)
-        # fail-closed（decisions-2-failclosed）：未识别会话看不到虚拟库；
-        # 本类测的是 ingress 透传与榜单契约，以管理员身份请求。
+        # fail-open：未识别会话默认可见；本类测的是 ingress 透传与
+        # 榜单契约，以管理员身份请求。
         item = patch.object(appmod.fnusersmod, "resolve", return_value={
             "known": True, "guid": "admin-guid", "name": "admin",
             "is_admin": True, "token": "tok-admin"})
