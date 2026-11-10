@@ -326,6 +326,76 @@ def _parse_play(vod_play_from: str, vod_play_note: str, vod_play_url: str,
     return out
 
 
+def _xml_text(elem) -> str:
+    """取 XML 元素文本（自动解 CDATA），无则空串。"""
+    if elem is None:
+        return ""
+    return (elem.text or "").strip()
+
+
+def parse_cms_xml(text: str) -> dict | None:
+    """把苹果 CMS 的 at/xml 响应（RSS）转成与 at/json 等价的 dict：
+    {code:1, list:[ {vod_id, vod_name, vod_play_from, vod_play_url, ...} ]}。
+
+    XML 用 <video> 元素、子标签名（id/name/pic/year/...、<dl><dd flag>），
+    JSON 用 vod_ 前缀字段；这里统一映射，后续 _map_vod 无需区分格式。
+    来源：上游 providers.py parse_cms_xml（166-229 行），fork 原样补齐。
+    """
+    if not text or not text.lstrip().startswith("<"):
+        return None
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(text)
+    except Exception:
+        return None
+    # 根可能是 <rss>，列表在其下 <list>；也兼容直接 <list>
+    list_node = root.find(".//list")
+    if list_node is None:
+        list_node = root if root.tag.lower() == "list" else None
+    if list_node is None:
+        return {"code": 1, "list": []}
+
+    def child(video, name):
+        el = video.find(name)
+        return _xml_text(el) if el is not None else ""
+
+    out = []
+    for video in list_node.findall("video"):
+        # 播放源：<dl><dd flag="m3u8"><![CDATA[ 第1集$url#第2集$url ]]></dd>
+        froms, groups = [], []
+        for dd in video.findall(".//dl/dd"):
+            flag = (dd.get("flag") or "").strip() or f"line{len(froms)+1}"
+            play = _xml_text(dd)
+            if not play:
+                continue
+            froms.append(flag)
+            groups.append(play)
+        vod = {
+            "vod_id": child(video, "id"),
+            "vod_name": child(video, "name"),
+            "type_name": child(video, "type"),
+            "vod_year": child(video, "year"),
+            "vod_area": child(video, "lang") or child(video, "area"),
+            "vod_time": child(video, "last"),
+            "vod_remarks": child(video, "note"),
+            "vod_score": child(video, "score"),
+            "vod_pic": child(video, "pic"),
+            "vod_content": child(video, "des") or child(video, "content")
+                           or child(video, "blurb"),
+            "vod_actor": child(video, "actor"),
+            "vod_director": child(video, "director"),
+            "vod_play_from": "$$$".join(froms),
+            "vod_play_note": "",
+            "vod_play_url": "$$$".join(groups),
+        }
+        out.append(vod)
+    return {"code": 1, "list": out}
+
+
+def _is_xml_api(api: str) -> bool:
+    return "/at/xml" in (api or "").lower()
+
+
 def _map_vod(v: dict, source: dict) -> OnlineTitle | None:
     sources = _parse_play(v.get("vod_play_from", ""), v.get("vod_play_note", ""),
                           v.get("vod_play_url", ""), _site_root(source["api"]))
@@ -385,7 +455,8 @@ async def search_source(client: httpx.AsyncClient, source: dict,
             if _health is not None:
                 _health.record(source.get("id", ""), False, time.monotonic() - _t0)
             return []
-        j = r.json()
+        # 苹果 CMS at/xml：RSS XML 响应，先转成与 at/json 等价的 dict
+        j = parse_cms_xml(r.text) if _is_xml_api(source["api"]) else r.json()
     except Exception as e:
         _log.warning("source search failed: id=%s error=%s elapsed=%.2fs",
                      source.get("id"), type(e).__name__, time.monotonic() - _t0)
@@ -535,7 +606,8 @@ async def probe_source(api: str, keyword: str = "庆余年",
                 return {"ok": False, "status": r.status_code,
                         "elapsed_ms": ms, "count": 0, "sample": "",
                         "error": f"HTTP {r.status_code}"}
-            j = r.json()
+            # 同时支持 at/json 与 at/xml（XML 先转等价 dict）
+            j = parse_cms_xml(r.text) if _is_xml_api(api) else r.json()
     except Exception as exc:
         return {"ok": False, "status": 0,
                 "elapsed_ms": int((time.monotonic() - t0) * 1000),
@@ -560,7 +632,7 @@ async def probe_source(api: str, keyword: str = "庆余年",
                 r2 = await client.get(
                     api, params={"ac": "list", "pg": 1},
                     headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
-                j2 = r2.json()
+                j2 = parse_cms_xml(r2.text) if _is_xml_api(api) else r2.json()
             if isinstance(j2, dict) and j2.get("code") in (1, "1"):
                 return {"ok": True, "status": 200, "elapsed_ms": ms,
                         "count": 0, "sample": "",
