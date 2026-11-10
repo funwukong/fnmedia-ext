@@ -90,9 +90,6 @@ JUNK_KEYWORDS = [
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
     "sources": [dict(s) for s in DEFAULT_SOURCES],
-    # T4 远程源（type=4）：导入订阅时收录的展示清单 [{name, api, ext}]。
-    # 本 fork 未接入 T4 协议，不能搜不能播，只显示；上游 v0.2.66 起才有 T4 选片库。
-    "t4_sources": [],
     # 被删除的内置源 id（自定义源删除时直接从 sources 移除）
     "removed_ids": [],
     "max_per_keyword": 12,
@@ -219,7 +216,7 @@ DEFAULTS = {
 }
 
 # 已废弃、需从旧配置里清除的键
-_DEPRECATED = {"public_base", "strm_root", "library_visible_users"}
+_DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources"}
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
