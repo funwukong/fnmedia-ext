@@ -31,6 +31,23 @@ CONFIG_VERSION = 2
 # 每次保存前保留的旧配置备份份数。
 BACKUP_KEEP = 5
 
+# 慢线起播预算（秒）：每次读取时夹取 [0.8, 2.8]，非法值回落默认值。
+MAIN_READY_BUDGET_DEFAULT = 2.4
+MAIN_READY_BUDGET_MIN = 0.8
+MAIN_READY_BUDGET_MAX = 2.8
+
+
+def clamp_main_ready_budget(raw) -> float:
+    """把任意输入归一化为慢线起播预算：非法/非有限值回落 2.4，否则夹取 [0.8, 2.8]。"""
+    import math
+
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return MAIN_READY_BUDGET_DEFAULT
+    if not math.isfinite(v):
+        return MAIN_READY_BUDGET_DEFAULT
+    return min(max(v, MAIN_READY_BUDGET_MIN), MAIN_READY_BUDGET_MAX)
 
 def _backup_dir() -> Path:
     return _STATE.parent / "backups"
@@ -119,6 +136,10 @@ DEFAULTS = {
     "line_fastest_timeout": 4.0,
     # 默认线（高质量源）领先优势（秒）：它在该优势内返回就算赢，避免无谓抖动
     "line_fastest_prefer": 0.25,
+    # 慢线起播预算（秒）：仅慢源（加固/爬虫/drpy/专有解码/小雅）main.m3u8
+    # 首个请求的最长等待；每次取 main 时实时读取并夹取 [0.8, 2.8]，
+    # 改值即时生效，无需重启。
+    "main_ready_budget": MAIN_READY_BUDGET_DEFAULT,
     # —— 本片线路预测（linepredict）：浏览海报时对首屏影片的少数候选线做轻量探活，
     # 预测出本片最快线并记忆，点播放零竞速秒播；取代旧的全局源测速 speedbench ——
     # 是否在海报/搜索列表阶段对可见影片做轻量预热
@@ -727,6 +748,18 @@ class Config:
             return m if m in ("off", "on", "auto") else "auto"
         except Exception:
             return "auto"
+
+    def main_ready_budget(self) -> float:
+        """慢线起播预算（秒）：每次实时读配置并夹取 [0.8, 2.8]，非法值回落 2.4。
+
+        配置加载是 DEFAULTS 深拷贝 + saved update，旧配置没有该键时
+        自动取默认值 2.4，无需迁移。
+        """
+        try:
+            return clamp_main_ready_budget(self.get().get(
+                "main_ready_budget", MAIN_READY_BUDGET_DEFAULT))
+        except Exception:
+            return MAIN_READY_BUDGET_DEFAULT
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
         with _LOCK:

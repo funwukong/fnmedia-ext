@@ -4,14 +4,13 @@
 - 慢线（drpy- 前缀）：预算到点先回占位 200，后台继续跑完并写缓存，下次轮询转正片；
   并发轮询共用一个 _MAIN_SERVE_FUT，底层只取一次。
 - 普通线：不受预算/单飞影响，慢速取流也会等到真清单。
-- 预算可配：main_ready_budget 改值生效，import 时夹在 [0.8, 2.8]。
+- 预算可配：main_ready_budget 改值即时生效（每次取 main 时实时读取），
+  读取时夹在 [0.8, 2.8]，非法值回落 2.4。
 """
 from __future__ import annotations
 
 import asyncio
-import json
 from contextlib import contextmanager
-import subprocess
 import sys
 import tempfile
 import time
@@ -56,9 +55,9 @@ async def _verify_ok(body, request, picked=None):
 
 @contextmanager
 def _budget(value):
-    # create=True：普通线测试在未移植代码上也应通过（预算与它无关），
-    # 此时 patch 临时建一个无读取的常量，测试按原路径行为断言。
-    with patch.object(appmod, "_MAIN_SLOW_BUDGET", value, create=True):
+    # 预算每次取 main 时实时读 _main_slow_budget()：测试直接替身该函数，
+    # 不依赖 import 时的模块常量（P1-10：常量已删，改为实时读配置）。
+    with patch.object(appmod, "_main_slow_budget", return_value=value):
         yield
 
 
@@ -254,8 +253,10 @@ class SlowLineBudgetTests(unittest.IsolatedAsyncioTestCase):
     # ---------- (e) 预算可配 ----------
 
     def test_default_budget_is_2_4(self):
-        # 全新配置没有 main_ready_budget：import 时默认值 2.4。
-        self.assertEqual(appmod._MAIN_SLOW_BUDGET, 2.4)
+        # 全新配置：DEFAULTS 自带 main_ready_budget=2.4，实时读即 2.4。
+        self.assertEqual(configmod.DEFAULTS["main_ready_budget"], 2.4)
+        self.assertEqual(self.config.get()["main_ready_budget"], 2.4)
+        self.assertEqual(appmod._main_slow_budget(), 2.4)
 
     async def test_budget_value_is_honored_live(self):
         calls = []
@@ -277,50 +278,32 @@ class SlowLineBudgetTests(unittest.IsolatedAsyncioTestCase):
             self._exit(stack)
 
     async def test_config_endpoint_accepts_main_ready_budget(self):
-        # 白名单 + 落盘：键已在配置文件里时，POST 能改值（与上游 save() 语义一致：
-        # 全新配置里没有该键时 save() 不会凭空建键，值靠 load() 的文件合并进入）。
-        state_path = Path(configmod._STATE)
-        cfg = json.loads(state_path.read_text(encoding="utf-8"))
-        cfg["main_ready_budget"] = 1.5
-        state_path.write_text(json.dumps(cfg, ensure_ascii=False))
-        self.config.load()
-        self.assertEqual(self.config.get()["main_ready_budget"], 1.5)
+        # 白名单 + 落盘 + 即时生效：全新配置已自带该键（DEFAULTS），POST 改值后
+        # _main_slow_budget() 立即读到新值，无需重启/重载模块。
+        self.assertEqual(self.config.get()["main_ready_budget"], 2.4)
         resp = await self.client.post("/v/api/ext/config",
                                       json={"main_ready_budget": 1.7})
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json().get("code"), 0)
         self.assertEqual(self.config.get()["main_ready_budget"], 1.7)
+        self.assertEqual(appmod._main_slow_budget(), 1.7)
 
-    def test_budget_clamped_at_import(self):
-        # import 时读取 + 夹取 [0.8, 2.8]：子进程里逐值重载 app，隔离主进程状态。
-        proxy_dir = str(Path(__file__).resolve().parents[1] / "proxy")
-        driver = (
-            "import importlib, json, os, sys\n"
-            "from pathlib import Path\n"
-            f"sys.path.insert(0, {proxy_dir!r})\n"
-            "import config as configmod\n"
-            "tmp = Path(sys.argv[1])\n"
-            "configmod._STATE = tmp / 'config.json'\n"
-            "import app as appmod\n"
-            "out = {}\n"
-            "for raw in (99, 0.1, 'junk', 1.5, None):\n"
-            "    (tmp / 'config.json').write_text(\n"
-            "        json.dumps({'main_ready_budget': raw}) if raw is not None else '{}')\n"
-            "    configmod.config.load()\n"
-            "    importlib.reload(appmod)\n"
-            "    out[repr(raw)] = appmod._MAIN_SLOW_BUDGET\n"
-            "print(json.dumps(out), flush=True)\n"
-            "os._exit(0)\n"
-        )
-        with tempfile.TemporaryDirectory() as tmp:
-            proc = subprocess.run(
-                [sys.executable, "-c", driver, tmp],
-                capture_output=True, text=True, timeout=180,
-                cwd=str(Path(__file__).resolve().parents[1]))
-            self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
-            got = json.loads(proc.stdout.strip().splitlines()[-1])
-        self.assertEqual(got, {"99": 2.8, "0.1": 0.8, "'junk'": 2.4,
-                               "1.5": 1.5, "None": 2.4})
+    async def test_config_endpoint_clamps_main_ready_budget(self):
+        # POST 越界/非法值：越界夹取 [0.8, 2.8]，非法回落 2.4。
+        for raw, want in ((99, 2.8), (0.1, 0.8), ("junk", 2.4)):
+            resp = await self.client.post("/v/api/ext/config",
+                                          json={"main_ready_budget": raw})
+            self.assertEqual(resp.status_code, 200)
+            self.assertEqual(self.config.get()["main_ready_budget"], want)
+            self.assertEqual(appmod._main_slow_budget(), want)
+
+    def test_budget_clamped_on_read(self):
+        # 每次读取时夹取 [0.8, 2.8]：直接改配置（模拟手改文件/旧值），
+        # 无需重载模块即可验证。
+        for raw, want in ((99, 2.8), (0.1, 0.8), ("junk", 2.4),
+                          (1.5, 1.5), (None, 2.4)):
+            self.config.save({"main_ready_budget": raw})
+            self.assertEqual(appmod._main_slow_budget(), want)
 
 
 if __name__ == "__main__":

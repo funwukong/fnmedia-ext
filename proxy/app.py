@@ -8599,13 +8599,14 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
 _MAIN_SERVE_FUT: dict[str, asyncio.Future] = {}
 # 仅【慢源】（加固/爬虫/drpy/专有解码/小雅，常需十几秒解析）才用短预算先占位；普通
 # CMS 直链不用预算、直接等出正片（恢复秒播），只在真正抓不到时才回占位。
-# 配置 key：main_ready_budget；改配置后需重启进程才生效（模块常量不热重载）。
-# 上游 config.py DEFAULTS 里没有这一项，这里也不加，靠 .get(..., 2.4) 兜底。
-try:
-    _MAIN_SLOW_BUDGET = float(config.get().get("main_ready_budget", 2.4))
-except Exception:
-    _MAIN_SLOW_BUDGET = 2.4
-_MAIN_SLOW_BUDGET = min(max(_MAIN_SLOW_BUDGET, 0.8), 2.8)
+# 配置 key：main_ready_budget（DEFAULTS 默认 2.4）；每次取 main 时经
+# _main_slow_budget() 实时读取并夹取 [0.8, 2.8]，POST 改值即时生效，无需重启。
+def _main_slow_budget() -> float:
+    """慢线起播预算（秒）：每次实时读配置并夹取 [0.8, 2.8]，非法值回落 2.4。"""
+    try:
+        return config.main_ready_budget()
+    except Exception:
+        return 2.4
 
 
 def _is_slow_line(p: dict) -> bool:
@@ -8810,10 +8811,11 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 async def hls_main(mg: str, request: Request):
     _req_t0 = time.time()  # hls_main 入口处、任何分支之前（上游 v1.0.0）
 
-    def _budget_left(floor: float = 0.6) -> float:
+    def _budget_left(floor: float) -> float:
         # 首次 main 的总预算：从请求进入起计，含绑定等待、选线、dodge 等前置耗时。
         # 时钟用 time.time()（墙钟），与 _PLAYLIST_CACHE 的时间戳口径一致。
-        return max(floor, _MAIN_SLOW_BUDGET - (time.time() - _req_t0))
+        # 预算每次实时读配置（_main_slow_budget），改值即时生效。
+        return max(floor, _main_slow_budget() - (time.time() - _req_t0))
 
     phwait = request.query_params.get("phwait") == "1"
     failed_g = await _await_pending_chart(mg)
@@ -10076,7 +10078,7 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
-        "main_ready_budget",  # 慢线起播预算（秒），改后需重启进程才生效
+        "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "update_proxy",
     }
@@ -10101,6 +10103,10 @@ async def ext_set_config(request: Request):
     if "hot_refresh_interval" in patch:
         patch["hot_refresh_interval"] = max(1 * 3600, min(24 * 3600,
                                                           int(patch["hot_refresh_interval"])))
+    if "main_ready_budget" in patch:
+        # 实时读取 + 夹取 [0.8, 2.8]：非法值回落 2.4（见 config.clamp_main_ready_budget）
+        patch["main_ready_budget"] = cfgmod.clamp_main_ready_budget(
+            patch["main_ready_budget"])
     if "update_proxy" in patch:
         pu = str(patch["update_proxy"]).strip()[:300]
         patch["update_proxy"] = pu if re.match(r"^(https?|socks5h?)://", pu) else ""
