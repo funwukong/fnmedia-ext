@@ -99,7 +99,7 @@ class ViewerSnapshotTests(unittest.TestCase):
         self.assertEqual(seen, [True, False, False, True, False, False])
 
     def test_snapshot_semantics_match_spec(self):
-        # 直接注入快照数据（不碰配置文件）：逐条核 fail-closed 语义。
+        # 直接注入快照数据（不碰配置文件）：逐条核 fail-open 语义。
         snap = vlibsmod.ViewerContext(
             _user("u1"), hidden={"catalog:tv"},
             acl={"u1": ["catalog:movie", "standalone:ffzy"]},
@@ -119,13 +119,15 @@ class ViewerSnapshotTests(unittest.TestCase):
         self.assertIs(admin.can_see("catalog:movie"), False)  # 但隐藏库除外
         self.assertIs(admin.online_allowed(), True)
         unknown = vlibsmod.ViewerContext(UNKNOWN, hidden=set(), acl={},
-                                         default_visible=True)
-        self.assertIs(unknown.can_see("catalog:movie"), False)  # 默认开也不放行
-        self.assertIs(unknown.online_allowed(), False)
+                                         default_visible=True,
+                                         default_online=True)
+        self.assertIs(unknown.can_see("catalog:movie"), True)  # 未知身份按默认开关放行
+        self.assertIs(unknown.online_allowed(), True)
         unconfigured = vlibsmod.ViewerContext(
-            _user("u9"), hidden=set(), acl={}, default_visible=True)
+            _user("u9"), hidden=set(), acl={}, default_visible=True,
+            default_online=False)
         self.assertIs(unconfigured.can_see("catalog:movie"), True)
-        self.assertIs(unconfigured.online_allowed(), False)
+        self.assertIs(unconfigured.online_allowed(), False)  # 默认关则不放行
 
     def test_account_can_see_single_config_get_per_call(self):
         with _Counting(vlibsmod.config, "get") as c:

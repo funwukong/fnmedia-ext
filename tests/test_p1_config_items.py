@@ -77,50 +77,55 @@ def test_parse_config_version_matrix():
 
 
 def test_version_matrix_keeps_explicit_true(monkeypatch, tmp_path):
-    # 缺失/v1/v2/>2/非数字：只有缺失与 v1 跑迁移翻 False；其余一律保留用户显式 True。
+    # v1→v2→v3 完整链：v1/v2 存量跑迁移，最终都翻回 True；v3 及更新保留
+    # 用户显式值；无法解析的版本不跑迁移、原样保留。
     cases = [
-        # (存量 config_version, 是否跑迁移翻 False)
-        (1, True),
-        (2, False),
-        (3, False),
-        ("3", False),
-        ("2.0", False),
-        (2.0, False),
-        ("2", False),
-        ("abc", False),
-        (None, False),
-        (2.5, False),
-        ("2.5", False),
+        # (存量 config_version, 存量值, 迁移后期望值)
+        (1, False, True),    # v1→v2 翻 False，再 v2→v3 翻回 True
+        (1, True, True),
+        (2, False, True),    # v2→v3 翻回 True
+        (2, True, True),
+        (3, False, False),   # 已是当前版本，不迁移，显式 False 保留
+        (3, True, True),
+        ("3", False, False),
+        ("2.0", False, True),
+        (2.0, False, True),
+        ("2", False, True),
+        ("abc", False, False),
+        (None, False, False),
+        (2.5, False, False),
+        ("2.5", False, False),
     ]
-    for raw, flipped in cases:
+    for raw, stored, expected in cases:
         state = _patch_state(monkeypatch, tmp_path)
         state.parent.mkdir(parents=True, exist_ok=True)
         if state.exists():
             state.unlink()
         state.write_text(json.dumps({"config_version": raw,
-                                     "acl_default_visible": True,
-                                     "acl_default_online": True}),
+                                     "acl_default_visible": stored,
+                                     "acl_default_online": stored}),
                          encoding="utf-8")
         c = config_mod.Config()
-        assert c.get()["acl_default_visible"] is (not flipped), raw
-        assert c.get()["acl_default_online"] is (not flipped), raw
+        assert c.get()["acl_default_visible"] is expected, raw
+        assert c.get()["acl_default_online"] is expected, raw
 
 
 def test_version_missing_still_migrates(monkeypatch, tmp_path):
-    # 没有 config_version 键的更旧配置视为 v1，迁移照常跑。
+    # 没有 config_version 键的更旧配置视为 v1，走完整链 v1→v2→v3，
+    # 最终版本 3、两项值 True。
     state = _patch_state(monkeypatch, tmp_path)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"acl_default_visible": True,
                                  "acl_default_online": True}),
                      encoding="utf-8")
     c = config_mod.Config()
-    assert c.get()["acl_default_visible"] is False
-    assert c.get()["acl_default_online"] is False
-    assert c.get()["config_version"] == 2
+    assert c.get()["acl_default_visible"] is True
+    assert c.get()["acl_default_online"] is True
+    assert c.get()["config_version"] == 3
 
 
 def test_version_unparsable_warns_and_normalizes(monkeypatch, tmp_path, caplog):
-    # 非数字版本：记 warning、不翻用户值、版本号归一化为 2 并落盘。
+    # 非数字版本：记 warning、不翻用户值、版本号归一化为 3 并落盘。
     state = _patch_state(monkeypatch, tmp_path)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"config_version": "abc",
@@ -131,18 +136,18 @@ def test_version_unparsable_warns_and_normalizes(monkeypatch, tmp_path, caplog):
         c = config_mod.Config()
     assert c.get()["acl_default_visible"] is True
     assert c.get()["acl_default_online"] is True
-    assert c.get()["config_version"] == 2
+    assert c.get()["config_version"] == 3
     saved = json.loads(state.read_text(encoding="utf-8"))
-    assert saved["config_version"] == 2
+    assert saved["config_version"] == 3
     assert saved["acl_default_visible"] is True
     assert "unparsable" in caplog.text
 
 
 def test_version_downgrade_warns_and_keeps_values(monkeypatch, tmp_path, caplog):
-    # 存量版本 > 当前 CONFIG_VERSION：记 warning，不迁移、不降版本号、值原样保留。
+    # 存量版本 > 当前 CONFIG_VERSION（3）：记 warning，不迁移、不降版本号、值原样保留。
     state = _patch_state(monkeypatch, tmp_path)
     state.parent.mkdir(parents=True)
-    state.write_text(json.dumps({"config_version": 3,
+    state.write_text(json.dumps({"config_version": 99,
                                  "acl_default_visible": True,
                                  "acl_default_online": True}),
                      encoding="utf-8")
@@ -150,7 +155,7 @@ def test_version_downgrade_warns_and_keeps_values(monkeypatch, tmp_path, caplog)
         c = config_mod.Config()
     assert c.get()["acl_default_visible"] is True
     assert c.get()["acl_default_online"] is True
-    assert c.get()["config_version"] == 3
+    assert c.get()["config_version"] == 99
     assert "newer than supported" in caplog.text
 
 
@@ -164,8 +169,9 @@ def test_migration_logs_when_run_and_when_skipped(monkeypatch, tmp_path, caplog)
     with caplog.at_level(logging.INFO, logger="fnmedia.config"):
         config_mod.Config()
     assert "v1->v2" in caplog.text
+    assert "v2->v3" in caplog.text
     caplog.clear()
-    state.write_text(json.dumps({"config_version": 2,
+    state.write_text(json.dumps({"config_version": 3,
                                  "acl_default_visible": True}),
                      encoding="utf-8")
     with caplog.at_level(logging.INFO, logger="fnmedia.config"):

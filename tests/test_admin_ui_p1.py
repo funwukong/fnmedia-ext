@@ -1,8 +1,8 @@
 """P1-16 / P1-22 管理台内联 JS 回归测试。
 
 P1-22：默认权限开关（aclDefVis / aclDefOnline）显示必须与后端默认
-False 一致——字段缺失时不勾选。旧代码用 ``!==false``，缺失字段也被
-当成勾选。
+True 一致——字段缺失时勾选。fail-open 回滚后用 ``!==false``，缺失字段
+也被当成勾选；只有显式 false 才不勾选。
 
 P1-16：资源站前端分页/筛选、启用开关失败回滚、切页停实时轮询。
 
@@ -45,13 +45,14 @@ def _node_ok(script: str) -> str:
 
 # ---------------- P1-22：默认权限开关 ----------------
 
-def test_acl_default_uses_strict_true():
+def test_acl_default_uses_not_false():
     src = _src()
-    assert "acl_default_visible===true" in src
-    assert "acl_default_online===true" in src
-    assert "acl_default_visible!==false" not in src
-    assert "acl_default_online!==false" not in src
-    # HTML 初始无 checked：与后端默认 False 一致，页面初载即不勾选。
+    assert "acl_default_visible!==false" in src
+    assert "acl_default_online!==false" in src
+    assert "acl_default_visible===true" not in src
+    assert "acl_default_online===true" not in src
+    # HTML 初始无 checked：初始勾选由 JS 按 ACLDEF（默认 True）设置，
+    # 不写死在 HTML 里。
     for input_id in ("aclDefVis", "aclDefOnline"):
         m = re.search(r'<input[^>]*id="%s"[^>]*>' % input_id, src)
         assert m, input_id
@@ -71,8 +72,9 @@ def test_acl_default_three_states_with_node():
         "const vis=(r)=>{return %s;};\n"
         "const onl=(r)=>{return %s;};\n"
         "const cases=[\n"
+        # r.data 缺失时表达式短路为 undefined（假值）；实测中 data 恒在，字段缺失见下条
         "  [{}, false, false],\n"
-        "  [{data:{}}, false, false],\n"
+        "  [{data:{}}, true, true],\n"
         "  [{data:{acl_default_visible:true,acl_default_online:true}}, true, true],\n"
         "  [{data:{acl_default_visible:false,acl_default_online:false}}, false, false],\n"
         "];\n"
