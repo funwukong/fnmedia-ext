@@ -9409,17 +9409,21 @@ _POSTER_NETWORK_ERRORS = (
 async def _poster_upstream_get(request: Request, url: str):
     """带重试抓一张上游海报；返回 httpx 响应，网络失败返回 None。
 
-    先用常规头重试 3 次；若返回 403（图床防盗链），再带图床自身 origin
-    作 Referer 重试一次——多数防盗链只认同源 Referer。
-    主客户端网络异常时，按上游 _poster_fetch（v1.0.0）的做法经
-    netutil.async_client(timeout=12.0) 再取一次（按代理模式直连/走代理/
-    自动切代理；未配置代理时也相当于一条全新直连）；仍失败返回 None。
+    单张海报失败时总 GET 不超过 3 次（P1-9 收敛；旧路径最坏 7 次：
+    ext_get_retry 默认 3 次 + 网络异常后 netutil 1 次 + 403 分支又 3 次）：
+    主路只取 1 次（tries=1）；主客户端网络异常时，按上游 _poster_fetch
+    （v1.0.0）的做法经 netutil.async_client(timeout=12.0) 再取一次（按代理
+    模式直连/走代理/自动切代理；未配置代理时也相当于一条全新直连）；
+    若返回 403（图床防盗链），再带图床自身 origin 作 Referer 重试一次——
+    多数防盗链只认同源 Referer，这是真正有用的那次，保留。
+    代价：海报的瞬时 429/5xx 不再内部重试——海报失败只出占位图，不影响
+    播放，故接受；服务端不做磁盘缓存（与上游一致，有意保留）。
     地址格式、JPEG 占位、纯透传均不动。
     """
     host = urllib.parse.urlsplit(url).netloc.lower()
     try:
         r = await ext_get_retry(request, url,
-                                headers=_poster_fetch_headers(url))
+                                headers=_poster_fetch_headers(url), tries=1)
     except _POSTER_NETWORK_ERRORS:
         _log.info("poster netutil retry host=%s", host)
         try:
@@ -9434,7 +9438,7 @@ async def _poster_upstream_get(request: Request, url: str):
         headers = _poster_fetch_headers(url)
         headers["Referer"] = f"{scheme}://{host}/"
         try:
-            r = await ext_get_retry(request, url, headers=headers)
+            r = await ext_get_retry(request, url, headers=headers, tries=1)
         except Exception:  # noqa: BLE001
             return None
     return r

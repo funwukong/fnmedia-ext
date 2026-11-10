@@ -105,16 +105,21 @@ def test_poster_fallback_is_jpeg_not_svg():
 
 
 def test_serve_online_poster_retries_then_succeeds():
-    fake = _FakeExt([httpx.ConnectError("boom", request=None), _Resp()])
-    r = asyncio.run(appmod._serve_online_poster(
-        _tok(), _fake_request(fake)))
+    # P1-9 收敛：主路只取 1 次（tries=1），连不上即走 netutil 再取一次成功。
+    fake = _FakeExt([httpx.ConnectError("boom", request=None)])
+    calls, timeouts = [], []
+    with mock.patch.object(
+            appmod.netutil, "async_client",
+            _netutil_factory([_Resp()], calls, timeouts)):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
     assert r.status_code == 200
     assert r.media_type == "image/jpeg"
     assert r.body == JPEG
-    assert len(fake.calls) == 2  # 第一次连不上，重试后成功
-    # 直接抓原地址，不经过镜像改写
-    assert fake.calls[0][0] == IMG_URL
-    assert fake.calls[1][0] == IMG_URL
+    assert len(fake.calls) == 1  # 主路 1 次
+    assert len(calls) == 1  # netutil 1 次
+    assert calls[0][0] == IMG_URL
+    assert timeouts == [12.0]
 
 
 def test_serve_online_poster_403_retries_with_own_origin_referer():
@@ -136,9 +141,9 @@ def test_serve_online_poster_403_retries_with_own_origin_referer():
 
 
 def test_serve_online_poster_failure_returns_jpeg_fallback():
-    # 主客户端 3 次都连不上；netutil 重试也失败 → JPEG 占位。
+    # P1-9 收敛：主路 1 次连不上；netutil 重试也失败 → JPEG 占位。
     # netutil.async_client 必须打桩，否则会真的去联网抓图。
-    fake = _FakeExt([httpx.ConnectError("down", request=None)] * 3)
+    fake = _FakeExt([httpx.ConnectError("down", request=None)])
     calls, timeouts = [], []
     with mock.patch.object(
             appmod.netutil, "async_client",
@@ -150,6 +155,7 @@ def test_serve_online_poster_failure_returns_jpeg_fallback():
     assert r.media_type == "image/jpeg"
     assert r.body[:2] == b"\xff\xd8"
     assert b"<svg" not in r.body
+    assert len(fake.calls) == 1  # 主路只取 1 次
     assert len(calls) == 1  # netutil 按上游做法只再试一次
     assert calls[0][0] == IMG_URL
     assert timeouts == [12.0]
@@ -157,7 +163,7 @@ def test_serve_online_poster_failure_returns_jpeg_fallback():
 
 def test_serve_online_poster_netutil_retry_succeeds():
     """上游 _poster_fetch 做法：主客户端网络异常后，经 netutil 再取一次成功。"""
-    fake = _FakeExt([httpx.ConnectError("boom", request=None)] * 3)
+    fake = _FakeExt([httpx.ConnectError("boom", request=None)])
     calls, timeouts = [], []
     with mock.patch.object(
             appmod.netutil, "async_client",
@@ -167,7 +173,7 @@ def test_serve_online_poster_netutil_retry_succeeds():
     assert r.status_code == 200
     assert r.media_type == "image/jpeg"
     assert r.body == JPEG
-    assert len(fake.calls) == 3  # 主客户端内部重试 3 次都失败
+    assert len(fake.calls) == 1  # P1-9：主路只取 1 次，不再内部重试 3 次
     assert len(calls) == 1
     assert calls[0][0] == IMG_URL
     assert timeouts == [12.0]
@@ -228,3 +234,41 @@ def test_poster_has_no_disk_cache_or_prefetch():
                  "_prefetch_posters", "_prefetch_poster_urls",
                  "_poster_prefetch_loop"):
         assert not hasattr(appmod, name), name
+
+
+def test_serve_online_poster_worst_case_at_most_three_gets():
+    """P1-9：单张海报失败时总 GET 不超过 3 次（含 403 分支）。
+
+    最坏路径：主路网络异常（1 次）→ netutil 返回 403（1 次）→
+    403 分支带同源 Referer 重试一次（1 次）→ 仍 403 → JPEG 占位。
+    旧路径是 3 + 1 + 3 = 7 次。
+    """
+    fake = _FakeExt([httpx.ConnectError("boom", request=None),
+                     _Resp(status=403, content=b"forbidden",
+                           ctype="text/html")])
+    calls, timeouts = [], []
+    with mock.patch.object(
+            appmod.netutil, "async_client",
+            _netutil_factory([_Resp(status=403, content=b"forbidden",
+                                    ctype="text/html")], calls, timeouts)):
+        r = asyncio.run(appmod._serve_online_poster(
+            _tok(), _fake_request(fake)))
+    assert r.status_code == 200
+    assert r.media_type == "image/jpeg"
+    assert r.body[:2] == b"\xff\xd8"  # 占位，不是上游图
+    assert len(fake.calls) == 2
+    assert len(calls) == 1
+    assert len(fake.calls) + len(calls) <= 3
+    # 403 重试那次带了图床自身 origin 作 Referer
+    assert fake.calls[1][1].get("Referer") == "https://p.lztutu.com/"
+
+
+def test_serve_online_poster_500_not_retried():
+    """P1-9 的代价：瞬时 5xx 不再内部重试，只取 1 次即回退占位。"""
+    fake = _FakeExt([_Resp(status=500, content=b"err", ctype="text/html")])
+    r = asyncio.run(appmod._serve_online_poster(
+        _tok(), _fake_request(fake)))
+    assert r.status_code == 200
+    assert r.media_type == "image/jpeg"
+    assert r.body[:2] == b"\xff\xd8"
+    assert len(fake.calls) == 1
