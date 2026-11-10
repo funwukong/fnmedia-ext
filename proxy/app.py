@@ -8432,6 +8432,21 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     asyncio.create_task(_get_playlist_cached(mg, picked, request))
 
 
+# main 整条“解析+换线+建清单”的在途服务任务（mg|line|index -> Future）：慢源首个
+# 请求只等到预算，超时回占位但后台任务继续跑完并写播放列表缓存，后续轮询直接命中。
+# （上游 v1.0.0；键与上游一致：mg 是 URL 路径参数，index 为原值拼串。）
+_MAIN_SERVE_FUT: dict[str, asyncio.Future] = {}
+# 仅【慢源】（加固/爬虫/drpy/专有解码/小雅，常需十几秒解析）才用短预算先占位；普通
+# CMS 直链不用预算、直接等出正片（恢复秒播），只在真正抓不到时才回占位。
+# 配置 key：main_ready_budget；改配置后需重启进程才生效（模块常量不热重载）。
+# 上游 config.py DEFAULTS 里没有这一项，这里也不加，靠 .get(..., 2.4) 兜底。
+try:
+    _MAIN_SLOW_BUDGET = float(config.get().get("main_ready_budget", 2.4))
+except Exception:
+    _MAIN_SLOW_BUDGET = 2.4
+_MAIN_SLOW_BUDGET = min(max(_MAIN_SLOW_BUDGET, 0.8), 2.8)
+
+
 def _is_slow_line(p: dict) -> bool:
     """是否为解析很慢的非标准源（加固/爬虫/drpy/专有解码/小雅），需先占位后台自愈。
     普通 CMS 直链（暴风/量子等 m3u8）返回 False，走直接秒播。（上游 v0.2.70）"""
@@ -8632,6 +8647,13 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 
 @app.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
+    _req_t0 = time.time()  # hls_main 入口处、任何分支之前（上游 v1.0.0）
+
+    def _budget_left(floor: float = 0.6) -> float:
+        # 首次 main 的总预算：从请求进入起计，含绑定等待、选线、dodge 等前置耗时。
+        # 时钟用 time.time()（墙钟），与 _PLAYLIST_CACHE 的时间戳口径一致。
+        return max(floor, _MAIN_SLOW_BUDGET - (time.time() - _req_t0))
+
     phwait = request.query_params.get("phwait") == "1"
     failed_g = await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
@@ -8645,99 +8667,128 @@ async def hls_main(mg: str, request: Request):
             return Response("暂无可用在线片源", status_code=503)
         return Response("not found", status_code=404)
 
-    # 线路健康探测 + 自动选最快线
     explicit_line = request.query_params.get("line")
     auto_play = request.query_params.get("auto") == "1" and not explicit_line
     request.state._play_mg = mg  # 供探测复用播放列表构建、填充缓存
     # 起播即跳过已知坏线（用户显式选线除外），避免无谓探测延迟
+    # （与上游一致：dodge 在分发前，不在 _serve_normal 内。）
     picked = _dodge_known_bad(picked, request)
-    if _autofail_on():
-        picked = await _ensure_playable(picked, request, auto=auto_play)
-        # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
-        request.state._failover_picked = picked
 
-    # >>> PRIVATE:CATVOD
-    # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
-    if features.CATVOD and picked.get("catvod"):
-        if await _resolve_catvod(picked):
-            # 再探一次死活，小雅“文件不存在”会回 200+JSON 假活；坏则换线
-            if not (await _probe_target(picked, request)):
+    async def _serve_normal(picked: dict):
+        # 整条“解析+换线+建清单”服务逻辑（上游 v1.0.0 _serve_normal）。
+        # 有意偏离：不含 auto 起播快路径——pick_faster_line（播放中静默换线）与
+        # _cached_sibling_playlist 是已冻结、明确不接线的功能，本次不搬。
+        # 线路健康探测 + 自动选最快线
+        if _autofail_on():
+            picked = await _ensure_playable(picked, request, auto=auto_play)
+            # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
+            request.state._failover_picked = picked
+
+        # >>> PRIVATE:CATVOD
+        # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
+        if features.CATVOD and picked.get("catvod"):
+            if await _resolve_catvod(picked):
+                # 再探一次死活，小雅“文件不存在”会回 200+JSON 假活；坏则换线
+                if not (await _probe_target(picked, request)):
+                    _mark_line_bad(picked)
+                    alt = await _find_playable(picked, request, skip_current=True)
+                    if alt is not None:
+                        picked = alt
+                        request.state._failover_picked = picked
+                        _log.info("小雅文件不可用，自动切换线路 -> %s", picked.get("line"))
+                    else:
+                        return Response("该线路文件不存在，且暂无其他可用线路",
+                                        status_code=502)
+                if picked.get("catvod_direct"):
+                    return RedirectResponse(picked["url"], status_code=302,
+                                            headers={"Cache-Control": "no-store"})
+        # <<< PRIVATE:CATVOD
+
+        body = await _get_playlist_cached(mg, picked, request)
+        if body is None:
+            # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
+            if _autofail_on():
                 _mark_line_bad(picked)
                 alt = await _find_playable(picked, request, skip_current=True)
                 if alt is not None:
+                    _log.info("播放列表抓取失败，自动换线 %s -> %s",
+                              picked.get("line"), alt.get("line"))
                     picked = alt
-                    request.state._failover_picked = picked
-                    _log.info("小雅文件不可用，自动切换线路 -> %s", picked.get("line"))
-                else:
-                    return Response("该线路文件不存在，且暂无其他可用线路",
-                                    status_code=502)
-            if picked.get("catvod_direct"):
-                return RedirectResponse(picked["url"], status_code=302,
-                                        headers={"Cache-Control": "no-store"})
-    # <<< PRIVATE:CATVOD
-
-    body = await _get_playlist_cached(mg, picked, request)
-    if body is None:
-        # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
-        if _autofail_on():
+                    request.state._failover_picked = alt
+                    # 小雅等非 HLS 直链
+                    # >>> PRIVATE:CATVOD
+                    if features.CATVOD and picked.get("catvod"):
+                        if await _resolve_catvod(picked) and picked.get("catvod_direct"):
+                            return RedirectResponse(picked["url"], status_code=302,
+                                                    headers={"Cache-Control": "no-store"})
+                    # <<< PRIVATE:CATVOD
+                    body = await _get_playlist_cached(mg, picked, request)
+        if body is None:
+            # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
+            # 加固/爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
+            if _is_slow_line(picked):
+                return _placeholder_playlist_response(mg)
+            return Response("fetch fail upstream", status_code=502)
+        if body is _NOT_HLS:
+            # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
+            q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
+            return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+        # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
+        # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
+        # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
+        # 经 _MEDIA_REDIRECT 命中新记录。
+        if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
             _mark_line_bad(picked)
-            alt = await _find_playable(picked, request, skip_current=True)
-            if alt is not None:
-                _log.info("播放列表抓取失败，自动换线 %s -> %s",
-                          picked.get("line"), alt.get("line"))
-                picked = alt
-                request.state._failover_picked = alt
-                # 小雅等非 HLS 直链
-                # >>> PRIVATE:CATVOD
-                if features.CATVOD and picked.get("catvod"):
-                    if await _resolve_catvod(picked) and picked.get("catvod_direct"):
-                        return RedirectResponse(picked["url"], status_code=302,
-                                                headers={"Cache-Control": "no-store"})
-                # <<< PRIVATE:CATVOD
-                body = await _get_playlist_cached(mg, picked, request)
-    if body is None:
-        # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
-        # 加固/爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
-        if _is_slow_line(picked):
-            return _placeholder_playlist_response(mg)
-        return Response("fetch fail upstream", status_code=502)
-    if body is _NOT_HLS:
-        # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
-        q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
-        return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
-    # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
-    # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
-    # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
-    # 经 _MEDIA_REDIRECT 命中新记录。
-    if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
-        _mark_line_bad(picked)
-        status = await _resurrect_start(picked, mg)
-        if status == "ok":
-            alt = _pick_episode(mg, request)
-            if alt:
-                body2 = await _get_playlist_cached(mg, alt, request)
-                if body2 and body2 is not _NOT_HLS:
-                    return Response(body2, media_type="application/vnd.apple.mpegurl",
-                                    headers={"Cache-Control": "no-cache",
-                                             "Access-Control-Allow-Origin": "*"})
-        if status == "fail":
-            return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
-                            status_code=502)
-        # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
-        # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
-        if _is_slow_line(picked):
-            return _placeholder_playlist_response(mg)
-        # running：让客户端稍候重试，不返回错误清单
-        return Response("正在为你寻找可用线路…", status_code=503,
-                        headers={"Retry-After": "3",
+            status = await _resurrect_start(picked, mg)
+            if status == "ok":
+                alt = _pick_episode(mg, request)
+                if alt:
+                    body2 = await _get_playlist_cached(mg, alt, request)
+                    if body2 and body2 is not _NOT_HLS:
+                        return Response(body2, media_type="application/vnd.apple.mpegurl",
+                                        headers={"Cache-Control": "no-cache",
+                                                 "Access-Control-Allow-Origin": "*"})
+            if status == "fail":
+                return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                                status_code=502)
+            # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
+            # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
+            if _is_slow_line(picked):
+                return _placeholder_playlist_response(mg)
+            # running：让客户端稍候重试，不返回错误清单
+            return Response("正在为你寻找可用线路…", status_code=503,
+                            headers={"Retry-After": "3",
+                                     "Access-Control-Allow-Origin": "*"})
+        _sk = sourcehealth.source_key_of(picked.get("line"), picked)
+        if _sk:
+            # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
+            sourcehealth.record(_sk, True, level="stream")
+        return Response(body, media_type="application/vnd.apple.mpegurl",
+                        headers={"Cache-Control": "no-cache",
                                  "Access-Control-Allow-Origin": "*"})
-    _sk = sourcehealth.source_key_of(picked.get("line"), picked)
-    if _sk:
-        # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
-        sourcehealth.record(_sk, True, level="stream")
-    return Response(body, media_type="application/vnd.apple.mpegurl",
-                    headers={"Cache-Control": "no-cache",
-                             "Access-Control-Allow-Origin": "*"})
+
+    # 起播策略（上游 v1.0.0）：
+    #  - 普通 CMS 直链：同步等到真清单，每次 main 独立执行，不做外层单飞合并，
+    #    否则前一次探测卡住时，后续重试全部挂在同一个 _serve_normal 上。
+    #  - 仅加固/爬虫/drpy/专有解码/小雅这类慢源：短预算到点先回占位、后台自愈，
+    #    播放器周期重拉转正片。
+    slow_source = _is_slow_line(picked)
+    if not slow_source:
+        # v0.2.42：普通 CMS 每次 main 独立执行。不要在外层再做单飞合并，
+        # 否则前一次探测卡住时，后续重试全部挂在同一个 _serve_normal 上。
+        return await _serve_normal(picked)
+    # 仅慢源保留单飞与短预算自愈，避免后台重复启动昂贵转存/爬虫任务。
+    bk = f"{mg}|{picked.get('line')}|{picked.get('index', 0)}"
+    fut = _MAIN_SERVE_FUT.get(bk)
+    if fut is None:
+        fut = asyncio.ensure_future(_serve_normal(picked))
+        _MAIN_SERVE_FUT[bk] = fut
+        fut.add_done_callback(lambda _f: _MAIN_SERVE_FUT.pop(bk, None))
+    try:
+        return await asyncio.wait_for(asyncio.shield(fut),
+                                      timeout=_budget_left(floor=0.2))
+    except asyncio.TimeoutError:
+        return _placeholder_playlist_response(mg)
 
 
 def _cors_preflight() -> Response:
@@ -9864,6 +9915,7 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
+        "main_ready_budget",  # 慢线起播预算（秒），改后需重启进程才生效
         "prewarm_mode",
         "update_proxy",
     }
