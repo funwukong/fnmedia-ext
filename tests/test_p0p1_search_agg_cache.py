@@ -149,7 +149,10 @@ class AggCacheTests(unittest.IsolatedAsyncioTestCase):
                              _can_see({"u1": {"catalog:movie"}})):
             u1_req = SimpleNamespace(headers={}, state=SimpleNamespace())
             u1 = await appmod.online_search("共享片", None, request=u1_req)
-            self.assertEqual(search.call_count, 0)
+            # P0-1 合入后：聚合缓存按查看者分键（带 visible 回调的聚合可能
+            # 被该查看者的早返回截断），u1 不复用管理员的缓存条目，需重新
+            # 拉取一次；过滤仍在每请求做，u1 只看到自己可见的「好片」。
+            self.assertEqual(search.call_count, 1)
             titles = [c["title"].replace("【在线】", "").split(" ·")[0]
                       for c in u1]
             self.assertEqual(titles, ["好片"])
