@@ -282,6 +282,83 @@ class BugReproTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(guid, self.tv_eps[3])
         self.assertEqual(ts, 100)
 
+    # ---- Bug 2：复现（基线失败） ----
+    async def test_home_folder_favorite_succeeds_and_lists(self):
+        """首页文件夹卡点收藏：应成功，且收藏夹里出现该标题。"""
+        folder = appmod._line_folder_guid("og-tv")
+        r = await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": folder},
+            headers=ADMIN)
+        self.assertEqual(r.json()["code"], 0, r.json())
+        rows = await self.favorite_list()
+        self.assertEqual([x["guid"] for x in rows], ["og-tv"])
+        self.assertIn("测试剧", rows[0]["title"])
+
+    async def test_home_folder_favorite_lights_home_card(self):
+        """收藏后，首页同一张文件夹卡应显示已收藏。"""
+        folder = appmod._line_folder_guid("og-tv")
+        await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": folder},
+            headers=ADMIN)
+        row = appmod._hot_card(
+            self.store.get_title_by_guid("og-tv"), "tv")
+        self.assertEqual(row["guid"], folder)
+        appmod._apply_marks(row)
+        self.assertEqual(row.get("is_favorite"), 1)
+
+    async def test_movie_folder_favorite_succeeds_and_lists(self):
+        folder = appmod._line_folder_guid("og-movie")
+        r = await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": folder},
+            headers=ADMIN)
+        self.assertEqual(r.json()["code"], 0, r.json())
+        rows = await self.favorite_list()
+        self.assertEqual([x["guid"] for x in rows], ["og-movie"])
+
+    async def test_unfavorite_from_detail_removes_home_favorite(self):
+        """首页收藏的与详情页取消的是同一条（规范化到标题 guid）。"""
+        folder = appmod._line_folder_guid("og-tv")
+        await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": folder},
+            headers=ADMIN)
+        self.assertEqual(len(await self.favorite_list()), 1)
+        await self.client.request(
+            "DELETE", "/v/api/v1/item/favorite", json={"guid": "og-tv"},
+            headers=ADMIN)
+        self.assertEqual(await self.favorite_list(), [])
+
+    async def test_watched_on_folder_card(self):
+        """首页文件夹卡标已看：应成功，且卡片带已看标记。"""
+        folder = appmod._line_folder_guid("og-tv")
+        r = await self.client.request(
+            "POST", "/v/api/v1/item/watched", json={"guid": folder},
+            headers=ADMIN)
+        self.assertEqual(r.json()["code"], 0, r.json())
+        row = appmod._hot_card(
+            self.store.get_title_by_guid("og-tv"), "tv")
+        appmod._apply_marks(row)
+        self.assertEqual(row.get("watched"), 1)
+
+    # ---- Bug 2：对照组（基线已通过） ----
+    async def test_line_favorite_still_works(self):
+        line_g = appmod._line_item_guid("og-tv", "lzi::lzm3u8", 0)
+        r = await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": line_g},
+            headers=ADMIN)
+        self.assertEqual(r.json()["code"], 0, r.json())
+        rows = await self.favorite_list()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("测试剧", rows[0]["title"])
+
+    async def test_plain_title_favorite_still_works(self):
+        r = await self.client.request(
+            "PUT", "/v/api/v1/item/favorite", json={"guid": "og-tv"},
+            headers=ADMIN)
+        self.assertEqual(r.json()["code"], 0, r.json())
+        self.assertEqual([x["guid"] for x in await self.favorite_list()],
+                         ["og-tv"])
+
+
 class NormalizeTests(unittest.TestCase):
     def test_normalize_folder_guid(self):
         self.assertEqual(

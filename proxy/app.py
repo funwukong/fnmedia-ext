@@ -5794,7 +5794,11 @@ async def _stream_list_impl(guid: str, request: Request):
 # ------------------------------------------------------- 收藏 / 已看（本地接管）
 
 def _online_card_meta(guid: str) -> dict | None:
-    """把一个在线 guid 解析成可用于收藏夹展示的元信息（不做网络请求）。"""
+    """把一个在线 guid 解析成可用于收藏夹展示的元信息（不做网络请求）。
+    文件夹卡 guid 先解到所属标题，否则首页收藏拿不到标题/海报。"""
+    folder_og = _parse_line_folder_guid(guid)
+    if folder_og:
+        guid = folder_og
     brief = store.get_title_by_guid(guid)
     if brief:
         return {
@@ -5837,7 +5841,10 @@ def _is_online_item_guid(guid: str) -> bool:
 
 
 def _apply_marks(row: dict) -> dict:
-    g = row.get("guid", "")
+    # 卡片 guid 先归一化到原片身份再查标记：首页文件夹卡（fnmedia-line-folder:<og>）
+    # 与线路卡（fnmedia-line-item:…）的收藏/已看都按标题/集 guid 存，拿原始卡 guid
+    # 查会永远查不到，收藏星标与已看标记全丢。
+    g = _normalize_history_guid(row.get("guid", ""))
     # 列表渲染时顺手把元信息补进收藏记录：收藏夹不再只认 store 缓存，
     # 标题被清掉/重启后仍能凭收藏时存下的元信息显示。
     if g and (marks.is_favorite(g) or marks.is_watched(g)):
@@ -5978,6 +5985,11 @@ async def item_watched_del(request: Request):
 def _favorite_card(rec: dict) -> dict | None:
     guid = rec.get("guid", "")
     brief = store.get_title_by_guid(guid)
+    if brief is None:
+        # 文件夹卡 guid 的收藏记录：解到所属标题建卡
+        folder_og = _parse_line_folder_guid(guid)
+        if folder_og:
+            brief = store.get_title_by_guid(folder_og)
     if brief:
         row = inj.search_item(brief)
         row["title"] = inj._f(brief, "title") + (
