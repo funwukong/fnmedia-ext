@@ -53,7 +53,9 @@ def _backup_config() -> Path | None:
             dst = d / f"config-{ts}-{i}.json"
             i += 1
         dst.write_bytes(_STATE.read_bytes())
-        for old in sorted(d.glob("config-*.json"))[: -BACKUP_KEEP]:
+        # 按修改时间删最旧：同秒多次备份会带 -1 后缀，按文件名排序会误删新备份。
+        for old in sorted(d.glob("config-*.json"),
+                          key=lambda b: (b.stat().st_mtime, b.name))[: -BACKUP_KEEP]:
             try:
                 old.unlink()
             except OSError:
@@ -67,7 +69,9 @@ def _backup_config() -> Path | None:
 def _restore_from_backup() -> dict | None:
     """主配置损坏时按时间倒序尝试备份，返回第一个能解析的备份内容。"""
     try:
-        backups = sorted(_backup_dir().glob("config-*.json"), reverse=True)
+        # 按修改时间倒序：同秒多次备份会带 -1 后缀，按文件名倒序会把新备份排在旧备份之后。
+        backups = sorted(_backup_dir().glob("config-*.json"),
+                         key=lambda b: (b.stat().st_mtime, b.name), reverse=True)
     except Exception:
         return None
     for b in backups:
@@ -391,6 +395,13 @@ class Config:
                 self._mtime = _STATE.stat().st_mtime
             except FileNotFoundError:
                 self._mtime = 0
+                # 首次安装（state/config.json 尚不存在）：把合并后的默认配置落盘一次。
+                # 否则干净安装后 status/管理页等依赖“文件存在”的路径会异常（上游 v0.2.45，issue #39）。
+                try:
+                    self._persist(cfg)
+                    self._mtime = _STATE.stat().st_mtime
+                except Exception:
+                    pass
 
     def maybe_reload(self):
         try:
