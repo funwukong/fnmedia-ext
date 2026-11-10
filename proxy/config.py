@@ -460,6 +460,50 @@ class Config:
             self._persist(cfg)
             return True, sid
 
+    # 移植上游 v0.2.69（CMS 源导入/导出：/v/api/ext/source/update 的后端）。
+    def update_source(self, sid: str, name: str | None = None,
+                      api: str | None = None) -> tuple[bool, str]:
+        """编辑资源站的显示名称 / 订阅(API)链接。
+
+        - 改名：任意源均可；空名回退为域名。
+        - 改链接：仅自定义源（builtin=False）允许，内置源改链会破坏升级一致性，
+          如需自定义请删除后按新地址添加。新地址须 http(s) 且不能与其它源重复。
+        改 api 后该自定义源 id（由旧地址哈希生成）会一并重建为新地址的 id。"""
+        with _LOCK:
+            cfg = self.get()
+            target = next((s for s in cfg["sources"] if s["id"] == sid), None)
+            if not target:
+                return False, "源不存在"
+            if name is not None:
+                nm = str(name).strip()[:40]
+                if not nm:
+                    api0 = str(target.get("api", ""))
+                    nm = api0.split("/")[2] if "://" in api0 else str(target.get("name", "资源站"))
+                target["name"] = nm
+            if api is not None:
+                newapi = str(api).strip()
+                if not newapi.startswith(("http://", "https://")):
+                    return False, "API 地址需以 http(s):// 开头"
+                if target.get("builtin"):
+                    return False, "内置源不支持改链接，请删除后以自定义源重新添加"
+                norm = newapi.rstrip("/").lower()
+                if any(s["id"] != sid and
+                       s.get("api", "").rstrip("/").lower() == norm
+                       for s in cfg["sources"]):
+                    return False, "该资源站地址已存在"
+                new_id = self.make_custom_id(newapi)
+                if any(s["id"] == new_id for s in cfg["sources"] if s["id"] != sid):
+                    return False, "该资源站地址已存在"
+                target["api"] = newapi
+                target["id"] = new_id
+                # 同步迁移该源的独立库/优先级等按 id 记录的配置
+                pr = cfg.get("source_priority") or {}
+                if sid in pr:
+                    pr[new_id] = pr.pop(sid)
+                sid = new_id
+            self._persist(cfg)
+            return True, sid
+
     def source_priorities(self) -> dict:
         with _LOCK:
             return dict(self.get().get("source_priority") or {})

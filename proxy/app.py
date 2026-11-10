@@ -9236,6 +9236,145 @@ async def ext_live_clear(request: Request):
     return {"code": 0, "msg": "", "data": True}
 
 
+# ---------------- 缓存管理（移植上游 v0.2.54） ----------------
+@app.get("/v/api/ext/titles-cache")
+async def ext_titles_cache(request: Request):
+    """在线资源缓存 titles.json 的条数/字节（管理页性能卡，issue #42）。
+    文件超过配置字节上限时，顺手调度一次后台裁剪落盘（重启后打开管理页即自动瘦身）。"""
+    try:
+        p = store._state
+        size = p.stat().st_size if p.exists() else 0
+    except Exception:
+        size = 0
+    with store._lock:
+        entries = len(store._titles)
+        dirty = bool(store._dirty)
+    try:
+        import store as _storemod
+        _, max_bytes, _ = _storemod._cache_cfg()
+        if max_bytes > 0 and size > max_bytes and not dirty:
+            with store._lock:
+                store._dirty = True
+            store._schedule_flush()
+    except Exception:
+        pass
+    return {"code": 0, "entries": entries, "bytes": size, "dirty": dirty}
+
+
+@app.post("/v/api/ext/titles-cache/clear")
+async def ext_titles_cache_clear(request: Request):
+    """清空在线资源缓存并重启服务（慢盘用户搜索退化时一键回到冷态，issue #42）。"""
+    try:
+        store.close()
+        with store._lock:
+            store._titles, store._orig = {}, {}
+            store._ep_index, store._media_index = {}, {}
+            store._dirty = False
+        try:
+            store._state.unlink(missing_ok=True)
+        except Exception:
+            pass
+    except Exception as exc:
+        return {"code": 5000, "msg": f"清空失败：{exc}"}
+
+    def _restart():
+        import os
+        time.sleep(1.2)
+        os.system("systemctl restart fnmedia-ext >/dev/null 2>&1 &")
+
+    threading.Thread(target=_restart, daemon=True).start()
+    return {"code": 0, "msg": "已清空，服务重启中"}
+
+
+def _cache_sizes() -> dict:
+    """各类可清缓存的体积/条数（管理页缓存管理卡）。"""
+    out = {}
+    try:
+        p = store._state
+        out["titles"] = {"bytes": p.stat().st_size if p.exists() else 0,
+                         "entries": len(store._titles), "label": "在线资源缓存"}
+    except Exception:
+        out["titles"] = {"bytes": 0, "entries": 0, "label": "在线资源缓存"}
+    try:
+        cp = chartmod.STATE
+        out["charts"] = {"bytes": cp.stat().st_size if cp.exists() else 0,
+                         "label": "热门榜单缓存"}
+    except Exception:
+        out["charts"] = {"bytes": 0, "label": "热门榜单缓存"}
+    with catalog._lock:
+        out["catalog"] = {"routes": len(catalog._routes),
+                          "pages": len(catalog._page_cache),
+                          "label": "海量库分类/分页缓存"}
+    try:
+        out["search"] = {"entries": len(_search_cache), "label": "搜索结果内存缓存"}
+    except Exception:
+        out["search"] = {"entries": 0, "label": "搜索结果内存缓存"}
+    try:
+        out["health"] = {"entries": len(sourcehealth.snapshot())
+                         if hasattr(sourcehealth, "snapshot") else 0,
+                         "label": "源健康画像"}
+    except Exception:
+        out["health"] = {"entries": 0, "label": "源健康画像"}
+    return out
+
+
+@app.get("/v/api/ext/cache")
+async def ext_cache_status(request: Request):
+    return {"code": 0, "data": _cache_sizes()}
+
+
+@app.post("/v/api/ext/cache/clear")
+async def ext_cache_clear(request: Request):
+    """一键清除指定缓存。targets: search/charts/catalog/titles/health 的子集；
+    省略或 ["all"] 清前四项（health 默认保留，避免冷启动选源退化）。
+    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    body = await request.json()
+    targets = body.get("targets")
+    if not targets or targets == ["all"]:
+        targets = ["search", "charts", "catalog", "titles"]
+    targets = {str(t) for t in targets}
+    done, need_restart = [], False
+    if "search" in targets:
+        _search_cache.clear(); done.append("search")
+    if "charts" in targets:
+        try:
+            chart_cache.reset(); done.append("charts")
+        except Exception:
+            pass
+    if "catalog" in targets:
+        try:
+            catalog.reset(); done.append("catalog")
+            _schedule_routes_refresh()
+        except Exception:
+            pass
+    if "health" in targets:
+        try:
+            sourcehealth.reset(); done.append("health")
+        except Exception:
+            pass
+    if "titles" in targets:
+        need_restart = True
+        done.append("titles")
+
+        def _clear_titles_restart():
+            import os
+            try:
+                store.close()
+                with store._lock:
+                    store._titles, store._orig = {}, {}
+                    store._ep_index, store._media_index = {}, {}
+                    store._dirty = False
+                store._state.unlink(missing_ok=True)
+            except Exception:
+                pass
+            time.sleep(1.0)
+            os.system("systemctl restart fnmedia-ext >/dev/null 2>&1 &")
+
+        threading.Thread(target=_clear_titles_restart, daemon=True).start()
+    return {"code": 0, "data": {"cleared": done, "restart": need_restart},
+            "msg": "已清除：" + "、".join(done) + ("，服务重启中" if need_restart else "")}
+
+
 # ------------------------------------------------------- 电视直播（IPTV）管理 API
 
 
@@ -9889,6 +10028,160 @@ async def ext_source_test_all(request: Request):
                                    return_exceptions=True)
     out = [r for r in results if isinstance(r, dict)]
     return {"code": 0, "msg": "", "data": out}
+
+
+# ---------------- CMS 源批量体检（移植上游 v0.2.71） ----------------
+@app.post("/v/api/ext/source/health-check")
+async def ext_source_health_check(request: Request):
+    """用常见热门关键词批量检测纯 CMS 资源站有效性。
+
+    任一热门词搜到结果即有效；全部搜不到才判失效，并把失效源写入源健康画像
+    （record False 累积触发熔断），起播/竞速自动跳过。仅检测纯苹果 CMS 源，
+    加固/爬虫/小雅等专有源不走此检测。"""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    # 限制并发，避免一次性打爆源站
+    try:
+        concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
+    except (TypeError, ValueError):
+        concurrency = 4
+    targets = [s for s in config.all_sources() if _is_pure_cms(s)]
+    sem = asyncio.Semaphore(concurrency)
+
+    async def one(s):
+        async with sem:
+            try:
+                r = await providers.probe_source_alive(s)
+            except Exception as exc:  # noqa: BLE001
+                r = {"alive": False, "ok": False, "status": 0,
+                     "elapsed_ms": 0, "count": 0, "sample": "",
+                     "error": type(exc).__name__, "hit": "", "tried": []}
+            sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
+            # 回写源健康：失效累计失败（达阈值熔断），有效则清零失败计数
+            if sk:
+                sourcehealth.record(sk, bool(r.get("alive")),
+                                    (r.get("elapsed_ms") or 0) / 1000.0)
+            return {
+                "id": s.get("id"), "name": s.get("name", ""),
+                "alive": bool(r.get("alive")), "hit": r.get("hit", ""),
+                "tried": r.get("tried", []), "count": r.get("count", 0),
+                "elapsed_ms": r.get("elapsed_ms", 0),
+                "status": r.get("status", 0), "error": r.get("error", ""),
+                "dead": sourcehealth.is_dead(sk) if sk else False,
+            }
+
+    results = await asyncio.gather(*[one(s) for s in targets])
+    alive_n = sum(1 for r in results if r["alive"])
+    return {"code": 0, "msg": "", "data": {
+        "total": len(results), "alive": alive_n,
+        "dead": len(results) - alive_n,
+        "keywords": list(providers.PROBE_HOT_KEYWORDS),
+        "results": results}}
+
+
+def _is_pure_cms(s: dict) -> bool:
+    """纯苹果 CMS 源（非 jar 爬虫 / 加固 / 小雅 / dduo / DRPY / T4）。
+    移植上游 v0.2.69/71（CMS 源导入/导出、批量体检共用）。"""
+    if s.get("guard") or s.get("spider_src") or s.get("catvod") \
+            or s.get("xsrc") or s.get("drpy") or s.get("t4"):
+        return False
+    if str(s.get("id", "")).startswith(("spider-", "guard-", "drpy-", "t4-")):
+        return False
+    return bool(str(s.get("api", "")).startswith(("http://", "https://")))
+
+
+# ---------------- CMS 源导入 / 导出（移植上游 v0.2.69） ----------------
+@app.get("/v/api/ext/source/export")
+async def ext_source_export():
+    """导出纯 CMS 源为可移植 JSON（只含名称/接口/启用/独立库/非过滤等通用字段，
+    不含 id/内置标记，便于跨设备导入；jar/加固/小雅等不属本页范围）。"""
+    out = []
+    for s in config.all_sources():
+        if not _is_pure_cms(s):
+            continue
+        out.append({
+            "name": s.get("name", ""),
+            "api": s.get("api", ""),
+            "enabled": bool(s.get("enabled", True)),
+            "standalone": bool(s.get("standalone", False)),
+            "loose_filter": bool(s.get("loose_filter", False)),
+        })
+    return {"code": 0, "msg": "", "data": {"version": 1, "sources": out}}
+
+
+@app.post("/v/api/ext/source/import-file")
+async def ext_source_import_file(request: Request):
+    """从导出的 JSON（或含 sources 数组的兼容结构）批量导入纯 CMS 源。
+    自动去重（按规范化 API），返回新增/跳过计数；jar/爬虫/加固条目忽略并计数。
+    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    body = await request.json()
+    raw = body.get("sources")
+    if raw is None and isinstance(body.get("data"), dict):
+        raw = body["data"].get("sources")
+    if not isinstance(raw, list):
+        return JSONResponse({"code": 400, "msg": "JSON 需含 sources 数组"},
+                            status_code=400)
+    added, skipped, noncms = 0, 0, 0
+    for it in raw:
+        if not isinstance(it, dict):
+            continue
+        api = str(it.get("api", "")).strip()
+        name = str(it.get("name", "")).strip()
+        if not api.startswith(("http://", "https://")):
+            noncms += 1
+            continue
+        # 兼容 TVBox 形态：带 jar/csp/type!=0/1 的不当作纯 CMS
+        if it.get("jar") or str(it.get("type", "")).strip() not in ("", "0", "1", 0, 1):
+            noncms += 1
+            continue
+        ok, _info = config.add_source(
+            name, api, bool(it.get("enabled", True)),
+            bool(it.get("standalone", False)))
+        if ok:
+            added += 1
+            if it.get("loose_filter"):
+                # fork 适配：上游的 config.save({sid: {...}}) 在本 fork 是
+                # no-op（save 只认已有顶层键），改用 fork 已有的 set_loose_filter。
+                try:
+                    sid = config.make_custom_id(api)
+                    config.set_loose_filter(sid, True)
+                except Exception:
+                    pass
+        else:
+            skipped += 1
+    _search_cache.clear()
+    if added:
+        _schedule_routes_refresh()
+    return {"code": 0, "msg": "", "data": {"added": added, "skipped": skipped,
+                                            "ignored_noncms": noncms}}
+
+
+@app.post("/v/api/ext/source/update")
+async def ext_source_update(request: Request):
+    """编辑资源站名称 / 订阅(API)链接。自定义源可改链接（id 随地址哈希重建），
+    内置源仅允许改名。改后清搜索缓存并刷新海量库路由。
+    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    body = await request.json()
+    sid = str(body.get("id", ""))
+    cur = next((s for s in config.all_sources() if s["id"] == sid), None)
+    if not cur:
+        return JSONResponse({"code": 404, "msg": "源不存在"}, status_code=404)
+    name = body.get("name") if body.get("name") is not None else None
+    api = body.get("api") if body.get("api") is not None else None
+    if api is not None and cur.get("guard"):
+        return JSONResponse({"code": 400, "msg": "加固源订阅请在「TVBox 加固」页管理"},
+                            status_code=400)
+    try:
+        ok, info = config.update_source(sid, name=name, api=api)
+    except Exception as exc:
+        return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
+    if not ok:
+        return JSONResponse({"code": 400, "msg": info}, status_code=400)
+    _search_cache.clear()
+    _schedule_routes_refresh()
+    return {"code": 0, "msg": "ok", "data": {"id": info}}
 
 
 @app.post("/v/api/ext/source/import-tvbox")
@@ -10612,6 +10905,12 @@ async def linepredict_config(request: Request):
     if "max_lines" in body:
         try:
             patch["linepredict_max_lines"] = min(3, max(1, int(body["max_lines"])))
+        except (TypeError, ValueError):
+            pass
+    if "ttl_min" in body:
+        # 管理页开关新增：预测缓存有效期（分钟），与已有 enabled/max_lines 同端点。
+        try:
+            patch["linepredict_ttl_min"] = min(120, max(5, int(body["ttl_min"])))
         except (TypeError, ValueError):
             pass
     if patch:
