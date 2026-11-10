@@ -2775,15 +2775,25 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
                             timeout: float | None = None,
                             *, include_t4: bool = True,
-                            refresh: bool = False) -> list[dict]:
+                            refresh: bool = False,
+                            visible=None, viewer_key: str = "") -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
 
     结果进绑定聚合缓存池（按 片名·fast·t4 区分），TTL 内同片名的多次绑定/回源/
     搜索复用同一份聚合结果，并以单飞去重并发扇出，不重复拉取所有源。
     refresh=True 用于绑定搜索的网络重试：必须绕过缓存与旧在途任务，否则一次
     偶发空结果会被当成“无源”持续复用。
+
+    visible/viewer_key（P0-1 早返回按可见数计）：visible 是按查看者判定的
+    ``OnlineTitle -> bool`` 回调，透传给 search_all 做早返回决策；带
+    visible 的聚合结果可能因提前取消慢源而比无约束聚合少标题（缓存的是
+    未过滤 brief，但聚合本身已被该查看者的早返回截断），故缓存键须按
+    viewer_key 分账号——否则受限账号先搜会把截断结果留给管理员。
+    不带 visible 时 viewer_key 为空，缓存键与旧行为完全一致。
     """
     cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
+    if viewer_key:
+        cache_key += f"\x00{viewer_key}"
     loop = asyncio.get_event_loop()
     _hit = None if refresh else _AGG_CACHE.get(cache_key)
     if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
@@ -2798,7 +2808,8 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     _AGG_INFLIGHT[cache_key] = fut
     try:
         result = await __aggregate_briefs_inner(
-            keyword, maxn, fast_only, timeout, include_t4=include_t4)
+            keyword, maxn, fast_only, timeout, include_t4=include_t4,
+            visible=visible)
         # remember_merged 幂等：命中缓存路径也已入库，这里再确保 store 有这些 brief
         try:
             store.remember_merged(result)
@@ -2822,10 +2833,13 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
 async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                                    fast_only: bool = False,
                                    timeout: float | None = None,
-                                   *, include_t4: bool = True) -> list[dict]:
+                                   *, include_t4: bool = True,
+                                   visible=None) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
-    失败时快速回源，避免被 redroid 慢源拖到网关超时。"""
+    失败时快速回源，避免被 redroid 慢源拖到网关超时。
+    visible：按查看者判定的 OnlineTitle 可见回调，透传给 search_all，
+    只影响早返回决策，不改聚合与过滤分层。"""
     # 可选特性源不进入全局搜索（公开构建下该开关恒关，等价于不过滤）。
     sources = [s for s in config.enabled_sources()
                if not (features.ADULT and s.get("adult"))
@@ -2843,7 +2857,8 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     # 仍在 search_all 内，不动 fast_only 过滤与 T4 交错调度。
     titles = await providers.search_all(
         keyword, sources, timeout=timeout,
-        budget=None if timeout is not None else _AGGREGATE_SEARCH_BUDGET)
+        budget=None if timeout is not None else _AGGREGATE_SEARCH_BUDGET,
+        visible=visible)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
@@ -2956,9 +2971,31 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
     可能被不同账号先后搜到，缓存卡片会把先搜者的可见范围漏给后搜者，
     故每次返回时都按当前 request 重新过滤、重新建卡。
     request 为 None（无查看者上下文）时按 fail-closed 全部隐藏。
+
+    早返回按可见数计（P0-1）：把按查看者判定的可见回调传给
+    _aggregate_briefs/search_all，快源先回的隐藏库标题不再触发早返回
+    取消慢源。带回调的聚合可能被该查看者的早返回截断，故搜索缓存与
+    聚合缓存的键都按查看者分（viewer_key：已知账号用 guid，未知用
+    "unknown"）；request 为 None 时不传回调、不分键，行为与旧版一致。
     """
     now = time.time()
     cache_key = keyword if not fast_only else keyword + "\x00fast"
+    can_open = lambda k: _viewer_can_open_key(request, k)  # noqa: E731
+    visible = None
+    viewer_key = ""
+    if request is not None:
+        _viewer = fnusersmod.resolve(request)
+        viewer_key = _viewer.get("guid") \
+            if _viewer.get("known") else "unknown"
+        cache_key += "\x00" + viewer_key
+
+        def visible(title, _can_open=can_open):
+            try:
+                return libfiltermod.brief_visible(
+                    inj.brief_of(title), _can_open,
+                    gkey_of=_gkey_of_source)
+            except Exception:
+                return False
     if cache_key in _search_cache and now - _search_cache[cache_key][0] < CACHE_TTL:
         briefs = _search_cache[cache_key][1]
     else:
@@ -2973,7 +3010,8 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
                     # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
                     # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
                     briefs = await _aggregate_briefs(
-                        keyword, fast_only=fast_only, timeout=timeout)
+                        keyword, fast_only=fast_only, timeout=timeout,
+                        visible=visible, viewer_key=viewer_key)
                     _search_cache[cache_key] = (time.time(), briefs)
                     if not fut.done():
                         fut.set_result(briefs)
@@ -2986,7 +3024,6 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
 
             asyncio.create_task(work())
         briefs = await fut
-    can_open = lambda k: _viewer_can_open_key(request, k)  # noqa: E731
     return [_search_card(b) for b in libfiltermod.filter_briefs(
         briefs, can_open, gkey_of=_gkey_of_source)]
 

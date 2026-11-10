@@ -1056,13 +1056,21 @@ async def spider_get_title(client, source: dict, vod_id: str) -> OnlineTitle | N
 async def search_all(keyword: str, sources=None,
                      timeout: float | None = None,
                      soft_timeout: float | None = None,
-                     *, budget: float | None = None) -> list[OnlineTitle]:
+                     *, budget: float | None = None,
+                     visible=None) -> list[OnlineTitle]:
     """聚合搜索所有启用源。
 
     timeout/soft_timeout/budget：三者任一给出即为总预算（秒），到点返回已
     拿到的部分结果，未完成的源取消（不因单个慢源而整块超时清空）。
     为 None 时等全部完成。T4 与普通源交错排队、最多 8 路并发，避免 T4 源
     排在所有慢 CMS 后面。sources=[] 保持空列表，不恢复默认源。
+
+    visible：可选回调 ``OnlineTitle -> bool``，早返回阈值按它判为可见的
+    标题数计算（增量计数，到达的标题逐条判定，不重算）。不传时沿用旧行
+    为：按原始结果总数计算。调用方（app.online_search）传按查看者可打开
+    的库判定的回调：快源先回的 25 条若全属被隐藏的库，可见数为 0，不触
+    发早返回，慢源里本可见的标题就不会被提前取消；判定异常按不可见算。
+    本函数只用该回调做早返回决策，返回的仍是全部结果，过滤仍在上层做。
     """
     from itertools import zip_longest
     sources = DEFAULT_SOURCES if sources is None else sources
@@ -1097,6 +1105,9 @@ async def search_all(keyword: str, sources=None,
             early_gate = loop.time() + min(early_min_wait, float(budget))
             pending = set(tasks)
             results = []
+            # 早返回阈值按可见数计：visible 传入时只累计判定为可见的标题，
+            # 增量计数（到达即判，不重算）；不传时沿用原始总数。
+            visible_total = 0
             while pending and loop.time() < deadline:
                 done, pending = await asyncio.wait(
                     pending, timeout=min(0.25, deadline - loop.time()),
@@ -1106,7 +1117,17 @@ async def search_all(keyword: str, sources=None,
                         r = t.result()
                         if isinstance(r, list):
                             results.append(r)
-                total = sum(len(x) for x in results if isinstance(x, list))
+                            if visible is not None:
+                                for title in r:
+                                    try:
+                                        if visible(title):
+                                            visible_total += 1
+                                    except Exception:
+                                        pass
+                if visible is not None:
+                    total = visible_total
+                else:
+                    total = sum(len(x) for x in results if isinstance(x, list))
                 if loop.time() >= early_gate and total >= early_min_results:
                     break
             for t in pending:
