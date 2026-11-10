@@ -8,6 +8,11 @@ CI 里由 public job 在 ``build.sh --public --stage-only`` 之后、正式打�
 调用；目标目录是暂存树 ``packaging/fpk/.build/fpk/app/repo``，不是当前仓库。
 任何一项失败都以非零退出码结束，让 job 在打包前停下。
 
+公共逻辑（文件/开关检查骨架、子进程运行器、冒烟主流程）在
+``tools/smoke_common.py``；方向性期望（文件清单、开关开/关、
+import 检查、pytest 子集）由本文件传入，见 ``main()``。剥离版断言
+“私有文件不在 / 开关全关”，与完整版脚本方向相反，绝不能混用。
+
 检查项：
   1. 必需文件在，被剥离的私有文件/目录不在；
   2. 特性开关全关（红线开关仍在）；
@@ -25,10 +30,12 @@ CI 里由 public job 在 ``build.sh --public --stage-only`` 之后、正式打�
 """
 from __future__ import annotations
 
-import importlib.util
-import subprocess
 import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import smoke_common  # noqa: E402
 
 # 剥离后必须还在的文件。
 _REQUIRED = [
@@ -67,8 +74,6 @@ _STRIPPED = [
     "tools",
 ]
 
-_FLAGS_OFF = ("DDUO", "ADULT", "CATVOD", "DRPY", "GUARD")
-
 # import app 的最小启动验证（在子进程里跑，与当前解释器隔离）。
 _IMPORT_CHECK = """
 import app as appmod
@@ -99,76 +104,16 @@ _PYTEST_CMD = [
 ]
 
 
-def _failures(root: Path) -> list[str]:
-    bad: list[str] = []
-    for rel in _REQUIRED:
-        if not (root / rel).is_file():
-            bad.append(f"缺必需文件: {rel}")
-    for rel in _STRIPPED:
-        if (root / rel).exists():
-            bad.append(f"应剥离却还在: {rel}")
-    spec = importlib.util.spec_from_file_location(
-        "smoke_features", root / "proxy" / "features.py")
-    if spec is None or spec.loader is None:
-        bad.append("读不到 proxy/features.py")
-        return bad
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    for name in _FLAGS_OFF:
-        if getattr(mod, name, None) is not False:
-            bad.append(f"特性开关未关: {name}={getattr(mod, name, None)!r}")
-    if getattr(mod, "REDLINE", None) is not True:
-        bad.append("红线开关丢失或被改")
-    return bad
-
-
-def _run(cmd: list[str], cwd: Path, timeout: int, env_extra: dict) -> tuple[int, str]:
-    import os
-    env = dict(os.environ)
-    env.update(env_extra)
-    try:
-        proc = subprocess.run(cmd, cwd=str(cwd), env=env, timeout=timeout,
-                              capture_output=True, text=True)
-    except subprocess.TimeoutExpired:
-        return 1, "TIMEOUT"
-    return proc.returncode, proc.stdout + proc.stderr
-
-
 def main(argv: list[str]) -> int:
-    if len(argv) != 2:
-        print(__doc__)
-        return 2
-    root = Path(argv[1]).resolve()
-    if not root.is_dir():
-        print(f"[smoke] FAIL: 目标目录不存在: {root}")
-        return 2
-
-    bad = _failures(root)
-    for item in bad:
-        print(f"[smoke] FAIL: {item}")
-    if bad:
-        return 1
-    print("[smoke] 文件与开关检查通过")
-
-    proxy_dir = str(root / "proxy")
-    rc, out = _run([sys.executable, "-c", _IMPORT_CHECK], cwd=root,
-                   timeout=180, env_extra={"PYTHONPATH": proxy_dir})
-    print(out.strip() or "(无输出)")
-    if rc != 0:
-        print("[smoke] FAIL: import app 未通过")
-        return 1
-    print("[smoke] import app 检查通过")
-
-    rc, out = _run([sys.executable, *_PYTEST_CMD], cwd=root,
-                   timeout=600, env_extra={"PYTHONPATH": proxy_dir})
-    tail = "\n".join(out.strip().splitlines()[-15:])
-    print(tail or "(无输出)")
-    if rc != 0:
-        print("[smoke] FAIL: pytest 兼容子集未通过")
-        return 1
-    print("[smoke] pytest 兼容子集通过")
-    print("[smoke] ALL OK")
-    return 0
+    return smoke_common.main(
+        argv,
+        required=_REQUIRED,
+        forbidden=_STRIPPED,
+        flags_expect=False,
+        import_check=_IMPORT_CHECK,
+        pytest_cmd=_PYTEST_CMD,
+        pytest_label="pytest 兼容子集",
+    )
 
 
 if __name__ == "__main__":
