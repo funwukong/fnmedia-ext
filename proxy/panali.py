@@ -110,7 +110,9 @@ def account_info_safe() -> dict:
 
 # --------------------------------------------------------------- HTTP
 def _client() -> httpx.Client:
-    return httpx.Client(timeout=30, verify=False, trust_env=False,
+    # 证书校验开启：目标是阿里云盘开放平台官方域名
+    # （openapi.alipan.com，证书正常），且请求带 client_secret 与 token。
+    return httpx.Client(timeout=30, trust_env=False,
                         headers={"Content-Type": "application/json"})
 
 
