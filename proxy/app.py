@@ -2708,6 +2708,12 @@ async def forward_upstream_streaming(request: Request) -> Response:
 
 # ------------------------------------------------------------- 在线搜索
 
+# 聚合搜索总预算（秒）：无显式 timeout 时的兜底，与 T4 路径此前所用值一致。
+# search_all 内已有早返回（≥25 结果且过 0.8s 即取消慢源），预算只在冷门词/
+# 结果不足时兜底。显式 timeout（如媒体库搜索的 6.0s）优先，不被该值覆盖。
+_AGGREGATE_SEARCH_BUDGET = 5.0
+
+
 async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             fast_only: bool = False,
                             timeout: float | None = None,
@@ -2773,9 +2779,14 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                    and not str(s.get("id", "")).startswith(("spider-", "drpy-"))
                    and s.get("api")
                    and s.get("id") not in ("dduo", "xiaoya")]
-    titles = await providers.search_all(keyword, sources, timeout=timeout,
-                                        budget=5.0 if any(
-                                            s.get("kind") == "t4" for s in sources) else None)
+    # 总预算：此前只在有 T4 源时传 5.0s，无 T4 时 budget=None，search_all
+    # 等全部源完成——最慢源（加固 8s / CMS 12s / 爬虫 25s 单源超时）拖死
+    # 全局搜索，外层 wait_for 到点还会把已拿到的部分结果一并丢掉。现在无
+    # 显式 timeout 时一律给 5.0s 兜底（与 T4 路径同值），早返回/总预算逻辑
+    # 仍在 search_all 内，不动 fast_only 过滤与 T4 交错调度。
+    titles = await providers.search_all(
+        keyword, sources, timeout=timeout,
+        budget=None if timeout is not None else _AGGREGATE_SEARCH_BUDGET)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
