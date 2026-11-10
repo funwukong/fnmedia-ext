@@ -95,8 +95,8 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(r.url.host == "t4.test" for r in self.calls))
 
     async def test_t4_library_visible_without_acl_layer_in_fork(self):
-        # fork 适配：本 worktree 没有上游的 fnusers/lib_acl 权限层（多用户
-        # 权限在另一个 worktree 做，未合并），T4 选片对所有请求可见。
+        # fail-closed（decisions-2-failclosed）：T4 选片只对已识别且有权限的
+        # 账号可见；本类 setUp 已把 viewer 打成管理员，故对所有请求可见。
         plugin = await self.plugin()
         self.calls.clear()
         libraries = (await self.client.get("/v/api/v1/mediadb/list")).json()["data"]

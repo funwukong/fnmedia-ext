@@ -3364,9 +3364,10 @@ def _vkey_for_guid(guid: str) -> str | None:
 def _viewer_can_open_lib(request: Request, guid: str) -> bool:
     """当前账号是否允许打开该虚拟库（隐藏/无权限返回 False）。非虚拟库恒 True。
 
-    上游 fail-open 默认：识别不出身份 / 管理员 / 未配置账号 → 可见
-    （acl_default_visible=True）。想改回“识别不到就隐藏”，把配置
-    acl_default_visible 改为 False（管理页子账号授权里可改）。
+    fail-closed 默认：识别不出身份的会话始终不可见；管理员始终可见；
+    已识别但未配置账号按 acl_default_visible（默认 False=隐藏）。
+    想改回“未配置账号默认可见”，把配置 acl_default_visible 改为 True
+    （管理页子账号授权里可改）。
     """
     key = _vkey_for_guid(guid)
     if not key:
@@ -3381,7 +3382,7 @@ async def mediadb_list(request: Request):
     # 仍应展示，故这里只判断“聚合四库”开关）。
     if not any_virtual_lib_enabled():
         return upstream
-    # 当前账号（用于按账号显隐；识别失败/管理员按默认可见放行）
+    # 当前账号（用于按账号显隐；识别失败按 fail-closed 隐藏，管理员始终可见）
     viewer = fnusersmod.resolve(request)
     payload = await _json_from_upstream(upstream)
     dbs = payload.get("data") if payload else None
@@ -9817,7 +9818,7 @@ async def ext_accounts(request: Request):
 @app.post("/v/api/ext/account/acl")
 async def ext_account_acl(request: Request):
     """设置某账号允许看到的虚拟库（allow: [库键, ...]，空列表=不允许看任何
-    虚拟库；不传/传 null=取消限制，改回默认可见）。"""
+    虚拟库；不传/传 null=取消限制，改回默认：fail-closed 下默认不可见）。"""
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     ok, msg = vlibsmod.set_account_acl(body.get("guid"), body.get("allow", None))
     return {"code": 0 if ok else 1, "msg": msg}

@@ -20,6 +20,9 @@ def test_defaults_load_without_file(monkeypatch, tmp_path):
     cfg = c.get()
     assert cfg["config_version"] == config_mod.CONFIG_VERSION
     assert cfg["hot_library_enabled"] is True
+    # fail-closed 默认：未配置账号看不到虚拟库、不能在线搜索
+    assert cfg["acl_default_visible"] is False
+    assert cfg["acl_default_online"] is False
     assert cfg["admin_token"]  # 首次加载自动生成
     assert len(cfg["admin_token"]) == 64  # token_hex(32) = 256 bit
     assert cfg["admin_token_created_at"] > 0
@@ -87,6 +90,57 @@ def test_corrupt_config_no_backup_falls_back_to_defaults(monkeypatch, tmp_path):
     c = config_mod.Config()
     assert c.get()["hot_limit"] == config_mod.DEFAULTS["hot_limit"]
     assert c._restored_from_backup is False
+
+
+def test_acl_defaults_fail_closed_migration(monkeypatch, tmp_path):
+    # v1 旧配置（两项 True）：首次加载一次性翻成 False，并写回版本 2。
+    state = _patch_state(monkeypatch, tmp_path)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"config_version": 1,
+                                 "acl_default_visible": True,
+                                 "acl_default_online": True}),
+                     encoding="utf-8")
+    c = config_mod.Config()
+    assert c.get()["acl_default_visible"] is False
+    assert c.get()["acl_default_online"] is False
+    assert c.get()["config_version"] == 2
+    saved = json.loads(state.read_text(encoding="utf-8"))
+    assert saved["acl_default_visible"] is False
+    assert saved["acl_default_online"] is False
+    assert saved["config_version"] == 2
+    # 迁移后手动改回 True：重载后保持 True（迁移只跑一次）。
+    c.save({"acl_default_visible": True, "acl_default_online": True})
+    c2 = config_mod.Config()
+    assert c2.get()["acl_default_visible"] is True
+    assert c2.get()["acl_default_online"] is True
+    assert c2.get()["config_version"] == 2
+
+
+def test_acl_defaults_migration_without_version_key(monkeypatch, tmp_path):
+    # 没有 config_version 键的更旧配置同样视为 v1，迁移照常跑。
+    state = _patch_state(monkeypatch, tmp_path)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"acl_default_visible": True,
+                                 "acl_default_online": True}),
+                     encoding="utf-8")
+    c = config_mod.Config()
+    assert c.get()["acl_default_visible"] is False
+    assert c.get()["acl_default_online"] is False
+    assert c.get()["config_version"] == 2
+
+
+def test_acl_defaults_v2_config_not_remigrated(monkeypatch, tmp_path):
+    # 已是 v2 的配置：即使两项是 True 也不再翻（用户手动选择被保留）。
+    state = _patch_state(monkeypatch, tmp_path)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"config_version": 2,
+                                 "acl_default_visible": True,
+                                 "acl_default_online": True}),
+                     encoding="utf-8")
+    c = config_mod.Config()
+    assert c.get()["acl_default_visible"] is True
+    assert c.get()["acl_default_online"] is True
+    assert c.get()["config_version"] == 2
 
 
 def test_add_source_rejects_bad_api(monkeypatch, tmp_path):

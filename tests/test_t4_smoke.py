@@ -109,6 +109,13 @@ class T4SmokeTests(unittest.IsolatedAsyncioTestCase):
             item = patch.object(module, name, value)
             item.start()
             self.addCleanup(item.stop)
+        # fail-closed（decisions-2-failclosed）：未识别会话看不到虚拟库、
+        # 不能在线搜索；本类测的是全流程搜索/播放，以管理员身份请求。
+        item = patch.object(appmod.fnusersmod, "resolve", return_value={
+            "known": True, "guid": "admin-guid", "name": "admin",
+            "is_admin": True, "token": "tok-admin"})
+        item.start()
+        self.addCleanup(item.stop)
         appmod._search_cache.clear()
         appmod._search_inflight.clear()
         self.network = httpx.AsyncClient(trust_env=False, timeout=10)

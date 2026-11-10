@@ -351,16 +351,16 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
       <div class="card">
         <div class="card-title">⑤ 子账号可见权限</div>
-        <p class="card-sub">按飞牛账号勾选能看到的虚拟库；不勾选任何人表示该账号看不到任何虚拟库，点「恢复默认」取消该账号的限制。账号从飞牛官方数据库读取（只读），识别不到会话的账号按下方默认处理。</p>
+        <p class="card-sub">按飞牛账号勾选能看到的虚拟库；不勾选任何人表示该账号看不到任何虚拟库，点「恢复默认」取消该账号的限制。账号从飞牛官方数据库读取（只读）。识别不到会话的账号始终看不到虚拟库（不受下方默认开关影响）。</p>
         <label class="switch-row">
           <input type="checkbox" id="aclDefVis"/>
           <span>未设置过权限的账号默认能看到虚拟库
-            <span class="sub">关掉后，未设置权限的账号默认看不到虚拟库；管理员始终可见，识别不到会话时按此开关处理</span></span>
+            <span class="sub">关掉后，未设置权限的账号默认看不到虚拟库；管理员始终可见；识别不到会话的账号始终看不到虚拟库（与此开关无关）</span></span>
         </label>
         <label class="switch-row">
           <input type="checkbox" id="aclDefOnline"/>
           <span>未设置过权限的账号默认能用在线搜索
-            <span class="sub">关掉后，未设置权限的账号搜不到在线片源（只搜本地库）</span></span>
+            <span class="sub">关掉后，未设置权限的账号搜不到在线片源（只搜本地库）；识别不到会话的账号始终不能在线搜索</span></span>
         </label>
         <div class="btn-row">
           <button class="primary small" onclick="saveAclDefaults()">保存默认权限</button>
@@ -1276,7 +1276,7 @@ function libCards(chartCounts,cats){
 /* ---------- 虚拟媒体库 ---------- */
 let LIBS=[];
 let ACCOUNTS=[];
-let ACLDEF={visible:true,online:true};
+let ACLDEF={visible:false,online:false};
 let LIBPLACE="front",LIBANCHOR="",LIBORDER=[];
 async function loadLibs(){
   try{const r=await jget("/v/api/ext/libs");LIBS=(r.data&&r.data.libs)||[];
@@ -1362,8 +1362,8 @@ async function resetAcl(guid,btn){
   }catch(e){toast("保存失败","fail");}
 }
 async function saveAclDefaults(){
-  const body={acl_default_visible:$("aclDefVis")?$("aclDefVis").checked:true,
-    acl_default_online:$("aclDefOnline")?$("aclDefOnline").checked:true};
+  const body={acl_default_visible:$("aclDefVis")?$("aclDefVis").checked:false,
+    acl_default_online:$("aclDefOnline")?$("aclDefOnline").checked:false};
   try{
     const r=await jpost("/v/api/ext/account/defaults",body);
     if(r.code===0){ACLDEF={visible:body.acl_default_visible,online:body.acl_default_online};toast("默认权限已保存");}
@@ -1375,7 +1375,7 @@ function renderAccounts(){
   if(!ACCOUNTS.length){box.innerHTML=`<div class="muted sm">账号加载中…（若一直为空，说明 NAS 上 trim.media 的数据库目录不可读）。</div>`;return;}
   box.innerHTML=ACCOUNTS.map(a=>{
     const libs=LIBS.map(L=>{
-      const checked=a.allowed===null?true:a.allowed.includes(L.key);
+      const checked=a.allowed===null?ACLDEF.visible:a.allowed.includes(L.key);
       return `<label style="display:inline-flex;gap:4px;align-items:center;margin:2px 8px 2px 0;font-size:13px">
         <input type="checkbox" data-libkey="${esc(L.key)}" ${checked?"checked":""}/> ${esc(L.title)}</label>`;
     }).join("");
