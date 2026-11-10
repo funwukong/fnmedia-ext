@@ -299,7 +299,8 @@ def classify_site(site: dict) -> tuple[str, dict | None]:
         norm_api = api
     else:
         # 统一为苹果CMS JSON 接口：/provide/vod[/] → /provide/vod/at/json，
-        # 保留原有 query（如采集站 token）。仅支持 XML 的站点会在探测时被剔除。
+        # 保留原有 query（如采集站 token）。仅支持 XML 的站点已由
+        # providers.parse_cms_xml 在运行时解析，不再剔除。
         m = re.match(r"^(.*?/provide/vod)/?(\?.*)?$", api, re.I)
         if m:
             norm_api = m.group(1).rstrip("/") + "/at/json" + (m.group(2) or "")

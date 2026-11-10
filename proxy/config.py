@@ -582,6 +582,12 @@ class Config:
             name = (name or "").strip()
             if not api.startswith(("http://", "https://")):
                 return False, "API 地址需以 http(s):// 开头"
+            # 入库归一（与 TVBox 导入路径 tvbox.classify_site 一致）：
+            # 苹果 CMS 的 /at/xml 只作运行时兼容（providers.parse_cms_xml，
+            # 供已入库的旧 /at/xml 源继续工作），新入库统一写成 /at/json，
+            # 避免同一站点的 xml/json 两条记录并存。只改新入库这一条，
+            # 已入库源的 api 不动。query（如采集站 token）原样保留。
+            api = re.sub(r"/at/xml(?=/|$|\?)", "/at/json", api, flags=re.I)
             if not name:
                 name = api.split("/")[2]
             sid = self.make_custom_id(api)
