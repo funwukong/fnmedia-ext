@@ -206,10 +206,17 @@ def set_order(keys, placement=None, anchor=None) -> tuple[bool, str]:
 
 
 def sort_keys(keys: list[str]) -> list[str]:
-    """按自定义顺序排序；未列出的库保持稳定地追加在后。"""
-    n = len(keys)
-    return sorted(keys, key=lambda k: (order_index(k) if order_index(k) < 10_000_000
-                                       else 10_000_000 + keys.index(k)))
+    """按自定义顺序排序；未列出的库保持稳定地追加在后。
+
+    顺序表只读一次、建成索引后复用：此前每次比较都调两次
+    ``order_index``（每次都深拷贝全配置），排序 n 个键要 O(n log n)
+    次全量拷贝。
+    """
+    order = lib_order()
+    idx = {k: i for i, k in enumerate(order)}
+    pos = {k: i for i, k in enumerate(keys)}
+    return sorted(keys, key=lambda k: (idx[k] if k in idx
+                                       else 10_000_000 + pos[k]))
 
 
 # --------------------------------------------------------------- 子账号授权
@@ -270,6 +277,81 @@ def acl_default_online() -> bool:
         return False
 
 
+# --------------------------------------------------------------- 每请求快照
+
+class ViewerContext:
+    """单请求查看者快照：一次 ``config.get()`` 拿到显隐/授权/默认开关。
+
+    此前 ``account_can_see`` 每调一次要走 ``hidden_libs`` + ``_acl`` +
+    ``acl_default_*`` 三次全量 JSON 深拷贝（还持锁）；一次搜索 12 条
+    brief、每条多扇门，累计 70–100 次深拷贝。快照只拷一次，整次
+    搜索/详情过滤复用同一份。
+
+    本对象是可被其他组（第 1、3 项）复用的每请求上下文形态：app 层
+    按请求建一个挂在 ``request.state`` 上（见 app ``_viewer_ctx``），
+    新代码直接调 ``can_see``；旧入口 ``account_can_see`` /
+    ``account_online_allowed`` 也改走快照（单次调用仍只有一次深拷贝）。
+    fail-closed 语义与原 ``account_can_see`` 完全一致。
+    """
+
+    __slots__ = ("user", "hidden", "acl", "default_visible", "default_online")
+
+    def __init__(self, user, hidden=frozenset(), acl=None,
+                 default_visible=False, default_online=False):
+        self.user = user or {}
+        self.hidden = frozenset(hidden or ())
+        self.acl = dict(acl or {})
+        self.default_visible = bool(default_visible)
+        self.default_online = bool(default_online)
+
+    @classmethod
+    def for_user(cls, user):
+        """从当前配置建一份快照（恰好一次 ``config.get()``）。"""
+        try:
+            cfg = config.get()
+        except Exception:
+            cfg = {}
+        return cls(
+            user,
+            hidden=set(cfg.get("lib_hidden", []) or []),
+            acl=dict(cfg.get("lib_acl", {}) or {}),
+            default_visible=bool(cfg.get("acl_default_visible", False)),
+            default_online=bool(cfg.get("acl_default_online", False)),
+        )
+
+    def can_see(self, key: str) -> bool:
+        """快照版 account_can_see：不读配置，语义与之一致。"""
+        if not key:
+            return True
+        if key in self.hidden:
+            return False
+        user = self.user
+        if not user or not user.get("known"):
+            return False
+        if user.get("is_admin"):
+            return True
+        allow = self.acl.get(user.get("guid", ""))
+        if allow is None:
+            return self.default_visible
+        return key in allow
+
+    def can_see_any(self, keys) -> bool:
+        """任一库键可见即 True（空集=不可见，fail-closed）。"""
+        return any(self.can_see(k) for k in (keys or ()))
+
+    def online_allowed(self) -> bool:
+        """快照版 account_online_allowed：不读配置，语义与之一致。"""
+        user = self.user
+        if not user or not user.get("known"):
+            return False
+        if user.get("is_admin"):
+            return True
+        allow = self.acl.get(user.get("guid", ""))
+        if allow is None:
+            return self.default_online
+        return "__online__" in allow
+
+
 def account_can_see(user: dict, key: str) -> bool:
     """该账号能否看到某虚拟库（fail-closed）。
 
@@ -279,19 +361,11 @@ def account_can_see(user: dict, key: str) -> bool:
     - 已识别但未配置账号 → 默认 acl_default_visible（默认 False=隐藏）
     - 任何被管理员全局隐藏的库对所有人不可见（含管理员自己的飞牛列表，
       管理页仍可重新打开）。
+
+    实现走 ``ViewerContext`` 快照：单次调用只有一次 ``config.get()``
+    深拷贝（此前是 hidden/_acl/default 三次）。
     """
-    if not key:
-        return True
-    if is_hidden(key):
-        return False
-    if not user or not user.get("known"):
-        return False
-    if user.get("is_admin"):
-        return True
-    allow = _acl().get(user.get("guid", ""))
-    if allow is None:
-        return acl_default_visible()
-    return key in allow
+    return ViewerContext.for_user(user).can_see(key)
 
 
 def account_online_allowed(user: dict) -> bool:
@@ -299,13 +373,6 @@ def account_online_allowed(user: dict) -> bool:
 
     fail-closed：识别不出身份（known=False）→ 始终不允许；管理员始终允许；
     已识别但未配置账号走 acl_default_online（默认 False）。
+    实现走 ``ViewerContext`` 快照（单次调用一次深拷贝）。
     """
-    if not user or not user.get("known"):
-        return False
-    if user.get("is_admin"):
-        return True
-    allow = _acl().get(user.get("guid", ""))
-    if allow is None:
-        return acl_default_online()
-    # 已配置账号：用其授权里的特殊标记 "__online__" 决定
-    return "__online__" in allow
+    return ViewerContext.for_user(user).online_allowed()

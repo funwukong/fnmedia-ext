@@ -289,6 +289,9 @@ class OnlineTitle:
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
     locator: dict = field(default_factory=dict)
+    # 苹果 CMS 分类 id（vod 的 type_id；_map_vod 保留，聚合搜索用它反查
+    # 该源的分类路由，见 catalog.cat_for_source_type）。非 CMS 源为空。
+    type_id: str = ""
 
     @property
     def online_id(self) -> str:
@@ -418,6 +421,7 @@ def _map_vod(v: dict, source: dict) -> OnlineTitle | None:
         vod_id=str(v.get("vod_id")),
         title=v.get("vod_name", "").strip(),
         type_name=v.get("type_name", ""),
+        type_id=str(v.get("type_id") or ""),
         year=str(v.get("vod_year", "") or ""),
         area=v.get("vod_area", "") or "",
         updated=str(v.get("vod_time", "") or v.get("vod_time_add", "") or ""),
@@ -1092,6 +1096,7 @@ async def search_all(keyword: str, sources=None,
             early_gate = loop.time() + min(early_min_wait, float(budget))
             pending = set(tasks)
             results = []
+            seen_ids = set()
             while pending and loop.time() < deadline:
                 done, pending = await asyncio.wait(
                     pending, timeout=min(0.25, deadline - loop.time()),
@@ -1101,18 +1106,22 @@ async def search_all(keyword: str, sources=None,
                         r = t.result()
                         if isinstance(r, list):
                             results.append(r)
+                            seen_ids.add(id(t))
                 total = sum(len(x) for x in results if isinstance(x, list))
                 if loop.time() >= early_gate and total >= early_min_results:
                     break
             for t in pending:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            # 被取消/超时的任务若已产出也尽量回收
+            # 被取消/超时的任务若已产出也尽量回收。按任务身份去重，不再用
+            # 列表相等比较（OnlineTitle 是 dataclass，逐字段比较是 O(n²)）。
             for t in tasks:
-                if t.done() and not t.cancelled() and t.exception() is None:
+                if (t.done() and not t.cancelled() and t.exception() is None
+                        and id(t) not in seen_ids):
                     r = t.result()
-                    if isinstance(r, list) and r not in results:
+                    if isinstance(r, list):
                         results.append(r)
+                        seen_ids.add(id(t))
     # 汇总：聚合搜索里单个源抛异常会被上面的结果过滤悄悄丢掉，这里按源记一条日志
     # （只记源 id 与数量，不记搜索关键词）。
     failed = [s.get("id", "?") for s, t in zip(scheduled, tasks)

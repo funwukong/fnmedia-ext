@@ -10,10 +10,12 @@
 搜索聚合 brief（``inject.brief_of``）只有：``guid``、``online_id``
 （``"<provider>:<vod_id>"``）、``title``、``type_name``、``lines``
 （聚合后键形如 ``"<provider>::<线路名>"``）、``locator``（T4 为
-``{"kind": "t4", ...}``）。它**没有** ``catalog_*`` 字段。
+``{"kind": "t4", ...}``）。它**没有** ``catalog_*`` 字段，但有
+``catalog_route``（P0-6 补，见规则 3）。
 分类库 brief（``catalog._briefs_from_vods``）另有：``catalog_cat``、
 ``catalog_scope``（聚合作用域 ``catalog.AGG_SCOPE == "__agg__"``，
-或单源作用域=源 id）、``catalog_source``（源 id）。
+或单源作用域=源 id）、``catalog_source``（源 id），以及同源的
+``catalog_route``。
 榜单 brief（``hot.py``）不进搜索/详情主路径，不在此映射。
 
 二、归属规则（一个标题可归属多张库；可见 = 任一归属库可打开）
@@ -49,17 +51,26 @@
      性”的含义。反之只认分类库会让“仅开某源独立库”的账号搜不到
      该源标题，同样不对。ANY 语义下，标题被隐藏当且仅当它的
      每一扇门都对查看者关闭。
+   - 再加来源分类路由门：brief 带 ``catalog_route``（``{"source",
+     "type_id", "cat"}``，聚合搜索由 app 层按 vod 的 type_id 反查
+     catalog 路由表补，分类库 brief 由 catalog 产生点直接补）时，
+     ``cat`` 有效即另加 ``"catalog:<cat>"``（并集）。路由是源分类的
+     真实归属，可覆盖全部 11 个分类库（含 documentary/uhd/
+     shortdrama/overseas/ai_comic/ted/adult）；路由缺失或 cat 为空
+     （旧缓存）时回退到类型名映射，行为与改前一致。
 4. 榜单库（``chart:<cat>``）**不是**搜索标题的归属：榜单标题是
    豆瓣条目（自有 guid），搜索 brief 是资源站标题，两者不是同一
    批记录。榜单详情里“已绑定资源站标题”的分支（``item_detail`` 的
    chart-bound 分支）在 app 层额外并上 ``chart:<cat>``——那是
    榜单库这扇真实存在的门，不属于本模块。
 5. 扩展分类库（documentary/uhd/shortdrama/overseas/ai_comic/ted/
-   adult）**不从类型名推断**：代码里没有可靠的 type_name→扩展分类
-   规则（分类库归属由源的分类路由决定，不由标题类型名决定），
-   强行推断会错放。这类标题仍经独立库门解析；若查看者只开了
-   扩展分类库而没开对应独立库，搜索里会看不到它——这是已知缺口，
-   待后续在 brief 里补“来源分类路由”字段再精确归属。
+   adult）**不从类型名推断**（类型名→扩展分类没有可靠规则，
+   强行推断会错放），改走 ``catalog_route`` 路由门（见规则 3）。
+   另：类型名含“纪录片”此前被 ``_MOVIE_CAT_WORDS`` 命中归入
+   ``catalog:movie``，现 ``catalog_cat_for_type`` 先判纪录片词，
+   归入 ``catalog:documentary``（与 ``inject.hot_category`` 的
+   四分类有意分歧：热门库只有 movie/tv/anime/variety 四张，
+   纪录片在热门侧仍归 movie，搜索过滤侧归 documentary）。
 
 三、无法映射的处理：拒绝（fail-closed）
 ----------------------------------------
@@ -85,27 +96,39 @@ from __future__ import annotations
 AGG_SCOPE = "__agg__"
 
 # 与 inject.hot_category 完全相同的类型词表与优先级（anime > variety >
-# movie > tv）。tests/test_libfilter.py 会对一组类型名断言两者一致，
+# movie > tv），仅一处有意分歧：纪录片词不进 _MOVIE_CAT_WORDS，
+# catalog_cat_for_type 先判纪录片 → documentary（见该函数文档）。
+# tests/test_libfilter.py 会对一组类型名断言两者一致（纪录片除外），
 # 防止任一方改动后漂移。
 _ANIME_WORDS = ("动漫", "番剧", "动画剧", "动画", "日本动漫", "日韩动漫",
                 "国产动漫", "欧美动漫", "动漫片")
 _VARIETY_WORDS = ("综艺", "真人秀")
 _MOVIE_CAT_WORDS = ("电影", "影片", "剧情片", "动作片", "喜剧片", "爱情片",
-                    "科幻片", "恐怖片", "纪录片", "动画电影")
+                    "科幻片", "恐怖片", "动画电影")
+_DOC_WORDS = ("纪录片", "纪录", "纪实")
+
+# 分类库全部 cat（含扩展分类），供 catalog_route 校验；与
+# app.CATALOG_LIB_GUIDS 的键一致（tests 会断言两者一致）。
+_KNOWN_CATALOG_CATS = frozenset((
+    "movie", "tv", "anime", "variety", "documentary", "uhd",
+    "shortdrama", "overseas", "ai_comic", "ted", "adult"))
 
 
 def catalog_cat_for_type(type_name: str) -> str:
-    """类型名 → 聚合分类库 cat（movie/tv/anime/variety 之一）。
+    """类型名 → 聚合分类库 cat（movie/tv/anime/variety/documentary 之一）。
 
-    与 inject.hot_category 同规则：anime/variety/movie 词表命中其一，
-    其余（含类型缺失）一律归 tv；只覆盖四个热门分类，扩展分类
-    （documentary/uhd/…）不推断，见模块文档第五条。
+    与 inject.hot_category 同规则，仅一处有意分歧：类型名含“纪录片”
+    归 documentary 而非 movie（hot_category 的四分类里没有纪录片库，
+    仍归 movie；搜索过滤侧有 catalog:documentary 这张库）。
+    扩展分类（uhd/shortdrama/…）仍不从类型名推断，走 catalog_route。
     """
     typ = (type_name or "").strip()
     if any(w in typ for w in _ANIME_WORDS):
         return "anime"
     if any(w in typ for w in _VARIETY_WORDS):
         return "variety"
+    if any(w in typ for w in _DOC_WORDS):
+        return "documentary"
     if any(w in typ for w in _MOVIE_CAT_WORDS):
         return "movie"
     return "tv"
@@ -125,6 +148,15 @@ def brief_lib_keys(brief: dict, *, gkey_of=None) -> set[str]:
         # T4 标题不与 CMS 线路合并，唯一归属就是 T4 选片库。
         return {"t4"}
 
+    # 来源分类路由门（P0-6）：cat 有效即另加一张分类库；缺失/非法/为空
+    # 时 route_cat 为 ""，只走类型名映射（旧缓存回退现有行为）。
+    route_cat = ""
+    route = brief.get("catalog_route") or {}
+    if isinstance(route, dict):
+        cand = route.get("cat") or ""
+        if cand in _KNOWN_CATALOG_CATS:
+            route_cat = cand
+
     cat = brief.get("catalog_cat") or ""
     scope = brief.get("catalog_scope") or ""
     source = brief.get("catalog_source") or ""
@@ -136,6 +168,8 @@ def brief_lib_keys(brief: dict, *, gkey_of=None) -> set[str]:
                 keys.add(f"catalog:{cat}")
             if source:
                 keys.add(f"standalone:{source}")
+            if route_cat:
+                keys.add(f"catalog:{route_cat}")
             return keys
         # 单源作用域：只在该源独立库里出现。
         sid = source or scope
@@ -166,6 +200,8 @@ def brief_lib_keys(brief: dict, *, gkey_of=None) -> set[str]:
     cat = catalog_cat_for_type(brief.get("type_name") or "")
     if cat:
         keys.add(f"catalog:{cat}")
+    if route_cat:
+        keys.add(f"catalog:{route_cat}")
     return keys
 
 

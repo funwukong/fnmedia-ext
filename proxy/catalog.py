@@ -477,6 +477,22 @@ class Catalog:
         except Exception:
             return None
 
+    def cat_for_source_type(self, source_id: str, type_id) -> str | None:
+        """(source_id, type_id) → 该源分类路由的 cat；路由未加载/无匹配返回 None。
+
+        供聚合搜索 brief 补 ``catalog_route`` 用：搜索返回的 vod 自带
+        type_id，与建库时抓到的分类表（``_classes``）同一 id 空间；
+        cat 由建库时的 ``classify_source_class`` 定，与分类库路由一致。
+        """
+        if not source_id or type_id is None or str(type_id) == "":
+            return None
+        tid = str(type_id)
+        with self._lock:
+            for cl in self._classes.get(source_id, []) or []:
+                if str(cl.get("type_id")) == tid:
+                    return cl.get("cat") or None
+        return None
+
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
@@ -750,6 +766,10 @@ class Catalog:
                           for name, eps in t.sources.items()},
                 "catalog_cat": cat, "catalog_scope": scope,
                 "catalog_source": route["source_id"],
+                # P0-6：来源分类路由（与 catalog_* 同源，供 libfilter
+                # 并集归属；聚合搜索 brief 由 app 层补同一形状字段）。
+                "catalog_route": {"source": source["id"],
+                                  "type_id": route["type_id"], "cat": cat},
             })
         # 派生 4K：浏览电影/剧集等分类时，带 4K 画质信号的片顺手抄一份进
         # 同作用域的 uhd 密集列表——源分类名里没有“4K”时 4K 库也能有内容。
@@ -763,7 +783,9 @@ class Catalog:
                 if not is_uhd_title(b["title"], b["remarks"]):
                     continue
                 uhd_seen.add(b["guid"])
-                uhd_dense.append({**b, "catalog_cat": "uhd"})
+                uhd_dense.append({**b, "catalog_cat": "uhd",
+                                  "catalog_route": {**b["catalog_route"],
+                                                    "cat": "uhd"}})
             self._dense_count[uhd_sk] = len(uhd_dense)
         return briefs
 
