@@ -1304,8 +1304,8 @@ async function loadLibs(){
 async function loadAccounts(){
   try{const r=await jget("/v/api/ext/accounts");
     ACCOUNTS=(r.data&&r.data.accounts)||[];
-    ACLDEF={visible:r.data&&r.data.acl_default_visible!==false,
-            online:r.data&&r.data.acl_default_online!==false};
+    ACLDEF={visible:r.data&&r.data.acl_default_visible===true,
+            online:r.data&&r.data.acl_default_online===true};
     if($("aclDefVis"))$("aclDefVis").checked=ACLDEF.visible;
     if($("aclDefOnline"))$("aclDefOnline").checked=ACLDEF.online;
   }catch(e){ACCOUNTS=[];}
