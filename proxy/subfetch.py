@@ -39,11 +39,13 @@ def sub_client() -> httpx.Client:
     但显式应用用户配置的订阅代理。"""
     px = subscription_proxy()
     try:
+        # 保留 verify=False：订阅 URL 由用户任意配置，常为自签/IP/证书链
+        # 不完整的社区源；只拉取公开资源文件，不带任何凭据。
         return httpx.Client(trust_env=False, verify=False, follow_redirects=True,
                             timeout=SUB_TIMEOUT,
                             **({"proxy": px} if px else {}))
     except TypeError:
-        # 极旧版 httpx 用 proxies=
+        # 极旧版 httpx 用 proxies=（同上，保留 verify=False）
         return httpx.Client(trust_env=False, verify=False, follow_redirects=True,
                             timeout=SUB_TIMEOUT,
                             **({"proxies": px} if px else {}))
@@ -52,10 +54,12 @@ def sub_client() -> httpx.Client:
 def async_sub_client() -> httpx.AsyncClient:
     px = subscription_proxy()
     try:
+        # 保留 verify=False：理由同 sub_client（用户配置的任意订阅 URL）。
         return httpx.AsyncClient(trust_env=False, verify=False, follow_redirects=True,
                                  timeout=SUB_TIMEOUT,
                                  **({"proxy": px} if px else {}))
     except TypeError:
+        # 极旧版 httpx 用 proxies=（同上，保留 verify=False）
         return httpx.AsyncClient(trust_env=False, verify=False, follow_redirects=True,
                                  timeout=SUB_TIMEOUT,
                                  **({"proxies": px} if px else {}))
@@ -98,6 +102,8 @@ def fetch_first(urls, *, want_zip: bool = False, timeout: float | None = None):
             px = subscription_proxy()
             if px:
                 kw["proxy"] = px
+            # 保留 verify=False：理由同 sub_client（用户配置的任意订阅
+            # URL 及 GitHub 镜像站，只拉取公开资源文件，不带任何凭据）。
             with httpx.Client(trust_env=False, verify=False, follow_redirects=True,
                               **kw) as cli:
                 r = cli.get(u, headers={"User-Agent": _UA})

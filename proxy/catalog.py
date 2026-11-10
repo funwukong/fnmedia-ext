@@ -299,8 +299,7 @@ class Catalog:
         self._refreshing = True
         try:
             async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+                    follow_redirects=True, trust_env=False) as client:
                 await asyncio.gather(
                     *[self._load_source_classes(client, s) for s in sources],
                     return_exceptions=True)
@@ -323,8 +322,7 @@ class Catalog:
             probed: dict[tuple[str, str], dict] = {}
 
             async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+                    follow_redirects=True, trust_env=False) as client:
                 async def probe_one(sid, cat, cl):
                     source = self._source_by_id(sid)
                     if not source:
@@ -742,8 +740,10 @@ class Catalog:
             async def once(timeout):
                 # 上游 v1.0.0 做法：深翻经 netutil.async_client（按代理模式
                 # 直连/走代理/自动切代理），与 providers.py 已有用法一致。
-                async with netutil.async_client(verify=False,
-                                               timeout=HTTP_TIMEOUT) as client:
+                # 证书校验开启（与 providers.py 的 CMS 抓取一致；用户源
+                # API 与搜索/详情走同一批主机，不应在此处单独关校验）。
+                async with netutil.async_client(
+                        timeout=HTTP_TIMEOUT) as client:
                     async def bound(r):
                         async with sem:
                             return await fetch_one(client, r, timeout)
@@ -770,8 +770,8 @@ class Catalog:
             return []
 
         # 跨源聚合：串行回退（不同源结果应一致，并发会无谓翻倍请求）
-        async with netutil.async_client(verify=False,
-                                       timeout=HTTP_TIMEOUT) as client:
+        # 证书校验开启，理由同上（与 providers.py 的 CMS 抓取一致）。
+        async with netutil.async_client(timeout=HTTP_TIMEOUT) as client:
             for route in routes:
                 got = await fetch_one(client, route, HTTP_TIMEOUT)
                 if not got:

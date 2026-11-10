@@ -9452,6 +9452,8 @@ async def ext_source_heal(request: Request):
     import httpx as _httpx
 
     def _fetch(url: str):
+        # 保留 verify=False：待自愈的源 API 由用户任意配置，常为自签/IP/
+        # 证书链不完整的自建源；自愈只判 200 + 正常页面，不带任何凭据。
         with _httpx.Client(timeout=12, verify=False, trust_env=False) as c:
             r = c.get(url, headers={"User-Agent": "Mozilla/5.0"})
             return r.status_code, r.text
@@ -9812,6 +9814,8 @@ async def ext_set_subscription_proxy(request: Request):
     if px:
         try:
             import httpx as _httpx
+            # 保留 verify=False：连通探测经用户自配代理发出，代理可能终结并
+            # 重签 TLS；只判 200/204 是否可达，代理本身失败也保存、仅提示。
             with _httpx.Client(trust_env=False, verify=False, timeout=12,
                                proxy=px) as cli:
                 rr = cli.get("https://www.gstatic.com/generate_204")
@@ -11689,7 +11693,7 @@ refresh();
         #（裸取夸克分片会 412）。
         if is_m3u8 and request.method == "GET":
             try:
-                async with httpx.AsyncClient(verify=False, trust_env=False,
+                async with httpx.AsyncClient(trust_env=False,
                                             timeout=40) as pc:
                     pr = await pc.get(url, headers={"Cookie": cookie})
                 if pr.status_code == 200 and "#EXTM3U" in pr.text[:64]:
@@ -11705,7 +11709,7 @@ refresh();
         rng = request.headers.get("range")
         if rng:
             fwd["Range"] = rng
-        client = httpx.AsyncClient(verify=False, trust_env=False, timeout=60,
+        client = httpx.AsyncClient(trust_env=False, timeout=60,
                                    follow_redirects=True)
         try:
             upstream = await client.send(

@@ -1,9 +1,10 @@
 """netutil 接入剩余三处（移植来源：上游 yujian0815/fnmedia-ext main v1.0.0）：
 
 1. 分类深翻 proxy/catalog.py::_load_page：深翻抓取经
-   netutil.async_client(verify=False, timeout=HTTP_TIMEOUT)，与上游
+   netutil.async_client(timeout=HTTP_TIMEOUT)，与上游
    catalog.py 逐行一致；T4 分支不在深翻路径内（refresh_routes 入口已
-   过滤 kind == "t4"），未动。
+   过滤 kind == "t4"），未动。证书校验开启（port/verify：与 providers.py
+   的 CMS 抓取一致，不再传 verify=False）。
 2. dduo 探测 proxy/providers.py::dduo_probe_source：经
    netutil.async_client(timeout=timeout)；上游无 DDUO 模块，搬的是上游
    通用 probe_source 的客户端构造方式。
@@ -99,8 +100,7 @@ def test_load_page_aggregate_uses_netutil_client():
         briefs = asyncio.run(cat._load_page(catalog.AGG_SCOPE, "movie", 1))
     assert len(briefs) == 1
     assert briefs[0]["title"] == "测试电影1"
-    assert factory.kwargs == [{"verify": False,
-                               "timeout": catalog.HTTP_TIMEOUT}]
+    assert factory.kwargs == [{"timeout": catalog.HTTP_TIMEOUT}]
     assert len(fake.calls) == 1
     assert fake.calls[0][0].startswith("https://cms.example.com/")
 
@@ -117,8 +117,7 @@ def test_load_page_standalone_multileaf_uses_netutil_client():
         briefs = asyncio.run(cat._load_page("s1", "movie", 1))
     # 两叶子各返回一条不同 vod，合并去重后两条。
     assert sorted(b["title"] for b in briefs) == ["测试电影1", "测试电影2"]
-    assert factory.kwargs == [{"verify": False,
-                               "timeout": catalog.HTTP_TIMEOUT}]
+    assert factory.kwargs == [{"timeout": catalog.HTTP_TIMEOUT}]
     assert len(fake.calls) == 2
 
 

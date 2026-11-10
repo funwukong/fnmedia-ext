@@ -35,10 +35,9 @@ import httpx
 def _ssl_ctx() -> ssl.SSLContext:
     # 每个 client 独立的 SSL 上下文，并禁用 TLS Session Ticket：
     # 夸克风控会标记复用同一会话票据的连接（访问带码分享后再打 drive-pc
-    # 会持续 401）。全局默认 verify=False 共享底层会话，故必须逐 client 新建。
+    # 会持续 401）。证书校验保持开启——只禁 Session Ticket，不关校验：
+    # 目标是官方域名（证书正常），且请求带登录 Cookie。
     ctx = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode = ssl.CERT_NONE
     try:
         ctx.options |= ssl.OP_NO_TICKET
     except Exception:
@@ -495,9 +494,9 @@ def _pc(method: str, url: str, cookie: str, _tries: int = 5, **kw) -> dict:
         headers["Content-Type"] = "application/json;charset=UTF-8"
     last = ""
     for attempt in range(_tries):
+        # 证书校验保持开启（官方域名证书正常，请求带登录 Cookie）；
+        # 只禁 Session Ticket 防风控 401。
         ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
         try:
             ctx.options |= ssl.OP_NO_TICKET
         except Exception:
@@ -758,7 +757,7 @@ def resolve_linkstart(pan_id: str) -> str:
         "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
     }
     try:
-        with httpx.Client(verify=False, trust_env=False, timeout=12,
+        with httpx.Client(trust_env=False, timeout=12,
                           follow_redirects=False, transport=_v4_transport(),
                           headers=headers) as c:
             nxt = f"https://sidhub.cc/link_start/?redirect_to=pan_id_{pan_id}"
