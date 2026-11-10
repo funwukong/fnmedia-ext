@@ -113,6 +113,24 @@ _PYTEST_CMD = [
     "tests/test_library_visibility.py",
     # 管理台 P1 回归（16/22）。
     "tests/test_admin_ui_p1.py",
+    # P0+P1 八分支合入的新测试（slowci / perf / cleanup / subpan /
+    # config / search / failclosed；剥离方向见 post_strip_smoke，
+    # 它跑整棵 tests/，新文件自动覆盖）。
+    "tests/test_build_workflow.py",
+    "tests/test_p1_catalog_deepfetch.py",
+    "tests/test_p1_fnusers_lock.py",
+    "tests/test_p1_store_dirty.py",
+    "tests/test_p1_log_noise.py",
+    "tests/test_pan_shared.py",
+    "tests/test_p1_pan_cleanup.py",
+    "tests/test_p1_xml_cms.py",
+    "tests/test_poster.py",
+    "tests/test_p1_config_items.py",
+    "tests/test_p0p1_search_agg_cache.py",
+    "tests/test_p0p1_search_catalog_route.py",
+    "tests/test_p0p1_search_viewer_snapshot.py",
+    "tests/test_p0_early_return_visible.py",
+    "tests/test_p0_playchain_favorites.py",
     "-q", "-p", "no:cacheprovider",
 ]
 

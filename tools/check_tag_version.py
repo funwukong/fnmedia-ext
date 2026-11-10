@@ -15,7 +15,7 @@
     且本次不产生 Release，错 tag 不会流出）。
 
 为什么不在 Release 步骤里才发现：Release 步骤用
-``${GITHUB_REF_NAME:-v$(VERSION)}`` 拼 tag，tag 与 VERSION 不一致时，
+``${GITHUB_REF_NAME:-v$(VERSION)-fpk}`` 拼 tag，tag 与 VERSION 不一致时，
 错误版本的 FPK 会以错误的 tag 名发布出去；校验必须放在打包之前。
 """
 from __future__ import annotations
