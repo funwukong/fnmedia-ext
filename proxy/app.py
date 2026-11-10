@@ -69,6 +69,7 @@ from catalog import catalog
 from catalog import catalog
 import history as histmod
 from history import history
+import resume_diag as resume_diagmod
 import marks as marksmod
 from marks import marks
 # P2：追剧提醒 / 域名自愈 / 元数据补全
@@ -4962,6 +4963,15 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
         "total": len(rows), "list": rows, "jump_list": None}})
 
 
+def _diag_play_info(guid: str, info: dict) -> dict:
+    """续播诊断钩子：play/info 返回前记一条事件；诊断失败绝不影响播放。"""
+    try:
+        resume_diagmod.note_info(guid, info)
+    except Exception:
+        pass
+    return info
+
+
 def _vod_play_info(guid: str, client) -> JSONResponse | None:
     parsed = _parse_line_item_guid(guid)
     if not parsed:
@@ -5007,6 +5017,7 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     # 续播位置：优先该集自己的记录；第 1 集没有集记录时回填标题记录的位置
     #（客户端以标题/季/文件夹 guid 上报进度时落到标题键上，见 history.position）。
     info["ts"] = history.position(base_guid, og, is_first=(index == 0))
+    info = _diag_play_info(guid, info)
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
 
@@ -6376,7 +6387,7 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
         info["ts"] = history.position(
             guid, ep.get("online_guid"),
             is_first=(int(ep.get("index", 0) or 0) == 0))
-        return info
+        return _diag_play_info(guid, info)
     brief = store.get_title_by_guid(guid)
     if not brief:
         return None
@@ -6394,11 +6405,11 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
                 if ep:
                     info = inj.episode_play_info(ep)
                     info["ts"] = resume_ts
-                    return info
+                    return _diag_play_info(guid, info)
     info = inj.play_info(brief)
     if rec:
         info["ts"] = rec.get("ts", 0)
-    return info
+    return _diag_play_info(guid, info)
 
 
 @app.post("/v/api/v1/play/info")
@@ -6466,6 +6477,7 @@ async def play_info(request: Request):
             guid, ep.get("online_guid"),
             is_first=(int(ep.get("index", 0) or 0) == 0))
         _prewarm_from_info(info)
+        info = _diag_play_info(guid, info)
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(info, client)})
     brief = store.get_title_by_guid(guid)
@@ -6509,6 +6521,7 @@ async def play_info(request: Request):
                 },
                 "direct_link_audio_index": -1,
             }
+            info = _diag_play_info(guid, info)
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(info, client)})
     if not brief:
@@ -7122,12 +7135,26 @@ async def play_record(request: Request):
     except Exception:
         body = {}
     ig = body.get("item_guid", "")
+    raw_guid = ig
     body["item_guid"] = _normalize_history_guid(ig)
     ig = body["item_guid"]
+    # 诊断事件只记原始/归一化 guid 与去向，不记任何凭证；守门判断本身不动。
+    parsed = ("title" if store.get_title_by_guid(ig) else
+              "episode" if store.get_episode(ig) else "unresolved")
     if store.get_title_by_guid(ig) or store.get_episode(ig):
         # 记录在线播放进度到本地（继续观看），不上报官方库
         history.record(body)
+        try:
+            resume_diagmod.note_record(raw_guid, ig, body,
+                                       outcome="history", parsed=parsed)
+        except Exception:
+            pass
         return JSONResponse({"code": 0, "msg": "", "data": True})
+    try:
+        resume_diagmod.note_record(raw_guid, ig, body,
+                                   outcome="upstream", parsed=parsed)
+    except Exception:
+        pass
     return await forward_upstream(request)
 
 
@@ -10158,6 +10185,27 @@ async def ext_status(request: Request):
             "hot": hot_cache.status(),
             "charts": chart_cache.status(),
             "catalog": catalog.status()}
+
+
+@app.get("/v/api/ext/diag/resume")
+async def ext_diag_resume(request: Request, guid: str = ""):
+    """续播诊断（只读，内存）：最近 20 条续播事件 + 指定 guid 在各分区里的记录。
+
+    用法：真机播 30 秒退出、重进一次，再打开本端点，把 JSON 发回排查。
+    只含 guid / 分区键 / ts / duration / updated_at，不含任何 token 或凭证原文。
+    lookup 按 guid 与归一化后的 guid 两个键查（文件夹/线路卡 guid 上报的
+    进度落在归一化后的标题/集键上）。
+    """
+    g = (guid or "").strip()
+    keys = []
+    if g:
+        keys = [g]
+        norm = _normalize_history_guid(g)
+        if norm and norm != g:
+            keys.append(norm)
+    return {"code": 0, "msg": "", "data": {
+        "events": resume_diagmod.events(),
+        "lookup": resume_diagmod.lookup(history, keys) if g else {}}}
 
 
 # --------------------------------------------------------------- P2：继续观看 / 追剧 / 源健康 / 收藏元数据
