@@ -77,6 +77,7 @@ import domain_heal as domain_heal_mod
 import metadata as metadata_mod
 import vlibs as vlibsmod
 import fnusers as fnusersmod
+import libfilter as libfiltermod
 import admin_auth as admin_authmod
 import updater
 from store import (store, make_guid, media_guid, video_guid, is_online_guid,
@@ -145,7 +146,8 @@ CACHE_TTL = 120
 # 绑定聚合缓存池（上游 v0.2.69）：同一(片名·是否快源·是否含T4)在 TTL 内复用聚合后
 # 的 briefs，榜单绑定 / 播放回源 / 搜索等多次调用同一片名时不重复扇出所有源。
 # 注意：缓存的是 remember_merged 之后的 brief（含线路），命中即等价一次完整聚合。
-# 与已有的 _search_cache（120 秒，缓存搜索卡片）+ _search_inflight 单飞互不干扰，
+# 与已有的 _search_cache（120 秒，缓存搜索 brief，未过滤；每次返回时按
+# 当前查看者重新过滤建卡，见 online_search）+ _search_inflight 单飞互不干扰，
 # 只补聚合层这一层，不动现有搜索缓存。
 _AGG_CACHE: dict[str, tuple[float, list]] = {}
 _AGG_INFLIGHT: dict[str, asyncio.Future] = {}
@@ -2879,38 +2881,55 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
 
 async def online_search(keyword: str, client: httpx.AsyncClient,
                         timeout: float | None = None,
-                        fast_only: bool = True) -> list:
+                        fast_only: bool = True,
+                        request: Request | None = None) -> list:
+    """在线搜索：聚合 brief → 按查看者可打开的库过滤 → 建卡。
+
+    过滤是独立的一层（libfilter.filter_briefs），不改 search_all /
+    _aggregate_briefs。缓存与单飞只存**未过滤的 brief**：同一关键词
+    可能被不同账号先后搜到，缓存卡片会把先搜者的可见范围漏给后搜者，
+    故每次返回时都按当前 request 重新过滤、重新建卡。
+    request 为 None（无查看者上下文）时按 fail-closed 全部隐藏。
+    """
     now = time.time()
     cache_key = keyword if not fast_only else keyword + "\x00fast"
     if cache_key in _search_cache and now - _search_cache[cache_key][0] < CACHE_TTL:
-        return _search_cache[cache_key][1]
-    fut = _search_inflight.get(cache_key)
-    if fut is None:
-        fut = asyncio.get_event_loop().create_future()
-        _search_inflight[cache_key] = fut
+        briefs = _search_cache[cache_key][1]
+    else:
+        fut = _search_inflight.get(cache_key)
+        if fut is None:
+            fut = asyncio.get_event_loop().create_future()
+            _search_inflight[cache_key] = fut
 
-        async def work():
-            try:
-                # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
-                # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
-                # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
-                briefs = await _aggregate_briefs(
-                    keyword, fast_only=fast_only, timeout=timeout)
-                items = [t4_browser.media_card(b) if
-                         b.get("locator", {}).get("kind") == "t4" else inj.search_item(b)
-                         for b in briefs]
-                _search_cache[cache_key] = (time.time(), items)
-                if not fut.done():
-                    fut.set_result(items)
-            except Exception:
-                # 客户端断连会让 fut 被取消，此时再 set_result 会抛 InvalidStateError
-                if not fut.done():
-                    fut.set_result([])
-            finally:
-                _search_inflight.pop(cache_key, None)
+            async def work():
+                try:
+                    # 全局搜索框走 fast_only：只查秒回的标准 CMS 直链源（上游 v0.2.43）。
+                    # 若带上 redroid 真机源（加固/spider/drpy），它们争抢设备、单源可能
+                    # 长时间不返回，而搜索预算很短，会导致整个在线搜索结果为空。
+                    briefs = await _aggregate_briefs(
+                        keyword, fast_only=fast_only, timeout=timeout)
+                    _search_cache[cache_key] = (time.time(), briefs)
+                    if not fut.done():
+                        fut.set_result(briefs)
+                except Exception:
+                    # 客户端断连会让 fut 被取消，此时再 set_result 会抛 InvalidStateError
+                    if not fut.done():
+                        fut.set_result([])
+                finally:
+                    _search_inflight.pop(cache_key, None)
 
-        asyncio.create_task(work())
-    return await fut
+            asyncio.create_task(work())
+        briefs = await fut
+    can_open = lambda k: _viewer_can_open_key(request, k)  # noqa: E731
+    return [_search_card(b) for b in libfiltermod.filter_briefs(
+        briefs, can_open, guard_key_of=_guard_key_of_source)]
+
+
+def _search_card(brief: dict) -> dict:
+    """brief → 搜索卡片（T4 走 media_card，其余走 inj.search_item）。"""
+    if brief.get("locator", {}).get("kind") == "t4":
+        return t4_browser.media_card(brief)
+    return inj.search_item(brief)
 
 
 def _norm_title(t: str) -> str:
@@ -3373,6 +3392,88 @@ def _viewer_can_open_lib(request: Request, guid: str) -> bool:
     if not key:
         return True
     return vlibsmod.account_can_see(fnusersmod.resolve(request), key)
+
+
+def _lib_guid_for_key(key: str) -> str | None:
+    """稳定库键 → 库 guid（_viewer_can_open_key 的入参）。无法映射返回 None。
+
+    xlib 键不在此列：搜索 brief 不产生 xlib 键（小雅标题不走聚合搜索，
+    详情在 item_detail 里直接拿库 guid 调 _viewer_can_open_lib）。
+    """
+    if not key or not isinstance(key, str):
+        return None
+    if key == vlibsmod.K_T4:
+        return T4_LIB_GUID
+    if key == vlibsmod.K_GUARD_NATIVE:
+        return GUARD_NATIVE_GUID
+    if key == vlibsmod.K_HGDJ:
+        try:
+            return hgdjmod.lib_guid()
+        except Exception:
+            return None
+    kind, _, ident = key.partition(":")
+    if kind == vlibsmod.K_CHART:
+        return CHART_LIB_GUIDS.get(ident)
+    if kind == vlibsmod.K_CATALOG:
+        return CATALOG_LIB_GUIDS.get(ident)
+    if kind == vlibsmod.K_STANDALONE and ident:
+        return standalone_lib_guid(ident)
+    if kind == vlibsmod.K_GUARD and ident:
+        return guard_lib_guid(ident)
+    return None
+
+
+def _viewer_can_open_key(request: Request | None, key: str) -> bool:
+    """当前账号是否允许打开该稳定库键（搜索/详情按库过滤用）。
+
+    身份逻辑不重写：键→guid 后走既有的 _viewer_can_open_lib（它再调
+    vlibs.account_can_see + fnusers.resolve），语义与第 1 项的
+    fail-closed 保持一致（未知身份→隐藏，未配置账号→隐藏，
+    已配置账号→只看白名单，管理员→全看；具体默认值见 vlibs）。
+    键非法、映射不到 guid、或往返校验（guid→键）不一致时一律拒绝；
+    request 为 None（无查看者上下文）时拒绝全部。
+    """
+    if request is None or not key:
+        return False
+    guid = _lib_guid_for_key(key)
+    if not guid:
+        return False
+    if _vkey_for_guid(guid) != key:
+        return False
+    return _viewer_can_open_lib(request, guid)
+
+
+def _guard_key_of_source(provider: str) -> str | None:
+    """源 id → 其所属加固专区 guard_key（非加固源返回 None）。
+
+    供 libfilter 补 guard:<key> 归属用；查不到/异常一律返回 None，
+    不影响独立库与分类库两扇门。
+    """
+    if not provider:
+        return None
+    try:
+        for s in config.all_sources():
+            if s.get("id") == provider and s.get("guard"):
+                return s.get("guard_key") or None
+    except Exception:
+        return None
+    return None
+
+
+def _brief_viewable(request: Request | None, brief: dict,
+                    extra_keys=None) -> bool:
+    """标题 brief 对当前查看者是否可见（详情拒绝的判定点）。
+
+    任一归属库（见 libfilter.brief_lib_keys）可打开即放行；无法映射
+    （无归属库）则拒绝。extra_keys：详情入口处才有的另一扇门，如榜单
+    详情的 chart:<cat>。request 为 None 时拒绝全部。
+    """
+    keys = libfiltermod.brief_lib_keys(brief, guard_key_of=_guard_key_of_source)
+    if extra_keys:
+        keys |= set(extra_keys)
+    if not keys:
+        return False
+    return any(_viewer_can_open_key(request, k) for k in keys)
 
 
 @app.get("/v/api/v1/mediadb/list")
@@ -4921,7 +5022,8 @@ async def search_list(request: Request):
         try:
             # 8 个源并发聚合实测 6~8s，6s 预算会把在线结果整体丢掉（只剩本地库）
             online = await asyncio.wait_for(
-                online_search(q, ext_client(request), timeout=6.0), timeout=8.5)
+                online_search(q, ext_client(request), timeout=6.0,
+                              request=request), timeout=8.5)
         except asyncio.TimeoutError:
             online = []
         except Exception as exc:
@@ -4936,6 +5038,9 @@ async def search_list(request: Request):
         except Exception as exc:
             _log.debug("hgdj search failed: %s", type(exc).__name__)
             hgdj_online = []
+    if hgdj_online and not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+        # 红果短剧标题归属 hgdj 库：查看者打不开该库时整批隐藏。
+        hgdj_online = []
     if hgdj_online:
         hgdj_online = clientmod.normalize_cards(hgdj_online, _client_of(request))
     # 在线片库更齐全，默认把在线结果排到前面；可在管理页关闭
@@ -5043,6 +5148,12 @@ async def t4_resource(token: str, request: Request):
 
 @app.get("/v/api/v1/item/{guid}")
 async def item_detail(guid: str, request: Request):
+    # —— 库可见权限 ——：guid 本身就是某虚拟库（库根/T4 节点等）时，无权打开
+    # 按不存在处理（与 mdb/<guid> 的 -6 一致）。标题 guid 在此不受影响
+    # （_vkey_for_guid 返回 None → 放行，标题在下面的 brief 分支里再按
+    # 归属库过滤）；本地库 guid 同样放行（非虚拟库恒 True）。
+    if not _viewer_can_open_lib(request, guid):
+        return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
     if _parse_line_item_guid(guid):
         line_detail = _vod_line_detail(guid, _client_of(request))
         if line_detail is not None:
@@ -5154,6 +5265,8 @@ async def item_detail(guid: str, request: Request):
         found = _xl.library.by_guid(guid)
         if found:
             cat, show = found["cat"], found["show"]
+            if not _viewer_can_open_lib(request, _xl.lib_guid(cat)):
+                return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
             cmeta = _xl.cat_by_id(cat)
             files = show.get("files") or []
             is_tv = cmeta["kind"] in ("tv", "anime", "variety", "short")
@@ -5221,6 +5334,12 @@ async def item_detail(guid: str, request: Request):
                     pass
             bound = store.get_title_by_guid(guid)
         if bound is not None:
+            # 榜单条目已绑定资源站标题：标题归属库与榜单库任一可打开才放行。
+            if not _brief_viewable(
+                    request, bound,
+                    extra_keys={vlibsmod.make_key(vlibsmod.K_CHART,
+                                                  meta.get("cat", "tv"))}):
+                return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
             data = inj.detail_item(bound)
             _apply_marks(data)
             # 用榜单的优质海报/评分/简介覆盖资源站元数据
@@ -5235,6 +5354,10 @@ async def item_detail(guid: str, request: Request):
             _attach_related(data, bound)
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(data, client)})
+        # 未绑定资源站标题的榜单条目：唯一归属就是榜单库本身。
+        if not _viewer_can_open_key(
+                request, vlibsmod.make_key(vlibsmod.K_CHART, meta.get("cat", "tv"))):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         cat = meta.get("cat", "tv")
         failed = time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL
         data = inj._base_item(
@@ -5262,6 +5385,8 @@ async def item_detail(guid: str, request: Request):
                              "data": clientmod.normalize_detail(data, client)})
     # ---------- 红果短剧：series / season / episode 详情 ----------
     if hgdj_enabled() and hgdjmod.is_hgdj_series(guid):
+        if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         rec = await hgdjmod.series_detail(guid)
         if rec is None:
             return JSONResponse({"code": 0, "msg": "", "data": {}})
@@ -5288,6 +5413,8 @@ async def item_detail(guid: str, request: Request):
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(data, client)})
     if hgdj_enabled() and hgdjmod.is_hgdj_episode(guid):
+        if not _viewer_can_open_lib(request, hgdjmod.lib_guid()):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         try:
             sg, ep = guid[len("hgdj-ep:"):].rsplit(":", 1)
             ep = int(ep)
@@ -5313,6 +5440,12 @@ async def item_detail(guid: str, request: Request):
     # 伪造的 Season / Episode 节点
     if store.get_episode(guid):
         ep = store.get_episode(guid)
+        parent = store.get_title_by_guid(ep.get("online_guid") or "")
+        # 父标题在库里且查看者打不开其任一归属库时拒绝；父标题已被淘汰
+        # （查不到）时放行——季/集节点本身不是标题，标题详情与搜索已是
+        # 拦截点，淘汰后拒绝会误伤断点续播类直达详情。
+        if parent is not None and not _brief_viewable(request, parent):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         data = inj.episode_item(ep)
         _apply_marks(data)
         return JSONResponse({"code": 0, "msg": "",
@@ -5321,12 +5454,16 @@ async def item_detail(guid: str, request: Request):
     if season:
         tv = season["online_guid"]
         brief = store.get_title_by_guid(tv)
+        if brief is not None and not _brief_viewable(request, brief):
+            return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         data = inj.season_item(brief, dict(season, guid=guid))
         return JSONResponse({"code": 0, "msg": "",
                              "data": clientmod.normalize_detail(data, client)})
     brief = store.get_title_by_guid(guid)
     if not brief:
         return await forward_upstream(request)
+    if not _brief_viewable(request, brief):
+        return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
     data = inj.detail_item(brief)
     _apply_marks(data)
     _attach_related(data, brief)

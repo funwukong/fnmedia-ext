@@ -6,6 +6,7 @@ import json
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -301,7 +302,12 @@ class BrowseTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(appmod, "_aggregate_briefs", return_value=[brief]), \
                 patch.object(appmod, "_search_cache", {}), \
                 patch.object(appmod, "_search_inflight", {}):
-            cards = await appmod.online_search("Untyped", self.network)
+            # 搜索已按查看者过滤（decisions-2-libfilter）：无 request 即无
+            # 查看者上下文，按 fail-closed 全部隐藏；本类 setUp 已把 viewer
+            # 打成管理员，用它跑——测的仍是“库关掉也不影响搜到未定型 T4 标题”。
+            cards = await appmod.online_search(
+                "Untyped", self.network,
+                request=SimpleNamespace(headers={}))
         self.assertEqual(cards[0]["type"], "Directory")
         self.assertEqual(self.browser.sources(), [])
         title = t4.map_title({
