@@ -2326,6 +2326,20 @@ for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
 
+# P1-14 高频日志采样：中间件与 mediadb/list 原先每请求 1 条 INFO，
+# 建库/资源站轮询会刷爆日志。默认只记 debug；每 100 次采样 1 条 info
+# 保留心跳，慢请求（>=1s）与错误（>=400）每次都记 info，保证异常可观测。
+_ACCESS_SLOW_MS = 1000
+_LOG_SAMPLE: dict[str, int] = {}
+
+
+def _sampled_log(key: str, every: int = 100) -> bool:
+    """该 key 的第 every 次调用返回 True（其余时间调用方记 debug）。"""
+    n = _LOG_SAMPLE.get(key, 0) + 1
+    _LOG_SAMPLE[key] = n
+    return n % every == 0
+
+
 def _diagnostic_query(request: Request) -> str:
     return urllib.parse.urlencode([
         (k, "<redacted>" if k.lower() in (
@@ -2360,10 +2374,15 @@ async def _access(request: Request, call_next):
     p = request.url.path
     if "/api/" in p or p.startswith(ONLINE_PREFIX) or p.startswith("/v/media"):
         query = _diagnostic_query(request)
-        _log.info("%s %s -> %s client=%s elapsed_ms=%d", request.method,
-                  (p + ("?" + query if query else ""))[:120],
-                  resp.status_code, _client_of(request).label,
-                  int((time.monotonic() - started) * 1000))
+        elapsed_ms = int((time.monotonic() - started) * 1000)
+        # 慢请求 / 错误每次记 info；其余每 100 次采样 1 条 info，剩下记 debug。
+        _emit = (_log.info if (elapsed_ms >= _ACCESS_SLOW_MS
+                               or resp.status_code >= 400
+                               or _sampled_log("access"))
+                 else _log.debug)
+        _emit("%s %s -> %s client=%s elapsed_ms=%d", request.method,
+              (p + ("?" + query if query else ""))[:120],
+              resp.status_code, _client_of(request).label, elapsed_ms)
     _live_record(request, resp.status_code, p)
     return resp
 
@@ -3618,10 +3637,13 @@ async def mediadb_list(request: Request):
         payload["data"] = dbs
         # TV 诊断：记录是哪端、注入了几个虚拟库、上游状态。TV 端“有时不显示”
         # 时看这条日志就能区分：是上游失败、注入抛错，还是 TV 根本没调到这里。
-        _log.info("mediadb/list client=%s inserted=%d upstream_code=%s total=%d",
-                  _client_of(request).kind, len(inserts),
-                  payload.get("code") if isinstance(payload, dict) else "?",
-                  len(dbs))
+        # 高频：每 100 次采样 1 条 info，其余记 debug（upstream_code 到这里恒为 0，
+        # 见上方的失败兜底改码，诊断价值已有限）。
+        _emit = _log.info if _sampled_log("mediadb_list") else _log.debug
+        _emit("mediadb/list client=%s inserted=%d upstream_code=%s total=%d",
+              _client_of(request).kind, len(inserts),
+              payload.get("code") if isinstance(payload, dict) else "?",
+              len(dbs))
         return JSONResponse(payload)
     except Exception as exc:
         _log.warning("inject virtual mediadb failed: client=%s err=%s",

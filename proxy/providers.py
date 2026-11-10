@@ -29,6 +29,18 @@ except Exception:  # 独立运行缺少 fnlog 时退回标准 logging
 
 _log = get_logger("providers")
 
+# P1-14 高频日志采样（与 app.py 的同名小工具各自独立，避免 providers
+# 依赖 app 造成循环引用）：死源跳过每搜 1 条 INFO，搜索扇出时会刷爆日志。
+# 默认只记 debug，每 100 次采样 1 条 info 保留心跳。
+_LOG_SAMPLE: dict[str, int] = {}
+
+
+def _sampled_log(key: str, every: int = 100) -> bool:
+    """该 key 的第 every 次调用返回 True（其余时间调用方记 debug）。"""
+    n = _LOG_SAMPLE.get(key, 0) + 1
+    _LOG_SAMPLE[key] = n
+    return n % every == 0
+
 try:
     import sourcehealth as _health
 except Exception:
@@ -345,7 +357,8 @@ async def search_source(client: httpx.AsyncClient, source: dict,
     # P2 源健康自动降级：连续失败 5 次的源在 3 分钟冷却窗内直接跳过，
     # 不再每次都等超时拖慢整体搜索；冷却过后自动放行一次试探。
     if _health is not None and not _health.usable(source.get("id", "")):
-        _log.info("source skipped (dead cooldown): id=%s", source.get("id"))
+        _emit = _log.info if _sampled_log("source_skip") else _log.debug
+        _emit("source skipped (dead cooldown): id=%s", source.get("id"))
         return []
     _t0 = time.monotonic()
     if source.get("kind") == "t4":
