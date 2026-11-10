@@ -9,6 +9,10 @@
    netutil.async_client(timeout=timeout)；上游无 DDUO 模块，搬的是上游
    通用 probe_source 的客户端构造方式。
 3. 海报重试见 tests/test_poster.py（_poster_upstream_get 的 netutil 重试）。
+4. 分类路由刷新 proxy/catalog.py::Catalog.refresh_routes：建库分类表与
+   首选叶子探测的两处客户端均经 netutil.async_client(
+   timeout=HTTP_TIMEOUT)，与上游 catalog.py 同位置一致（证书校验开启，
+   不再传 verify=False）。
 
 只断言“客户端走 netutil 构造”，不碰真实网络：netutil.async_client
 与 dduo.search 均用假对象替换。
@@ -167,3 +171,40 @@ def test_dduo_probe_source_empty_result_still_ok():
     assert res["count"] == 0
     assert res["error"] == "接口正常（该词无结果）"
     assert factory.kwargs == [{"timeout": 10.0}]
+
+
+class _FakeCmsClientWithClasses(_FakeCmsClient):
+    """refresh_routes 用：分类表（ac=list）与分类页（ac=detail）都服务。"""
+
+    async def get(self, url, params=None, headers=None, timeout=None):
+        # 分类表自己记一次；分类页交给父类记，避免同一请求记两次。
+        if (params or {}).get("ac") == "list":
+            self.calls.append((str(url), dict(params or {})))
+            return _CmsResp({"code": 1, "class": [
+                {"type_id": "1", "type_pid": "0", "type_name": "电影"}]})
+        return await super().get(url, params=params, headers=headers,
+                                 timeout=timeout)
+
+
+def test_refresh_routes_uses_netutil_client():
+    """分类路由刷新：建库分类表 + 首选叶子探测都走 netutil.async_client。"""
+    cat = catalog.Catalog()
+    cat._source_by_id = lambda sid: {"id": sid, "api": CMS_API}
+    # 4K 派生预热只在 uhd 密集列表为空时触发；预置一条，测刷新本身不跑后台抓取。
+    cat._dense[catalog.Catalog._scope_key(catalog.AGG_SCOPE, "uhd")] = [
+        {"guid": "g1"}]
+    fake = _FakeCmsClientWithClasses()
+    factory = _RecordingFactory(fake)
+    with mock.patch.object(catalog.netutil, "async_client", factory):
+        status = asyncio.run(cat.refresh_routes(
+            [{"id": "s1", "api": CMS_API}]))
+    # 两处客户端（分类表 + 叶子探测）都由 netutil 构造，参数与 _load_page 一致。
+    assert factory.kwargs == [{"timeout": catalog.HTTP_TIMEOUT}] * 2
+    routes = cat._routes[catalog.Catalog._scope_key(
+        catalog.AGG_SCOPE, "movie")]
+    assert routes and routes[0]["source_id"] == "s1"
+    assert routes[0]["type_id"] == "1"
+    assert status["categories"]["movie"]["routes"] >= 1
+    assert len(fake.calls) == 2
+    assert fake.calls[0][1].get("ac") == "list"
+    assert fake.calls[1][1].get("ac") == "detail"

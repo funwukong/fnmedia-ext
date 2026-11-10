@@ -211,15 +211,15 @@ DEFAULTS = {
     "domain_heal_enabled": True,
     "source_domain_backups": {},
     # 元数据补全：开启后，详情缺失的年份/地区/简介/海报用同名其他源的条目补齐。
-    # 不接任何外部元数据接口；TMDB 需要用户自己填 key（留空=不用）。
+    # 不接任何外部元数据接口。
     "metadata_enabled": True,
     # 关联作品：开启后，详情页下方挂 recommendations 关联作品（同系列/同分类优先）。
     "related_enabled": True,
-    "tmdb_api_key": "",
 }
 
 # 已废弃、需从旧配置里清除的键
-_DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources"}
+_DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources",
+               "tmdb_api_key"}
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
