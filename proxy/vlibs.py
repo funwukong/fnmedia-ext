@@ -255,28 +255,28 @@ def account_allowlist(user_guid: str):
 
 
 def acl_default_visible() -> bool:
-    """未配置账号默认能否看到虚拟库（False=隐藏，fail-closed 默认）。"""
+    """未配置账号默认能否看到虚拟库（True=可见，fail-open 默认）。"""
     try:
-        return bool(config.get().get("acl_default_visible", False))
+        return bool(config.get().get("acl_default_visible", True))
     except Exception:
-        return False
+        return True
 
 
 def acl_default_online() -> bool:
-    """未配置账号默认能否用在线搜索（False=禁用，fail-closed 默认）。"""
+    """未配置账号默认能否用在线搜索（True=允许，fail-open 默认）。"""
     try:
-        return bool(config.get().get("acl_default_online", False))
+        return bool(config.get().get("acl_default_online", True))
     except Exception:
-        return False
+        return True
 
 
 def account_can_see(user: dict, key: str) -> bool:
-    """该账号能否看到某虚拟库（fail-closed）。
+    """该账号能否看到某虚拟库（fail-open）。
 
-    - 识别不出身份（known=False）→ 始终不可见（不受默认开关影响）
+    - 识别不出身份（known=False）→ 按 acl_default_visible 处理（默认 True=可见）
     - 管理员 → 始终可见
     - 已配置账号 → 仅允许列表内可见
-    - 已识别但未配置账号 → 默认 acl_default_visible（默认 False=隐藏）
+    - 已识别但未配置账号 → 默认 acl_default_visible（默认 True=可见）
     - 任何被管理员全局隐藏的库对所有人不可见（含管理员自己的飞牛列表，
       管理页仍可重新打开）。
     """
@@ -285,7 +285,7 @@ def account_can_see(user: dict, key: str) -> bool:
     if is_hidden(key):
         return False
     if not user or not user.get("known"):
-        return False
+        return acl_default_visible()
     if user.get("is_admin"):
         return True
     allow = _acl().get(user.get("guid", ""))
@@ -297,11 +297,12 @@ def account_can_see(user: dict, key: str) -> bool:
 def account_online_allowed(user: dict) -> bool:
     """该账号能否使用在线搜索 / 在线片源（家长可只给孩子开本地授权库）。
 
-    fail-closed：识别不出身份（known=False）→ 始终不允许；管理员始终允许；
-    已识别但未配置账号走 acl_default_online（默认 False）。
+    fail-open：识别不出身份（known=False）→ 按 acl_default_online 处理
+    （默认 True=允许）；管理员始终允许；已识别但未配置账号走
+    acl_default_online（默认 True）。
     """
     if not user or not user.get("known"):
-        return False
+        return acl_default_online()
     if user.get("is_admin"):
         return True
     allow = _acl().get(user.get("guid", ""))
