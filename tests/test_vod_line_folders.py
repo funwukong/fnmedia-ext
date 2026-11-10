@@ -26,6 +26,9 @@ import app as appmod
 import client as clientmod
 from store import episode_guid, ep_media_guid
 
+_ADMIN = {"known": True, "guid": "admin-guid", "name": "admin",
+          "is_admin": True, "token": "tok-admin"}
+
 
 def brief(tv=False):
     lines = {
@@ -269,6 +272,7 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                     "files": [{"guid": "file1", "can_play": 1}],
                     "video_streams": [{"media_guid": "media1"}],
                     "audio_streams": [], "subtitle_streams": []}), \
+                patch.object(appmod.fnusersmod, "resolve", return_value=_ADMIN), \
                 patch.object(appmod, "_warm_playlist", new=MagicMock()):
             response = await appmod.stream_list_post(request)
         data = json.loads(response.body)["data"]
@@ -293,6 +297,7 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                     "files": [{"guid": "file1", "can_play": 1}],
                     "video_streams": [{"media_guid": "media1"}],
                     "audio_streams": [], "subtitle_streams": []}), \
+                patch.object(appmod.fnusersmod, "resolve", return_value=_ADMIN), \
                 patch.object(appmod, "_warm_playlist", new=MagicMock()):
             response = await appmod.stream_list(line_guid, Request(
                 {"type": "http", "method": "GET", "path": "/v/api/v1/stream/list/x",
@@ -315,6 +320,7 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(appmod.store, "resolve_episode", return_value=target()), \
                 patch.object(appmod, "_line_choices", return_value=[target(), target("lzi::lzm3u8")]), \
                 patch.object(appmod, "_guess_wrapper", return_value=("HLS", True)), \
+                patch.object(appmod.fnusersmod, "resolve", return_value=_ADMIN), \
                 patch.object(appmod, "_warm_playlist", new=MagicMock()):
             response = await appmod.play_play(request)
         data = json.loads(response.body)["data"]
