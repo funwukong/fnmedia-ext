@@ -22,9 +22,15 @@ _STATE_PATH = os.path.join(
     "state", "source_health.json")
 _LOCK = threading.RLock()
 
-# 连续失败达到阈值进入“死亡冷却”：该窗口内该源降权/可被跳过
+# 连续失败达到阈值进入“死亡冷却”：该窗口内该源降权/可被跳过。
+# 搜索级与取流级分开记：搜索域正常时取流域仍可能整片不可达，反之亦然，
+# 两级共用同一计数会互相误杀（取流抖动拖垮搜索、搜索抖动拖垮播放）。
+# 搜索级（默认）：3 次失败 / 冷却 15 分钟，行为与拆分前完全一致。
 DEAD_FAILS = 3
 DEAD_COOLDOWN = 15 * 60          # 判死后冷却 15 分钟，之后给一次试探
+# 取流级（上游 v0.2.70）：5 次失败 / 冷却 3 分钟。
+STREAM_DEAD_FAILS = 5
+STREAM_DEAD_COOLDOWN = 3 * 60
 DEGRADED_FAIL_RATE = 0.6         # 样本足够时，失败率高于此判差
 MIN_SAMPLES = 6                  # 低于此样本不做失败率判级，避免偶发误杀
 SLOW_LATENCY = 12.0              # 平均延迟超过此秒视为慢源
@@ -33,7 +39,23 @@ _MAX_KEYS = 2000
 
 def _blank() -> dict:
     return {"n": 0, "ok": 0, "lat": 0.0, "fails": 0,
-            "last_ok": 0.0, "last_fail": 0.0, "dead_until": 0.0}
+            "last_ok": 0.0, "last_fail": 0.0, "dead_until": 0.0,
+            "stream_fails": 0, "stream_dead_until": 0.0}
+
+
+# level -> (失败计数字段, 死亡截止字段, 触发阈值, 冷却秒数)
+_LEVELS = {
+    "search": ("fails", "dead_until", DEAD_FAILS, DEAD_COOLDOWN),
+    "stream": ("stream_fails", "stream_dead_until",
+               STREAM_DEAD_FAILS, STREAM_DEAD_COOLDOWN),
+}
+
+
+def _level_fields(level: str) -> tuple:
+    try:
+        return _LEVELS[level]
+    except KeyError:
+        raise ValueError(f"unknown sourcehealth level: {level!r}") from None
 
 
 def _load() -> dict:
@@ -72,7 +94,11 @@ def source_key_of(line: str | None, picked: dict | None = None) -> str:
     return line or ""
 
 
-def record(key: str, ok: bool, latency: float = 0.0) -> None:
+def record(key: str, ok: bool, latency: float = 0.0,
+           level: str = "search") -> None:
+    """记一次结果。level="search"（默认）记搜索/API 域，level="stream" 记取流域；
+    两级失败计数与死亡冷却互相独立，成功只复活本级。"""
+    fails_key, dead_key, threshold, cooldown = _level_fields(level)
     key = (key or "").strip()
     if not key:
         return
@@ -92,14 +118,14 @@ def record(key: str, ok: bool, latency: float = 0.0) -> None:
             s["lat"] += float(latency)
         if ok:
             s["ok"] += 1
-            s["fails"] = 0
+            s[fails_key] = 0
             s["last_ok"] = now
-            s["dead_until"] = 0.0
+            s[dead_key] = 0.0
         else:
-            s["fails"] = int(s.get("fails", 0)) + 1
+            s[fails_key] = int(s.get(fails_key, 0)) + 1
             s["last_fail"] = now
-            if s["fails"] >= DEAD_FAILS:
-                s["dead_until"] = now + DEAD_COOLDOWN
+            if s[fails_key] >= threshold:
+                s[dead_key] = now + cooldown
 
 
 def stats(key: str) -> dict:
@@ -120,23 +146,27 @@ def stats(key: str) -> dict:
         }
 
 
-def is_dead(key: str, now: float | None = None) -> bool:
+def is_dead(key: str, now: float | None = None,
+            level: str = "search") -> bool:
+    """本级死亡冷却窗内返回 True。level 默认为 "search"（搜索级 3 次/15 分钟）；
+    取流熔断传 level="stream"（5 次/3 分钟）。"""
+    _, dead_key, _, _ = _level_fields(level)
     now = now if now is not None else time.time()
     with _LOCK:
         s = _STATS.get(key)
         if not s:
             return False
-        if now < s.get("dead_until", 0):
+        if now < s.get(dead_key, 0):
             return True
         # 冷却已过：清除死亡标记，放行一次试探（但保留长期失败率供排序）
-        if s.get("dead_until"):
-            s["dead_until"] = 0.0
+        if s.get(dead_key):
+            s[dead_key] = 0.0
         return False
 
 
-def usable(key: str, now: float | None = None) -> bool:
-    """死源冷却窗内返回 False（供搜索阶段短路跳过）。"""
-    return not is_dead(key, now)
+def usable(key: str, now: float | None = None, level: str = "search") -> bool:
+    """死源冷却窗内返回 False（供搜索阶段短路跳过）。默认搜索级。"""
+    return not is_dead(key, now, level)
 
 
 def _grade(s: dict, now: float) -> int:

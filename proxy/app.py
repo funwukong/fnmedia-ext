@@ -6758,7 +6758,7 @@ def _dodge_known_bad(picked: dict, request: Request) -> dict:
         # 源级取流熔断（上游 v0.2.70）：整站取流域名不可达时，该源所有线路同样零成本跳过
         try:
             sk = sourcehealth.source_key_of(p.get("line"), p)
-            return bool(sk) and sourcehealth.is_dead(sk)
+            return bool(sk) and sourcehealth.is_dead(sk, level="stream")
         except Exception:
             return False
 
@@ -7622,7 +7622,8 @@ async def _probe_target(cand: dict, request: Request) -> bool:
     lat = await _probe_latency(cand, request, build_hls=True)
     sk = sourcehealth.source_key_of(cand.get("line"), cand)
     if sk:
-        sourcehealth.record(sk, lat is not None, lat or 0.0)
+        # 取流探测结果只记取流级熔断（5 次/3 分钟），不影响搜索级计数。
+        sourcehealth.record(sk, lat is not None, lat or 0.0, level="stream")
     return lat is not None
 
 
@@ -7979,11 +7980,12 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
     def _src_dead(c: dict) -> bool:
         # 源级取流熔断（上游 v0.2.70）：某资源站取流域名整片不可达时（搜索域可能
         # 仍正常），其所有线路在竞速里沉底，避免每部片都先撞长超时再换线。
+        # 取流级阈值 5 次/3 分钟（level="stream"），与搜索级 3 次/15 分钟分开记。
         # 关键：熔断源只沉底、绝不排除——健康候选不足 n 时用它们补足，保证竞速总有
         # 候选，避免“源被熔断→候选只剩 1 条且恰好是死链→起播直接失败”。
         try:
             sk = sourcehealth.source_key_of(c.get("line"), c)
-            return bool(sk) and sourcehealth.is_dead(sk)
+            return bool(sk) and sourcehealth.is_dead(sk, level="stream")
         except Exception:
             return False
 
@@ -8696,7 +8698,8 @@ async def hls_main(mg: str, request: Request):
                                  "Access-Control-Allow-Origin": "*"})
     _sk = sourcehealth.source_key_of(picked.get("line"), picked)
     if _sk:
-        sourcehealth.record(_sk, True)
+        # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
+        sourcehealth.record(_sk, True, level="stream")
     return Response(body, media_type="application/vnd.apple.mpegurl",
                     headers={"Cache-Control": "no-cache",
                              "Access-Control-Allow-Origin": "*"})

@@ -186,19 +186,66 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
 
     # ---------- 取流级熔断（上游 v0.2.70，接已有 sourcehealth）----------
 
-    def test_fetch_breaker_trips_only_after_consecutive_failures(self):
+    # ---------- 熔断阈值拆分：搜索级 3 次/15 分钟，取流级 5 次/3 分钟 ----------
+
+    def test_search_breaker_still_trips_after_3_failures(self):
+        # 搜索级（默认 level="search"）：阈值与拆分前一致，3 次失败即熔断。
         self.assertFalse(sourcehealth.is_dead("dead-src"))
         sourcehealth.record("dead-src", False, 1.0)
         sourcehealth.record("dead-src", False, 1.0)
-        self.assertFalse(sourcehealth.is_dead("dead-src"))  # 未触发：不跳过
+        self.assertFalse(sourcehealth.is_dead("dead-src"))  # 未触发
         sourcehealth.record("dead-src", False, 1.0)
-        self.assertTrue(sourcehealth.is_dead("dead-src"))  # 触发：零成本跳过
+        self.assertTrue(sourcehealth.is_dead("dead-src"))  # 触发
         sourcehealth.record("dead-src", True, 0.5)
         self.assertFalse(sourcehealth.is_dead("dead-src"))  # 成功一次即复活
 
-    def test_dodge_known_bad_skips_melted_source(self):
+    def test_stream_breaker_trips_after_5_failures(self):
+        # 取流级（level="stream"，上游 v0.2.70）：4 次不触发，第 5 次才熔断。
+        self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
+        for _ in range(4):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
+        self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
+        sourcehealth.record("dead-src", False, 1.0, level="stream")
+        self.assertTrue(sourcehealth.is_dead("dead-src", level="stream"))
+        sourcehealth.record("dead-src", True, 0.5, level="stream")
+        self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
+
+    def test_breaker_levels_are_independent(self):
+        # 一级的失败不触发另一级：取流抖动不拖垮搜索，搜索抖动不拖垮播放。
+        for _ in range(5):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
+        self.assertTrue(sourcehealth.is_dead("dead-src", level="stream"))
+        self.assertFalse(sourcehealth.is_dead("dead-src"))  # 搜索级未触发
+        sourcehealth.reset("dead-src")
         for _ in range(3):
             sourcehealth.record("dead-src", False, 1.0)
+        self.assertTrue(sourcehealth.is_dead("dead-src"))
+        self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
+        # 本级成功只复活本级。
+        sourcehealth.record("dead-src", True, 0.5, level="stream")
+        self.assertTrue(sourcehealth.is_dead("dead-src"))
+
+    def test_breaker_cooldowns(self):
+        # 冷却窗：搜索级 15 分钟，取流级 3 分钟（now 注入，精确到秒）。
+        import time as _time
+        for _ in range(3):
+            sourcehealth.record("dead-src", False, 1.0)
+        t = _time.time()
+        self.assertTrue(sourcehealth.is_dead("dead-src", now=t + 899))
+        self.assertFalse(sourcehealth.is_dead("dead-src", now=t + 901))
+        sourcehealth.reset("dead-src")
+        for _ in range(5):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
+        t = _time.time()
+        self.assertTrue(sourcehealth.is_dead(
+            "dead-src", now=t + 179, level="stream"))
+        self.assertFalse(sourcehealth.is_dead(
+            "dead-src", now=t + 181, level="stream"))
+
+    def test_dodge_known_bad_skips_melted_source(self):
+        # 取流熔断：取流级 5 次失败才跳过（3 次搜索失败不触发取流换线）。
+        for _ in range(5):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
         picked = {"line": "dead-src::A", "online_guid": "og1",
                   "index": 0, "title": "差片"}
         healthy = {"line": "good-src::A", "online_guid": "og1",
@@ -216,8 +263,8 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(out, picked)
 
     def test_dodge_known_bad_respects_explicit_line(self):
-        for _ in range(3):
-            sourcehealth.record("dead-src", False, 1.0)
+        for _ in range(5):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
         picked = {"line": "dead-src::A", "online_guid": "og1",
                   "index": 0, "title": "差片"}
         healthy = {"line": "good-src::A", "online_guid": "og1",
@@ -228,9 +275,9 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(out, picked)  # 用户显式选线：尊重选择，不换线
 
     def test_race_candidates_sinks_dead_source_but_keeps_it(self):
-        for _ in range(3):
-            sourcehealth.record("dead-src", False, 1.0)
-        sourcehealth.record("good-src", True, 0.5)
+        for _ in range(5):
+            sourcehealth.record("dead-src", False, 1.0, level="stream")
+        sourcehealth.record("good-src", True, 0.5, level="stream")
         dead = {"line": "dead-src::A", "online_guid": "og1",
                 "index": 0, "title": "差片"}
         good = {"line": "good-src::A", "online_guid": "og1",

@@ -29,6 +29,7 @@ def test_deprecated_keys_removed(monkeypatch, tmp_path):
     state = _patch_state(monkeypatch, tmp_path)
     state.parent.mkdir(parents=True)
     state.write_text(json.dumps({"public_base": "/x", "strm_root": "/y",
+                                 "tmdb_api_key": "deadbeef",
                                  "t4_sources": [{"name": "旧T4", "api": "http://x/"}]}),
                      encoding="utf-8")
     c = config_mod.Config()
@@ -38,6 +39,10 @@ def test_deprecated_keys_removed(monkeypatch, tmp_path):
     # 旧配置里残留的该键加载时丢弃、不报错，且不再出现在默认值里。
     assert "t4_sources" not in c.get()
     assert "t4_sources" not in config_mod.DEFAULTS
+    # 遗留键 tmdb_api_key：从未被任何代码读取（全仓库仅 DEFAULTS 与注释引用），
+    # 旧配置里残留的该键加载时丢弃、不报错，且不再出现在默认值里。
+    assert "tmdb_api_key" not in c.get()
+    assert "tmdb_api_key" not in config_mod.DEFAULTS
 
 
 def test_save_backups_old_config(monkeypatch, tmp_path):

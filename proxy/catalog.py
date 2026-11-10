@@ -298,9 +298,10 @@ class Catalog:
             return self.status()
         self._refreshing = True
         try:
-            async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+            # 上游同位置走 netutil.async_client（按代理模式直连/走代理/自动切代理），
+            # 与本文件 _load_page 的两处用法一致。
+            async with netutil.async_client(verify=False,
+                                           timeout=HTTP_TIMEOUT) as client:
                 await asyncio.gather(
                     *[self._load_source_classes(client, s) for s in sources],
                     return_exceptions=True)
@@ -322,9 +323,8 @@ class Catalog:
                     order.append(key)
             probed: dict[tuple[str, str], dict] = {}
 
-            async with httpx.AsyncClient(
-                    follow_redirects=True, trust_env=False,
-                    verify=False) as client:
+            async with netutil.async_client(verify=False,
+                                           timeout=HTTP_TIMEOUT) as client:
                 async def probe_one(sid, cat, cl):
                     source = self._source_by_id(sid)
                     if not source:
