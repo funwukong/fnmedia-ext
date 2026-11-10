@@ -260,6 +260,23 @@ class Catalog:
         # (sid, cat) -> [备用叶子 route...]（首选分类探测失败时 rescue 得到）
         self._fallbacks: dict[tuple[str, str], list[dict]] = {}
 
+    # 移植上游 v0.2.54（缓存管理）：清空海量库分类路由/分页/聚合缓冲
+    # （管理页一键清缓存），下次浏览海量库时重新探测分类并深翻。
+    # fork 适配：上游无 _fallbacks 字段，这里一并清空，避免残留备用路由
+    # 与已清空的路由表不一致。
+    def reset(self) -> None:
+        with self._lock:
+            self._classes.clear()
+            self._routes.clear()
+            self._updated = 0.0
+            self._page_cache.clear()
+            self._inflight.clear()
+            self._seen_guids.clear()
+            self._dense.clear()
+            self._scanned_page.clear()
+            self._dense_count.clear()
+            self._fallbacks.clear()
+
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
         return f"{scope}:{cat}"

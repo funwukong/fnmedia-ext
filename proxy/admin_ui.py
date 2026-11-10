@@ -117,6 +117,20 @@ tr:last-child td{border-bottom:0}
 .del{color:var(--err);background:transparent;border:0;cursor:pointer;font-size:13px;padding:4px 6px}
 .st{font-size:12px;white-space:nowrap}.st.ok{color:var(--ok)}.st.bad{color:var(--err)}.st.wait{color:var(--muted)}
 
+/* ---------- 管理页开关/缓存卡片（移植上游 v0.2.54/69：导入按钮、缓存网格、代理模式段） ---------- */
+label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
+  border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:9px;
+  padding:8px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;font-family:inherit}
+label.btn-sm{padding:5px 12px;font-size:12.5px;border-radius:7px}
+label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
+.cache-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin:10px 0}
+.cache-item{border:1px solid var(--line);border-radius:10px;padding:11px 12px;background:#fafbfc}
+.cache-item .cn{font-size:13px;font-weight:600}
+.cache-item .cv{font-size:12px;color:var(--muted);margin:3px 0 9px;word-break:break-all}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f1f3f6;flex-wrap:wrap}
+.seg button{border:none!important;background:transparent!important;padding:7px 14px;font-size:13px;color:var(--muted)!important;border-radius:0!important;box-shadow:none!important}
+.seg button.active{background:var(--accent)!important;color:#fff!important;font-weight:600}
+
 /* ---------- 概览统计 ---------- */
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .stat{background:#fafbfc;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
@@ -412,7 +426,12 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <div class="card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
           <button class="small" style="margin-left:auto" onclick="testAll()">全部测速</button>
+          <button class="small" onclick="cmsHealthCheck()" title="用热门词批量检测纯 CMS 源是否有效，失效写入健康画像触发熔断">CMS 批量体检</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
+          <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
+          <label class="btn-sm" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
+            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
+          </label>
         </div>
         <div style="overflow-x:auto">
         <table>
@@ -433,7 +452,30 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           「🔞」= 把该独立库标记为限制级（18+）：与主库隔离、不进全局搜索，开启需二次确认；
           <!-- <<< PRIVATE:ADULT -->
           删除内置源仅隐藏，可恢复。批量导入 TVBox 订阅请用左侧「导入订阅」。</div>
+        <div id="cmsHealthResult" class="muted sm" style="margin-top:8px"></div>
       </div>
+
+      <!-- 资源站取源代理（移植上游 v0.2.46/55；后端 /v/api/ext/source-proxy 已在） -->
+      <details class="card">
+        <summary class="card-title" style="cursor:pointer">🌐 资源站取源代理（可选 · 直连慢时）</summary>
+        <p class="card-sub" style="margin-top:8px">仅用于搜索、分类深翻、测速和播放地址解析；视频分片仍直连，不占代理带宽。留空即直连，不改变现有播放策略。</p>
+        <div class="row">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="srcProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSrcProxyToggle()"/> 已配置代理</label>
+        </div>
+        <div class="row">
+          <input type="text" id="srcProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
+          <button class="small primary" id="srcProxySaveBtn" onclick="saveSrcProxy(true)" disabled>保存并测速</button>
+          <button class="small ghost danger" id="srcProxyClearBtn" onclick="clearSrcProxy()" disabled>清空</button>
+        </div>
+        <div class="seg" id="srcProxyMode" style="margin-top:10px" role="tablist">
+          <button type="button" data-mode="auto" onclick="setSrcProxyMode('auto')">🪄 智能（推荐）</button>
+          <button type="button" data-mode="on" onclick="setSrcProxyMode('on')">始终走代理</button>
+          <button type="button" data-mode="off" onclick="setSrcProxyMode('off')">全部直连</button>
+        </div>
+        <div class="hint" id="srcProxyModeHint" style="margin-top:6px"></div>
+        <div id="srcProxyMsg" class="muted sm" style="margin-top:6px"></div>
+      </details>
 
       <div class="card">
         <div class="card-title">📡 T4 远程源 <span class="badge" id="t4Count"></span></div>
@@ -480,6 +522,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
             <input type="checkbox" id="adfDynamic" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterDynamic(this.checked)"/>
             播放时动态检测（识别订阅未提供规则的广告段）</label>
+        </div>
+        <div style="margin:6px 0">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;cursor:pointer">
+            <input type="checkbox" id="adfSps" style="width:14px;height:14px;accent-color:var(--accent)" onchange="toggleAdfilterSps(this.checked)"/>
+            SPS 指纹检测（按视频 SPS 编码参数识别广告段；关闭则跳过该层检测）</label>
         </div>
         <div id="adfStatus" class="muted sm" style="margin-top:6px">正在加载去广告规则…</div>
       </div>
@@ -730,7 +777,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
           <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
-        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button></div>
+        <label class="switch-row"><input type="checkbox" id="linePredict"/>
+          <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，起播优先用已探到的最快线（只作竞速种子，不固定线路）</span></span></label>
+        <label class="field" style="max-width:260px"><span>预测线路数（1-3）</span>
+          <input type="number" id="linePredictMax" min="1" max="3" style="width:100%"/></label>
+        <label class="field" style="max-width:260px"><span>预测缓存有效期（分钟，5-120）</span>
+          <input type="number" id="linePredictTtl" min="5" max="120" style="width:100%"/></label>
+        <div class="btn-row"><button class="primary small" onclick="saveLines()">保存播放设置</button>
+          <button class="small" onclick="saveLinePredict()">保存预测设置</button>
+          <button class="small" onclick="resetLinePredict()">清空预测缓存</button></div>
       </div>
 
       <div class="card">
@@ -741,6 +796,22 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
           <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
         </table>
+      </div>
+
+      <!-- 运行缓存管理（移植上游 v0.2.54） -->
+      <div class="card">
+        <div class="card-title">🗑 运行缓存管理
+          <span class="hint" style="font-weight:400">缓存异常或占用过大时清除，后续访问自动重建</span>
+          <button class="small" style="margin-left:auto" onclick="loadCacheStatus()">刷新</button>
+        </div>
+        <div id="cacheGrid" class="cache-grid"><div class="muted sm">读取中…</div></div>
+        <div class="btn-row">
+          <button class="small danger" onclick="clearCaches(['search'])">仅清搜索缓存</button>
+          <button class="small danger" onclick="clearCaches(['charts','catalog'])">清榜单+海量库</button>
+          <button class="small danger" onclick="clearCaches(['search','charts','catalog'])">一键清运行缓存（不重启）</button>
+          <button class="small danger" onclick="clearCaches(['health'])">重置源健康画像</button>
+          <button class="small danger" onclick="clearCaches(['titles'])">清在线资源缓存（将重启）</button>
+        </div>
       </div>
     </section>
 
@@ -841,7 +912,8 @@ async function switchPage(page){
   if(page==="overview"){renderOverview();startLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
-  if(page==="sources"){try{loadHealth();}catch(e){}}
+  if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
+  if(page==="search"){try{loadCacheStatus();}catch(e){}}
   if(page==="tvbox"){try{loadGuardZone();}catch(e){}try{gbInit();}catch(e){}}
   // >>> PRIVATE:GUARD
   if(page==="pan"){const f=$("panFrame");if(f&&!f.src)f.src=f.dataset.src;}
@@ -1469,6 +1541,24 @@ async function testAll(){
     else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
   toast("测速完成");
 }
+/* ---------- CMS 源批量体检（移植上游 v0.2.71） ----------
+   注意：导入订阅页的「一键全部体检」是另一功能（spScanStart，走
+   /v/api/ext/spider/scan，体检爬虫/加固/DRPY 源），不要动它。
+   这里只体检纯 CMS 源：任一热门词搜到即有效，失效写入健康画像触发熔断。 */
+async function cmsHealthCheck(){
+  const box=$("cmsHealthResult");if(box)box.textContent="正在用热门词批量检测纯 CMS 源，请稍候…";
+  try{
+    const r=await jpost("/v/api/ext/source/health-check",{});
+    if(r.code!==0){if(box)box.textContent="体检失败："+(r.msg||"");return;}
+    const d=r.data||{},res=d.results||[];
+    const dead=res.filter(x=>!x.alive);
+    let h=`体检完成：共 ${d.total} 个纯 CMS 源，有效 ${d.alive} 个，失效 ${d.dead} 个（关键词：${(d.keywords||[]).join(" / ")}）。`;
+    if(dead.length)h+='<br>失效：'+dead.map(x=>esc(x.name||x.id)+(x.error?('（'+esc(x.error)+'）'):'')).join("、")+'（已记入健康画像，达阈值自动熔断）';
+    if(box)box.innerHTML=h;
+    toast(`CMS 体检完成：${d.alive}/${d.total} 有效`);
+    try{loadHealth();}catch(e){}
+  }catch(e){if(box)box.textContent="体检请求失败："+String(e);}
+}
 async function loadHealth(){
   const box=$("healthRows");if(!box)return;box.innerHTML='<tr><td colspan="6" class="muted">加载中…</td></tr>';
   try{
@@ -1496,6 +1586,64 @@ async function addSource(){
   if(r.code===0){toast("已添加");$("addName").value="";$("addApi").value="";$("addStandalone").checked=false;
     await loadStatus();const tr=$("srcRows").querySelector(`tr[data-id="${r.data.id}"]`);if(tr&&!standalone)testOne(r.data.id,tr);}
   else toast(r.msg||"添加失败","fail");
+}
+/* ---------- 资源站取源代理（搜索/分类/测速，视频流仍直连；移植上游 v0.2.46/55） ---------- */
+function initSrcProxy(){
+  const p=(CFG&&CFG.source_proxy)||"";
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn"),cb=$("srcProxyClearBtn"),msg=$("srcProxyMsg");
+  if(!en)return;
+  inp.value=p;en.checked=!!p;inp.disabled=!en.checked;sb.disabled=!en.checked;cb.disabled=!p;
+  msg.textContent=p?"取源请求按下方模式决定是否经代理，视频流仍直连":"当前未设代理（全部直连）";
+  msg.style.color="";renderSrcProxyMode();
+}
+const SRC_MODE_HINT={
+  auto:"🪄 智能：默认直连；只有直连失败的资源站自动切代理，其它站保持直连。",
+  on:"始终走代理：所有资源站搜索/分类/测速/解析都经代理，视频流仍直连。",
+  off:"全部直连：忽略已配置的代理地址。"
+};
+function renderSrcProxyMode(){
+  const mode=(CFG&&CFG.source_proxy_mode)||"auto",seg=$("srcProxyMode"),hint=$("srcProxyModeHint");
+  if(!seg)return;
+  seg.querySelectorAll("button").forEach(b=>b.classList.toggle("active",b.dataset.mode===mode));
+  if(hint)hint.textContent=SRC_MODE_HINT[mode]||SRC_MODE_HINT.auto;
+}
+async function setSrcProxyMode(mode){
+  const proxy=$("srcProxyUrl").value.trim();
+  if(mode!=="off"&&proxy&&proxy!==((CFG&&CFG.source_proxy)||""))await saveSrcProxy(false);
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:(CFG&&CFG.source_proxy)||"",mode});
+  if(r.code===0){CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    toast({auto:"已切换为智能模式",on:"已切换为始终走代理",off:"已切换为全部直连"}[mode]);
+  }else toast(r.msg||"切换失败","fail");
+}
+function onSrcProxyToggle(){
+  const en=$("srcProxyEnable"),inp=$("srcProxyUrl"),sb=$("srcProxySaveBtn");
+  inp.disabled=!en.checked;sb.disabled=!en.checked;if(en.checked)inp.focus();
+}
+async function saveSrcProxy(test){
+  const inp=$("srcProxyUrl"),msg=$("srcProxyMsg"),proxy=inp.value.trim();
+  if(!proxy){toast("请填写代理地址，或点清空直连","fail");return;}
+  msg.textContent="保存并测试资源站连通性…";msg.style.color="";
+  try{
+    const mode=(CFG&&CFG.source_proxy_mode)||"auto";
+    const r=await jpost("/v/api/ext/source-proxy",{proxy,mode});
+    if(r.code!==0){msg.textContent="未保存："+(r.msg||"格式错误");msg.style.color="var(--err)";return;}
+    CFG.source_proxy=proxy;CFG.source_proxy_mode=(r.data&&r.data.mode)||mode;renderSrcProxyMode();
+    const d=r.data||{};
+    if(test){msg.textContent=d.test_ok?("✓ 已保存，经代理测速成功（"+(d.test_msg||"")+"）")
+      :("已保存，但经代理测速失败："+(d.test_msg||"可稍后在资源站页测速"));
+      msg.style.color=d.test_ok?"var(--ok)":"var(--warn)";
+    }else msg.textContent="已保存";
+    $("srcProxyClearBtn").disabled=false;toast("源代理已保存");
+  }catch(e){msg.textContent="请求失败："+String(e);msg.style.color="var(--err)";}
+}
+async function clearSrcProxy(){
+  if(!confirm("清空资源站代理地址并全部直连？"))return;
+  const r=await jpost("/v/api/ext/source-proxy",{proxy:"",mode:"off"});
+  if(r.code===0){CFG.source_proxy="";CFG.source_proxy_mode="off";
+    $("srcProxyUrl").value="";$("srcProxyEnable").checked=false;
+    $("srcProxyUrl").disabled=true;$("srcProxySaveBtn").disabled=true;$("srcProxyClearBtn").disabled=true;
+    renderSrcProxyMode();$("srcProxyMsg").textContent="已清空，当前直连";toast("已清空代理");
+  }else toast(r.msg||"失败","fail");
 }
 // ---------- 订阅抓取代理（仅拉订阅/jar/脚本，不影响播放） ----------
 function initSubProxy(){
@@ -1546,6 +1694,7 @@ async function loadAdfilter(){
     const d=r.data||{};
     if(cb)cb.checked=!!d.enabled;
     const dyn=$("adfDynamic"); if(dyn)dyn.checked=d.dynamic!==false;
+    const sps=$("adfSps"); if(sps)sps.checked=d.sps!==false;
     let h="";
     if(d.enabled) h+='<span style="color:var(--ok,#3a9)">● 已启用</span>　';
     else h+='<span class="muted">○ 已关闭</span>　';
@@ -1572,6 +1721,13 @@ async function toggleAdfilterDynamic(on){
   try{
     const r=await jpost("/v/api/ext/adfilter/toggle",{dynamic:!!on});
     if(r.code===0){toast(on?"已开启播放时动态检测":"已关闭动态检测");loadAdfilter();}
+    else toast(r.msg||"操作失败","fail");
+  }catch(e){toast(String(e),"fail");}
+}
+async function toggleAdfilterSps(on){
+  try{
+    const r=await jpost("/v/api/ext/adfilter/toggle",{sps:!!on});
+    if(r.code===0){toast(on?"已开启 SPS 指纹检测":"已关闭 SPS 指纹检测");loadAdfilter();}
     else toast(r.msg||"操作失败","fail");
   }catch(e){toast(String(e),"fail");}
 }
@@ -1971,7 +2127,61 @@ async function restoreBuiltin(){
   if(r.code===0){toast("已恢复内置源");await loadStatus();}else toast("失败","fail");
 }
 
-/* ---------- 搜索设置 / 噪音词 / 缓存 ---------- */
+/* ---------- CMS 源导入 / 导出（移植上游 v0.2.69） ---------- */
+async function exportCmsSources(){
+  try{
+    const r=await jget("/v/api/ext/source/export"),list=(r.data&&r.data.sources)||[];
+    if(!list.length){toast("当前没有可导出的 CMS 源","fail");return;}
+    const blob=new Blob([JSON.stringify(r.data,null,2)],{type:"application/json"});
+    const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+    a.download="fnmedia-cms-sources.json";document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast("已导出 "+list.length+" 个 CMS 源");
+  }catch(e){toast("导出失败："+e.message,"fail");}
+}
+async function importCmsFile(input){
+  const f=input.files&&input.files[0];if(!f)return;
+  try{
+    const text=await f.text();let data;
+    try{data=JSON.parse(text);}catch(_){toast("文件不是合法 JSON","fail");input.value="";return;}
+    const body=Array.isArray(data)?{sources:data}:data;
+    const r=await jpost("/v/api/ext/source/import-file",body);
+    if(r.code===0){const d=r.data||{};
+      toast(`导入完成：新增 ${d.added}，已存在跳过 ${d.skipped}，忽略非CMS ${d.ignored_noncms}`);
+      await loadStatus();renderSources();
+    }else toast(r.msg||"导入失败","fail");
+  }catch(e){toast("导入失败："+e.message,"fail");}
+  finally{input.value="";}
+}
+
+/* ---------- 搜索设置 / 噪音词 / 缓存（缓存管理移植上游 v0.2.54） ---------- */
+async function loadCacheStatus(){
+  const box=$("cacheGrid");if(!box)return;
+  try{
+    const r=await jget("/v/api/ext/cache"),d=r.data||{};
+    const fmtB=n=>n>=1048576?(n/1048576).toFixed(2)+" MB":(n>=1024?(n/1024).toFixed(1)+" KB":n+" B");
+    const items=[
+      ["titles","在线资源缓存",d.titles&&(fmtB(d.titles.bytes)+" · "+d.titles.entries+" 条"),"清后将重启服务"],
+      ["charts","热门榜单缓存",d.charts&&fmtB(d.charts.bytes),"后台自动重抓"],
+      ["catalog","海量库分类/分页",d.catalog&&(d.catalog.routes+" 路由 · "+d.catalog.pages+" 分页"),"下次浏览重建"],
+      ["search","搜索结果内存缓存",d.search&&(d.search.entries+" 条"),"即时清空不重启"],
+      ["health","源健康画像",d.health&&(d.health.entries+" 源"),"清空后重新画像"],
+    ];
+    box.innerHTML=items.map(([k,label,val,note])=>`<div class="cache-item">
+      <div class="cn">${label}</div><div class="cv">${val||"-"}<br><span style="opacity:.7">${note}</span></div>
+      <button class="small danger" style="width:100%" onclick="clearCaches(['${k}'])">清除</button></div>`).join("");
+  }catch(e){box.innerHTML='<div class="muted sm">读取失败</div>';}
+}
+async function clearCaches(targets){
+  const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",health:"源健康画像"};
+  const names=targets.map(t=>labels[t]||t).join("、");
+  if(!confirm("确定清除："+names+" ？"))return;
+  const r=await jpost("/v/api/ext/cache/clear",{targets});
+  if(r.code===0){toast(r.msg||"已清除");
+    if((r.data||{}).restart)setTimeout(()=>location.reload(),1800);
+    else setTimeout(loadCacheStatus,600);
+  }else toast(r.msg||"清除失败","fail");
+}
 function renderKw(){
   $("kwN").textContent="（共 "+KWS.length+" 个）";
   $("kwChips").innerHTML=KWS.map((k,i)=>`<span class="chip">${esc(k)}<b data-i="${i}" title="删除">×</b></span>`).join("");
@@ -2011,6 +2221,20 @@ async function saveLines(){
     line_autofail:$("lineAutofail").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
+}
+/* ---------- 本片线路预测开关（后端 /v/api/ext/linepredict/config 已在；上游 admin_ui 无此开关，按 fork 既有写法补） ---------- */
+async function saveLinePredict(){
+  const body={enabled:$("linePredict").checked,
+    max_lines:Math.max(1,Math.min(3,parseInt($("linePredictMax").value)||3)),
+    ttl_min:Math.max(5,Math.min(120,parseInt($("linePredictTtl").value)||30))};
+  const r=await jpost("/v/api/ext/linepredict/config",body);
+  if(r.code===0){toast("预测设置已保存");Object.assign(CFG,{linepredict_enabled:body.enabled,linepredict_max_lines:body.max_lines,linepredict_ttl_min:body.ttl_min});}
+  else toast("保存失败 "+(r.msg||""),"fail");
+}
+async function resetLinePredict(){
+  if(!confirm("清空已预测的本片最快线缓存？（不影响竞速实测记忆）"))return;
+  const r=await jpost("/v/api/ext/linepredict/reset",{});
+  if(r.code===0)toast("预测缓存已清空");else toast("清空失败 "+(r.msg||""),"fail");
 }
 async function loadOnline(){
   const kw=$("kw").value.trim();
@@ -2352,7 +2576,10 @@ async function init(){
   $("lineAutofail").checked=CFG.line_autofail!==false;
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
-  renderKw();renderSources();
+  $("linePredict").checked=CFG.linepredict_enabled!==false;
+  $("linePredictMax").value=CFG.linepredict_max_lines||3;
+  $("linePredictTtl").value=CFG.linepredict_ttl_min||30;
+  renderKw();renderSources();initSrcProxy();loadCacheStatus();
   const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
   const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
   loadOnline();

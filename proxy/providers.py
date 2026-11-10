@@ -529,6 +529,38 @@ async def probe_source(api: str, keyword: str = "庆余年",
             "count": len(lst), "direct": direct, "sample": sample, "error": ""}
 
 
+# 资源站有效性检测专用的【常见热门】关键词。只选各大主流 CMS 基本都收录的长红
+# 影视剧，避免用冷门片导致“源其实正常、只是没这部”的误判。任一关键词搜到即视为有效。
+# 移植上游 v0.2.71（批量体检）。
+PROBE_HOT_KEYWORDS = ("庆余年", "狂飙", "流浪地球", "斗罗大陆", "琅琊榜")
+
+
+async def probe_source_alive(source: dict, timeout: float = 8.0,
+                             keywords=PROBE_HOT_KEYWORDS) -> dict:
+    """用多个常见热门关键词检测资源站是否有效。
+
+    依次尝试关键词，任一返回非空结果即判定有效（ok=True）并立即返回；全部关键词
+    都搜不到才判定失效。这样不会因单个片名缺失而误伤正常源。返回与 probe_source
+    兼容的结构，并额外带 tried（尝试过的词）与 hits（命中的词）。
+    移植上游 v0.2.71（批量体检）。"""
+    api = (source.get("api") or "").strip()
+    t0 = time.monotonic()
+    tried, hit = [], ""
+    last = {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
+            "sample": "", "error": ""}
+    for kw in keywords:
+        tried.append(kw)
+        r = await probe_source(api, keyword=kw, timeout=timeout, source=source)
+        last = r
+        if r.get("ok") and (r.get("count") or 0) > 0:
+            hit = kw
+            return {**r, "alive": True, "hit": hit, "tried": tried,
+                    "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+    # 全部关键词都无结果：判定失效（保留最后一次的错误/状态供展示）
+    return {**last, "alive": False, "hit": "", "tried": tried,
+            "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+
+
 # >>> PRIVATE:DDUO
 # ---------------- 多多影视（非标准源，仅完整构建） ----------------
 
