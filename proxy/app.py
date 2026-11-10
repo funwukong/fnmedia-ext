@@ -281,13 +281,68 @@ def guard_native_enabled() -> bool:
                 and config.get().get("guard_native_enabled", True))
 
 
-# >>> PRIVATE:GUARD
+# —— 多网盘识别注册表（通用分类器，移出加固私有块）———————————
+# _pan_match 被块外的通用代码引用（播放变体排序、线路角标），放块内会在公开构建
+# 被剥离后报 NameError（与 _gn_folder_token / source_priority 同类问题）；
+# 本段只做链接模式识别，不含任何私有播放实现，移出不影响剥离语义。
+# —— 多网盘识别注册表 ———————————————————————————————————————————————
+# “网盘资源”的判定：加固 jar 解出的播放地址里出现某家网盘的分享链接，或四盘
+# 聚合源的中转占位（Seedhub/盘搜类）。playable=True 的家已实现转存→原画播放。
+# 其余家先做“识别 + 明确提示”，播放驱动按同一接口逐家接入。
+_PAN_PROVIDERS = [
+    {"key": "quark", "name": "夸克网盘", "playable": True,
+     "patterns": [r"pan\.quark\.cn/s/[A-Za-z0-9]+",
+                  r"drive\.quark\.cn/[^\s\"']*"]},
+    {"key": "uc", "name": "UC网盘", "playable": True,
+     "patterns": [r"(?:pan|drive)\.uc\.cn/s/[A-Za-z0-9]+",
+                  r"drive\.uc\.cn/[^\s\"']*"]},
+    {"key": "ali", "name": "阿里云盘", "playable": True,
+     "patterns": [r"(?:alipan|aliyundrive)\.com/s/[A-Za-z0-9]+",
+                  r"www\.alipan\.com/s/[A-Za-z0-9]+"]},
+    {"key": "baidu", "name": "百度网盘", "playable": False,
+     "patterns": [r"pan\.baidu\.com/s/[A-Za-z0-9_%-]+"]},
+    {"key": "xunlei", "name": "迅雷云盘", "playable": False,
+     "patterns": [r"pan\.xunlei\.com/[A-Za-z0-9]+",
+                  r"(?:pan\.xunlei\.com|xunlei\.com)/[^\s\"']*(?:s/|share)"]},
+    {"key": "p115", "name": "115网盘", "playable": False,
+     "patterns": [r"115\.com/s/[A-Za-z0-9]+"]},
+    {"key": "tianyi", "name": "天翼云盘", "playable": False,
+     "patterns": [r"cloud\.189\.cn/[^\s\"']+",
+                  r"(?:cloud|pan)\.189\.cn/[^\s\"']*"]},
+    {"key": "yidong", "name": "移动云盘", "playable": False,
+     "patterns": [r"yun\.139\.com/[^\s\"']+"]},
+]
+for _pv in _PAN_PROVIDERS:
+    _pv["re"] = re.compile("|".join(_pv["patterns"]), re.I)
+
+# 四盘聚合源（Seedhub 等）的中转占位：redirect_to=pan_id_<id>，最终由其 302
+# 解出真实夸克链接（前置 Cloudflare 时解不开则回退）。
+_PAN_LINKSTART_RE = re.compile(r"link_start/[^\s\"']*redirect_to=pan_id_(\d+)")
+
+
+def _pan_match(text: str):
+    """在一段文本（播放地址/线路名/影片名）里识别网盘分享，返回 provider 或 None。"""
+    if not text:
+        return None
+    s = str(text)
+    for pv in _PAN_PROVIDERS:
+        if pv["re"].search(s):
+            return pv
+    return None
+
+
+# —— 加固库 guid 纯映射（移出加固私有块）———————————————
+# _guid_for_key 的 guard 分支在块外通用代码里调用它；放块内会在公开构建被剥离后
+# 报 NameError。纯 md5 映射，不含任何加固运行时依赖，移出不影响剥离语义。
 # —— TVBox 加固源专区：每个“启用且作为专区展示”的加固源生成一张库卡片 ——
 _GUARD_LIB_PREFIX = "fnmedia-guard:"
 
 
-def guard_lib_guid(guard_key: str) -> str:
-    return hashlib.md5((_GUARD_LIB_PREFIX + guard_key).encode()).hexdigest()
+def guard_lib_guid(gkey: str) -> str:
+    return hashlib.md5((_GUARD_LIB_PREFIX + gkey).encode()).hexdigest()
+
+
+# >>> PRIVATE:GUARD
 
 
 def guard_lib_source(lib_guid: str) -> dict | None:
@@ -7291,50 +7346,6 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         return False
 
 
-# —— 多网盘识别注册表 ———————————————————————————————————————————————
-# “网盘资源”的判定：加固 jar 解出的播放地址里出现某家网盘的分享链接，或四盘
-# 聚合源的中转占位（Seedhub/盘搜类）。playable=True 的家已实现转存→原画播放。
-# 其余家先做“识别 + 明确提示”，播放驱动按同一接口逐家接入。
-_PAN_PROVIDERS = [
-    {"key": "quark", "name": "夸克网盘", "playable": True,
-     "patterns": [r"pan\.quark\.cn/s/[A-Za-z0-9]+",
-                  r"drive\.quark\.cn/[^\s\"']*"]},
-    {"key": "uc", "name": "UC网盘", "playable": True,
-     "patterns": [r"(?:pan|drive)\.uc\.cn/s/[A-Za-z0-9]+",
-                  r"drive\.uc\.cn/[^\s\"']*"]},
-    {"key": "ali", "name": "阿里云盘", "playable": True,
-     "patterns": [r"(?:alipan|aliyundrive)\.com/s/[A-Za-z0-9]+",
-                  r"www\.alipan\.com/s/[A-Za-z0-9]+"]},
-    {"key": "baidu", "name": "百度网盘", "playable": False,
-     "patterns": [r"pan\.baidu\.com/s/[A-Za-z0-9_%-]+"]},
-    {"key": "xunlei", "name": "迅雷云盘", "playable": False,
-     "patterns": [r"pan\.xunlei\.com/[A-Za-z0-9]+",
-                  r"(?:pan\.xunlei\.com|xunlei\.com)/[^\s\"']*(?:s/|share)"]},
-    {"key": "p115", "name": "115网盘", "playable": False,
-     "patterns": [r"115\.com/s/[A-Za-z0-9]+"]},
-    {"key": "tianyi", "name": "天翼云盘", "playable": False,
-     "patterns": [r"cloud\.189\.cn/[^\s\"']+",
-                  r"(?:cloud|pan)\.189\.cn/[^\s\"']*"]},
-    {"key": "yidong", "name": "移动云盘", "playable": False,
-     "patterns": [r"yun\.139\.com/[^\s\"']+"]},
-]
-for _pv in _PAN_PROVIDERS:
-    _pv["re"] = re.compile("|".join(_pv["patterns"]), re.I)
-
-# 四盘聚合源（Seedhub 等）的中转占位：redirect_to=pan_id_<id>，最终由其 302
-# 解出真实夸克链接（前置 Cloudflare 时解不开则回退）。
-_PAN_LINKSTART_RE = re.compile(r"link_start/[^\s\"']*redirect_to=pan_id_(\d+)")
-
-
-def _pan_match(text: str):
-    """在一段文本（播放地址/线路名/影片名）里识别网盘分享，返回 provider 或 None。"""
-    if not text:
-        return None
-    s = str(text)
-    for pv in _PAN_PROVIDERS:
-        if pv["re"].search(s):
-            return pv
-    return None
 
 
 async def _resolve_guard_pan(picked: dict) -> bool:
