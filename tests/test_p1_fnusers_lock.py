@@ -131,6 +131,31 @@ def test_lookup_failure_cached_negative(monkeypatch):
     assert calls == ["tok-nope"]
 
 
+def test_cache_eviction_at_2000_cap(monkeypatch):
+    # P1-23(2)：此前只覆盖缓存命中/TTL/并发双重检查，2000 条 cap 淘汰无测试。
+    # 填满 2000 条旧缓存（时间戳递增，tok-0000 最旧），再解析一个新 token：
+    # 插入后 2001 条触发淘汰最旧一半，剩 1001 条，新 token 与较新的旧条目保留。
+    calls = []
+    monkeypatch.setattr(fnusersmod, "_lookup",
+                        lambda tok: calls.append(tok) or _user("u-" + tok))
+    now = time.time()
+    for i in range(2000):
+        fnusersmod._cache["tok-%04d" % i] = (now - 2000 + i,
+                                             _user("u-old-%d" % i))
+    assert len(fnusersmod._cache) == 2000
+    assert fnusersmod.resolve(_req("tok-new"))["guid"] == "u-tok-new"
+    assert calls == ["tok-new"]
+    assert len(fnusersmod._cache) == 1001
+    assert "tok-new" in fnusersmod._cache
+    for i in range(1000):
+        assert "tok-%04d" % i not in fnusersmod._cache
+    for i in range(1000, 2000):
+        assert "tok-%04d" % i in fnusersmod._cache
+    # 被淘汰的旧 token 再次解析会重新查库（不再命中已清掉的缓存）。
+    assert fnusersmod.resolve(_req("tok-0000"))["guid"] == "u-tok-0000"
+    assert calls == ["tok-new", "tok-0000"]
+
+
 def test_double_check_does_not_overwrite_fresher_cache(monkeypatch):
     # A 查库中途，B 已写入更新鲜的缓存：A 写前再查一次，不得覆盖
     entered = threading.Event()
