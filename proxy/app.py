@@ -4972,6 +4972,23 @@ def _diag_play_info(guid: str, info: dict) -> dict:
     return info
 
 
+def _diag_record_canon_key(ig: str) -> str | None:
+    """play/record 诊断用的规范键：优先取刚存下的 history 记录里的
+    canon_key 字段；没有（未存入 history，如透传上游）时用
+    history.canonical_key_for_guid 对 guid 现算；算不到返回 None。
+    只读诊断，失败返回 None，绝不影响播放。"""
+    try:
+        rec = history.get(ig)
+        if isinstance(rec, dict) and rec.get("canon_key"):
+            return str(rec["canon_key"])
+    except Exception:
+        pass
+    try:
+        return histmod.canonical_key_for_guid(ig)
+    except Exception:
+        return None
+
+
 def _vod_play_info(guid: str, client) -> JSONResponse | None:
     parsed = _parse_line_item_guid(guid)
     if not parsed:
@@ -7245,13 +7262,15 @@ async def play_record(request: Request):
         history.record(body)
         try:
             resume_diagmod.note_record(raw_guid, ig, body,
-                                       outcome="history", parsed=parsed)
+                                       outcome="history", parsed=parsed,
+                                       canon_key=_diag_record_canon_key(ig))
         except Exception:
             pass
         return JSONResponse({"code": 0, "msg": "", "data": True})
     try:
         resume_diagmod.note_record(raw_guid, ig, body,
-                                   outcome="upstream", parsed=parsed)
+                                   outcome="upstream", parsed=parsed,
+                                   canon_key=_diag_record_canon_key(ig))
     except Exception:
         pass
     return await forward_upstream(request)
@@ -10454,7 +10473,8 @@ async def ext_diag_resume(request: Request, guid: str = ""):
     用法：真机播 30 秒退出、重进一次，再打开本端点，把 JSON 发回排查。
     只含 guid / 分区键 / ts / duration / updated_at，不含任何 token 或凭证原文。
     lookup 按 guid 与归一化后的 guid 两个键查（文件夹/线路卡 guid 上报的
-    进度落在归一化后的标题/集键上）。
+    进度落在归一化后的标题/集键上）；给定 guid 能解析出规范键时，也查
+    该规范键下的记录（跨线命中的那条，不用自己拼 canon:… 键）。
     """
     g = (guid or "").strip()
     keys = []
