@@ -25,7 +25,9 @@ _STATE = Path(__file__).resolve().parent.parent / "state" / "config.json"
 _LOCK = threading.RLock()
 
 # 配置版本号：升级时按版本做迁移（见 Config.load）。
-CONFIG_VERSION = 1
+# v2：多用户可见性默认改 fail-closed（acl_default_visible/acl_default_online
+# 由 True 改 False；旧配置首次加载时一次性翻成 False，见 load() 的 v1→v2 迁移）。
+CONFIG_VERSION = 2
 # 每次保存前保留的旧配置备份份数。
 BACKUP_KEEP = 5
 
@@ -149,15 +151,16 @@ DEFAULTS = {
     # 与 guid 解耦）。lib_hidden：管理员隐藏的库键；lib_order：虚拟库自定义
     # 顺序；lib_placement：front/back/after；lib_anchor：after 的锚点本地库
     # guid；lib_acl：{用户 guid: [允许的库键，含 "__online__" 标记]}；
-    # acl_default_visible/acl_default_online：未配置账号的默认（True=可见，
-    # 上游 fail-open 默认；改 False 则未配置账号默认看不到虚拟库/在线搜索）。
+    # acl_default_visible/acl_default_online：未配置账号的默认（False=隐藏，
+    # fail-closed 默认；True=可见，上游 fail-open 默认。识别不到身份的会话
+    # 始终隐藏，不受这两项控制，见 vlibs.account_can_see）。
     "lib_hidden": [],
     "lib_order": [],
     "lib_placement": "front",
     "lib_anchor": "",
     "lib_acl": {},
-    "acl_default_visible": True,
-    "acl_default_online": True,
+    "acl_default_visible": False,
+    "acl_default_online": False,
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
@@ -310,7 +313,13 @@ class Config:
                     _log.error("no usable config backup, falling back to defaults")
             cfg = json.loads(json.dumps(DEFAULTS))  # deep copy
             cfg.update(j)
-            # 旧配置没有版本号时补 1，后续升级按版本号迁移。
+            # 存量版本号（旧配置可能没有该键，视为 v1）：v1→v2 迁移的判定依据，
+            # 须在下面 setdefault 补当前版本之前读取。
+            try:
+                _stored_version = int(j.get("config_version", 1))
+            except (TypeError, ValueError):
+                _stored_version = 1
+            # 旧配置没有版本号时补当前版本，后续升级按版本号迁移。
             cfg.setdefault("config_version", CONFIG_VERSION)
             for k in list(cfg.keys()):
                 if k in _DEPRECATED:
@@ -396,9 +405,23 @@ class Config:
                     cfg["hot_pages_per_source"] = DEFAULTS["hot_pages_per_source"]; migrated = True
             except (TypeError, ValueError):
                 pass
+            # v1→v2 一次性迁移：多用户可见性默认改 fail-closed
+            # （decisions-2-failclosed）。旧配置两项默认 True，存量用户也须
+            # 翻成 False；只在存量版本 < 2 时跑一次，之后用户在管理页手动改回
+            # True 会保留（版本号已是 2，不再迁移）。
+            _acl_migrated = False
+            if _stored_version < 2:
+                cfg["acl_default_visible"] = False
+                cfg["acl_default_online"] = False
+                cfg["config_version"] = 2
+                _acl_migrated = True
+                migrated = True
             if migrated:
-                j.update({k: cfg[k] for k in
-                          ("hot_limit", "hot_per_source", "hot_pages_per_source")})
+                _mig_keys = ("hot_limit", "hot_per_source", "hot_pages_per_source")
+                if _acl_migrated:
+                    _mig_keys += ("acl_default_visible", "acl_default_online",
+                                  "config_version")
+                j.update({k: cfg[k] for k in _mig_keys})
                 try:
                     # 走 _persist：先备份、再写临时文件 + 原子 rename。
                     # cfg 已含合并后的 sources 与迁移后的 hot_* 值，直接持久化它。
