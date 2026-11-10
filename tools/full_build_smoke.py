@@ -131,6 +131,7 @@ _PYTEST_CMD = [
     "tests/test_p0p1_search_viewer_snapshot.py",
     "tests/test_p0_early_return_visible.py",
     "tests/test_p0_playchain_favorites.py",
+    "tests/test_p0p1_resume_favorite.py",
     "-q", "-p", "no:cacheprovider",
 ]
 

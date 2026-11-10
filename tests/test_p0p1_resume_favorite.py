@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -99,6 +100,17 @@ def resolve(request):
                 "is_admin": True, "token": tok}
     return {"known": False, "guid": "", "name": "", "is_admin": False,
             "token": ""}
+
+
+@contextmanager
+def as_marks_user(guid, admin=False):
+    # 收藏/已看自 P0-3 起按账号分区：请求外的直接 _apply_marks 调用
+    # 须显式挂上同一账号上下文，否则读到空分区、角标全丢。
+    tokens = marksmod.set_current_user(guid, admin)
+    try:
+        yield
+    finally:
+        marksmod.reset_current_user(tokens)
 
 
 class BugReproTests(unittest.IsolatedAsyncioTestCase):
@@ -300,10 +312,11 @@ class BugReproTests(unittest.IsolatedAsyncioTestCase):
         await self.client.request(
             "PUT", "/v/api/v1/item/favorite", json={"guid": folder},
             headers=ADMIN)
-        row = appmod._hot_card(
+        row = appmod._catalog_card(
             self.store.get_title_by_guid("og-tv"), "tv")
         self.assertEqual(row["guid"], folder)
-        appmod._apply_marks(row)
+        with as_marks_user("admin-guid", True):
+            appmod._apply_marks(row)
         self.assertEqual(row.get("is_favorite"), 1)
 
     async def test_movie_folder_favorite_succeeds_and_lists(self):
@@ -334,9 +347,10 @@ class BugReproTests(unittest.IsolatedAsyncioTestCase):
             "POST", "/v/api/v1/item/watched", json={"guid": folder},
             headers=ADMIN)
         self.assertEqual(r.json()["code"], 0, r.json())
-        row = appmod._hot_card(
+        row = appmod._catalog_card(
             self.store.get_title_by_guid("og-tv"), "tv")
-        appmod._apply_marks(row)
+        with as_marks_user("admin-guid", True):
+            appmod._apply_marks(row)
         self.assertEqual(row.get("watched"), 1)
 
     # ---- Bug 2：对照组（基线已通过） ----
