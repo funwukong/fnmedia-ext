@@ -46,6 +46,20 @@ try:
 except Exception:
     _health = None  # type: ignore
 
+
+def _source_health_enabled() -> bool:
+    """源健康自动降级开关（config.source_health_enabled，默认 True）。
+
+    惰性读 config，避免与 config.py（import providers）循环导入。
+    关时：搜索不再跳过冷却窗内的死源，也不再记录新的健康画像
+    （降级不记录/不冷却）；开关开时行为与改前一致。
+    """
+    try:
+        from config import config as _cfg
+        return bool(_cfg.get().get("source_health_enabled", True))
+    except Exception:
+        return True
+
 # 2026-10-17 国内直连实测（搜索+m3u8 直链可达性）。403/404 多为走 Clash 代理所致。
 DEFAULT_SOURCES: list[dict] = [
     {"id": "baofeng", "name": "暴风资源", "api": "https://bfzyapi.com/api.php/provide/vod/at/json", "enabled": True},
@@ -426,7 +440,9 @@ async def search_source(client: httpx.AsyncClient, source: dict,
                         keyword: str) -> list[OnlineTitle]:
     # P2 源健康自动降级：连续失败 5 次的源在 3 分钟冷却窗内直接跳过，
     # 不再每次都等超时拖慢整体搜索；冷却过后自动放行一次试探。
-    if _health is not None and not _health.usable(source.get("id", "")):
+    # 开关 source_health_enabled 关闭时不跳过、也不记录（降级不记录/不冷却）。
+    _health_on = _source_health_enabled()
+    if _health_on and _health is not None and not _health.usable(source.get("id", "")):
         _emit = _log.info if _sampled_log("source_skip") else _log.debug
         _emit("source skipped (dead cooldown): id=%s", source.get("id"))
         return []
@@ -438,10 +454,10 @@ async def search_source(client: httpx.AsyncClient, source: dict,
         except _t4mod.T4Error as exc:
             _log.warning("T4 search failed: id=%s error=%s elapsed=%.2fs",
                          source.get("id"), exc, time.monotonic() - _t0)
-            if _health is not None:
+            if _health_on and _health is not None:
                 _health.record(source.get("id", ""), False, time.monotonic() - _t0)
             return []
-        if _health is not None:
+        if _health_on and _health is not None:
             _health.record(source.get("id", ""), True, time.monotonic() - _t0)
         return out
     params = {"ac": "detail", "wd": keyword}
@@ -452,7 +468,7 @@ async def search_source(client: httpx.AsyncClient, source: dict,
         if r.status_code != 200:
             _log.warning("source search failed: id=%s status=%s elapsed=%.2fs",
                          source.get("id"), r.status_code, time.monotonic() - _t0)
-            if _health is not None:
+            if _health_on and _health is not None:
                 _health.record(source.get("id", ""), False, time.monotonic() - _t0)
             return []
         # 苹果 CMS at/xml：RSS XML 响应，先转成与 at/json 等价的 dict
@@ -460,10 +476,10 @@ async def search_source(client: httpx.AsyncClient, source: dict,
     except Exception as e:
         _log.warning("source search failed: id=%s error=%s elapsed=%.2fs",
                      source.get("id"), type(e).__name__, time.monotonic() - _t0)
-        if _health is not None:
+        if _health_on and _health is not None:
             _health.record(source.get("id", ""), False, time.monotonic() - _t0)
         return []
-    if _health is not None:
+    if _health_on and _health is not None:
         _health.record(source.get("id", ""), True, time.monotonic() - _t0)
     if not isinstance(j, dict) or j.get("code") not in (1, "1"):
         return []

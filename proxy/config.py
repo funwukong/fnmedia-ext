@@ -31,6 +31,53 @@ CONFIG_VERSION = 2
 # 每次保存前保留的旧配置备份份数。
 BACKUP_KEEP = 5
 
+# 慢线起播预算（秒）：每次读取时夹取 [0.8, 2.8]，非法值回落默认值。
+MAIN_READY_BUDGET_DEFAULT = 2.4
+MAIN_READY_BUDGET_MIN = 0.8
+MAIN_READY_BUDGET_MAX = 2.8
+
+
+def clamp_main_ready_budget(raw) -> float:
+    """把任意输入归一化为慢线起播预算：非法/非有限值回落 2.4，否则夹取 [0.8, 2.8]。"""
+    import math
+
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return MAIN_READY_BUDGET_DEFAULT
+    if not math.isfinite(v):
+        return MAIN_READY_BUDGET_DEFAULT
+    return min(max(v, MAIN_READY_BUDGET_MIN), MAIN_READY_BUDGET_MAX)
+
+
+def parse_config_version(raw):
+    """解析存量 config_version：返回 int，无法确定时返回 None。
+
+    接受 int、整数 float（如 2.0）、数字字符串（如 "2"、"2.0"）；
+    非数字字符串（"abc"）、None、非整数 float（2.5）、bool 等一律返回 None，
+    调用方不得将其误判为 v1（否则会重跑 v1→v2 迁移，翻掉用户显式设的值）。
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            pass
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return int(f) if f.is_integer() else None
+    return None
+
 
 def _backup_dir() -> Path:
     return _STATE.parent / "backups"
@@ -119,6 +166,10 @@ DEFAULTS = {
     "line_fastest_timeout": 4.0,
     # 默认线（高质量源）领先优势（秒）：它在该优势内返回就算赢，避免无谓抖动
     "line_fastest_prefer": 0.25,
+    # 慢线起播预算（秒）：仅慢源（加固/爬虫/drpy/专有解码/小雅）main.m3u8
+    # 首个请求的最长等待；每次取 main 时实时读取并夹取 [0.8, 2.8]，
+    # 改值即时生效，无需重启。
+    "main_ready_budget": MAIN_READY_BUDGET_DEFAULT,
     # —— 本片线路预测（linepredict）：浏览海报时对首屏影片的少数候选线做轻量探活，
     # 预测出本片最快线并记忆，点播放零竞速秒播；取代旧的全局源测速 speedbench ——
     # 是否在海报/搜索列表阶段对可见影片做轻量预热
@@ -320,12 +371,18 @@ class Config:
                     _log.error("no usable config backup, falling back to defaults")
             cfg = json.loads(json.dumps(DEFAULTS))  # deep copy
             cfg.update(j)
-            # 存量版本号（旧配置可能没有该键，视为 v1）：v1→v2 迁移的判定依据，
-            # 须在下面 setdefault 补当前版本之前读取。
-            try:
-                _stored_version = int(j.get("config_version", 1))
-            except (TypeError, ValueError):
+            # 存量版本号：v1→v2 迁移的判定依据，须在下面 setdefault
+            # 补当前版本之前读取。缺失该键的旧配置视为 v1；键存在但
+            # 解析失败时（如 "2.0"、"abc"、None）不得误判为 v1——按
+            # “无法确定版本”处理，跳过破坏性迁移（见下），只记 warning。
+            if "config_version" not in j:
                 _stored_version = 1
+                _version_known = True
+                _version_missing = True
+            else:
+                _stored_version = parse_config_version(j.get("config_version"))
+                _version_known = _stored_version is not None
+                _version_missing = False
             # 旧配置没有版本号时补当前版本，后续升级按版本号迁移。
             cfg.setdefault("config_version", CONFIG_VERSION)
             for k in list(cfg.keys()):
@@ -416,18 +473,49 @@ class Config:
             # （decisions-2-failclosed）。旧配置两项默认 True，存量用户也须
             # 翻成 False；只在存量版本 < 2 时跑一次，之后用户在管理页手动改回
             # True 会保留（版本号已是 2，不再迁移）。
+            # 迁移跑与不跑都记一条日志；版本无法确定或高于当前版本时只警告，
+            # 不重跑破坏性迁移（解析失败误判为 v1 会把用户显式设的 True 翻回 False）。
             _acl_migrated = False
-            if _stored_version < 2:
+            _version_normalized = False
+            if not _version_known:
+                # 无法确定版本：跳过 v1→v2 迁移，用户值原样保留；只把版本号
+                # 归一化为当前版本（非破坏性），避免每次加载都重复警告。
+                _log.warning(
+                    "config_version unparsable (%r), skipping v1->v2 "
+                    "migration; keeping user values and normalizing "
+                    "version to %d", j.get("config_version"), CONFIG_VERSION)
+                cfg["config_version"] = CONFIG_VERSION
+                _version_normalized = True
+                migrated = True
+            elif _stored_version > CONFIG_VERSION:
+                # 未来版本降级使用：不迁移、不降版本号，只警告（新版本可能
+                # 已写入本版本不认识的键，静默改写会丢数据）。
+                _log.warning(
+                    "config_version %d is newer than supported %d; "
+                    "skipping migration, keeping stored values as-is",
+                    _stored_version, CONFIG_VERSION)
+            elif _stored_version < 2:
                 cfg["acl_default_visible"] = False
                 cfg["acl_default_online"] = False
                 cfg["config_version"] = 2
                 _acl_migrated = True
                 migrated = True
+                _log.info(
+                    "config migration v1->v2: acl defaults flipped to "
+                    "fail-closed (stored version %s%s)", _stored_version,
+                    " (version key missing, treated as v1)"
+                    if _version_missing else "")
+            else:
+                _log.info(
+                    "config migration skipped: stored version %d is "
+                    "current, no migration needed", _stored_version)
             if migrated:
                 _mig_keys = ("hot_limit", "hot_per_source", "hot_pages_per_source")
                 if _acl_migrated:
                     _mig_keys += ("acl_default_visible", "acl_default_online",
                                   "config_version")
+                if _version_normalized:
+                    _mig_keys += ("config_version",)
                 j.update({k: cfg[k] for k in _mig_keys})
                 try:
                     # 走 _persist：先备份、再写临时文件 + 原子 rename。
@@ -740,6 +828,18 @@ class Config:
             return m if m in ("off", "on", "auto") else "auto"
         except Exception:
             return "auto"
+
+    def main_ready_budget(self) -> float:
+        """慢线起播预算（秒）：每次实时读配置并夹取 [0.8, 2.8]，非法值回落 2.4。
+
+        配置加载是 DEFAULTS 深拷贝 + saved update，旧配置没有该键时
+        自动取默认值 2.4，无需迁移。
+        """
+        try:
+            return clamp_main_ready_budget(self.get().get(
+                "main_ready_budget", MAIN_READY_BUDGET_DEFAULT))
+        except Exception:
+            return MAIN_READY_BUDGET_DEFAULT
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
         with _LOCK:
