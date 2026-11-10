@@ -320,6 +320,29 @@ class EarlyReturnVisibleTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(cancelled_d.is_set())
         self.assertEqual(self._titles(cards_u1b), ["慢片0", "慢片1"])
 
+    async def test_online_search_resolves_identity_once(self):
+        # P1-23(7)：online_search 回调统一化后，整条路只解析一次身份
+        # （每请求一个 _ViewerCtx；可见回调与建卡都复用它，不再逐标题
+        # 重新 resolve）。30 条快片 + 2 条慢片走完回调，resolve 恰好 1 次。
+        calls = []
+
+        def _counting(request):
+            calls.append(1)
+            return _user("u1")
+
+        self._patch_obj(appmod.fnusersmod, "resolve",
+                        side_effect=_counting)
+        self._patch_obj(appmod.vlibsmod, "account_can_see",
+                        _can_see({"u1": {"catalog:movie", "catalog:tv"}}))
+        req = SimpleNamespace(headers={})
+        with patch.object(providers, "_dispatch_search",
+                          new=AsyncMock(
+                              side_effect=self._dispatch(0,
+                                                         asyncio.Event()))):
+            cards = await appmod.online_search("计数片", None, request=req)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(len(cards), 12)  # 10 组快片 + 2 条慢片
+
 
 if __name__ == "__main__":
     unittest.main()
