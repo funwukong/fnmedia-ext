@@ -59,6 +59,10 @@ jobs:
           mkdir -p .tools
           curl -fsSL -o .tools/fnpack "$FNPACK_URL"
           chmod +x .tools/fnpack
+          ACTUAL="$(sha256sum .tools/fnpack | awk '{print $1}')"
+          EXPECTED="$(awk '{print $1}' packaging/fpk/fnpack.sha256)"
+          [ "${ACTUAL}" = "${EXPECTED}" ] || { echo "ERROR: fnpack sha256 不一致: 实际 ${ACTUAL}，期望 ${EXPECTED}（见 packaging/fpk/fnpack.sha256）" >&2; exit 1; }
+          echo "fnpack sha256 OK: ${ACTUAL}"
 
       - uses: actions/setup-python@v5
         with:
@@ -120,6 +124,10 @@ jobs:
           mkdir -p .tools
           curl -fsSL -o .tools/fnpack "$FNPACK_URL"
           chmod +x .tools/fnpack
+          ACTUAL="$(sha256sum .tools/fnpack | awk '{print $1}')"
+          EXPECTED="$(awk '{print $1}' packaging/fpk/fnpack.sha256)"
+          [ "${ACTUAL}" = "${EXPECTED}" ] || { echo "ERROR: fnpack sha256 不一致: 实际 ${ACTUAL}，期望 ${EXPECTED}（见 packaging/fpk/fnpack.sha256）" >&2; exit 1; }
+          echo "fnpack sha256 OK: ${ACTUAL}"
 
       - uses: actions/setup-python@v5
         with:

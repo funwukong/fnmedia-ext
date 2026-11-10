@@ -108,6 +108,29 @@ if [ -z "${FNPACK_BIN}" ]; then
     chmod +x "${FNPACK_BIN}"
   fi
 fi
+
+# fnpack 校验：期望值见 packaging/fpk/fnpack.sha256（amd64 实测值）。
+# 无论二进制是外部传入（--fnpack / CI 下载）还是本脚本现下载的，都在
+# 使用前比对；不一致直接失败。校验按本机架构决定：x86_64 跑的就是
+# amd64 二进制，必校验；arm64 暂无已核验的期望值，仅告警跳过（不静默
+# 放行 amd64——x86_64 上永远走校验分支）。
+FNPACK_SHA_FILE="${FPK_DIR}/fnpack.sha256"
+case "$(uname -m)" in
+  x86_64)
+    if [ -f "${FNPACK_SHA_FILE}" ]; then
+      _EXPECTED_SHA="$(awk '{print $1}' "${FNPACK_SHA_FILE}")"
+      _ACTUAL_SHA="$(sha256sum "${FNPACK_BIN}" | awk '{print $1}')"
+      [ "${_ACTUAL_SHA}" = "${_EXPECTED_SHA}" ] || { echo "ERROR: fnpack sha256 不一致: 实际 ${_ACTUAL_SHA}，期望 ${_EXPECTED_SHA}（见 ${FNPACK_SHA_FILE}）" >&2; exit 1; }
+      echo "[fpk] fnpack sha256 OK: ${_ACTUAL_SHA}"
+    else
+      echo "[fpk] WARN: 缺期望值文件 ${FNPACK_SHA_FILE}，跳过 fnpack 校验" >&2
+    fi
+    ;;
+  *)
+    echo "[fpk] WARN: 非 x86_64 架构（$(uname -m)），暂无期望 sha256，跳过 fnpack 校验" >&2
+    ;;
+esac
+
 WORK="$(mktemp -d)"; trap 'rm -rf "${WORK}"' EXIT
 ( cd "${WORK}" && "${FNPACK_BIN}" build --directory "${STAGE}" )
 BUILT="$(find "${WORK}" "${STAGE}" -maxdepth 2 -name '*.fpk' -print -quit 2>/dev/null || true)"
