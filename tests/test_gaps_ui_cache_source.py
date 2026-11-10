@@ -158,6 +158,7 @@ def test_catalog_reset_clears_routes_and_pages():
 def test_cache_status_and_clear(tmp_path, monkeypatch):
     _fresh_env(tmp_path, monkeypatch)
     appmod._search_cache["kw"] = (0.0, [])
+    appmod._AGG_CACHE["kw"] = (0.0, [])
     with chartmod.chart_cache._lock:
         chartmod.chart_cache._charts = {"movie": [{"guid": "g1"}]}
     with catalogmod.catalog._lock:
@@ -174,6 +175,7 @@ def test_cache_status_and_clear(tmp_path, monkeypatch):
         assert r.json()["data"]["cleared"] == ["search", "charts", "catalog"]
         assert r.json()["data"]["restart"] is False
     assert appmod._search_cache == {}
+    assert appmod._AGG_CACHE == {}
     assert chartmod.chart_cache.items("movie") == []
     assert catalogmod.catalog._routes == {}
 

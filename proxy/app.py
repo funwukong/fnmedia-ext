@@ -9326,8 +9326,7 @@ async def ext_cache_status(request: Request):
 @app.post("/v/api/ext/cache/clear")
 async def ext_cache_clear(request: Request):
     """一键清除指定缓存。targets: search/charts/catalog/titles/health 的子集；
-    省略或 ["all"] 清前四项（health 默认保留，避免冷启动选源退化）。
-    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    省略或 ["all"] 清前四项（health 默认保留，避免冷启动选源退化）。"""
     body = await request.json()
     targets = body.get("targets")
     if not targets or targets == ["all"]:
@@ -9335,7 +9334,7 @@ async def ext_cache_clear(request: Request):
     targets = {str(t) for t in targets}
     done, need_restart = [], False
     if "search" in targets:
-        _search_cache.clear(); done.append("search")
+        _search_cache.clear(); _AGG_CACHE.clear(); done.append("search")
     if "charts" in targets:
         try:
             chart_cache.reset(); done.append("charts")
@@ -10114,8 +10113,7 @@ async def ext_source_export():
 @app.post("/v/api/ext/source/import-file")
 async def ext_source_import_file(request: Request):
     """从导出的 JSON（或含 sources 数组的兼容结构）批量导入纯 CMS 源。
-    自动去重（按规范化 API），返回新增/跳过计数；jar/爬虫/加固条目忽略并计数。
-    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    自动去重（按规范化 API），返回新增/跳过计数；jar/爬虫/加固条目忽略并计数。"""
     body = await request.json()
     raw = body.get("sources")
     if raw is None and isinstance(body.get("data"), dict):
@@ -10151,7 +10149,7 @@ async def ext_source_import_file(request: Request):
                     pass
         else:
             skipped += 1
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     if added:
         _schedule_routes_refresh()
     return {"code": 0, "msg": "", "data": {"added": added, "skipped": skipped,
@@ -10161,8 +10159,7 @@ async def ext_source_import_file(request: Request):
 @app.post("/v/api/ext/source/update")
 async def ext_source_update(request: Request):
     """编辑资源站名称 / 订阅(API)链接。自定义源可改链接（id 随地址哈希重建），
-    内置源仅允许改名。改后清搜索缓存并刷新海量库路由。
-    fork 适配：本 fork 没有上游的聚合搜索缓存 _AGG_CACHE，只清 _search_cache。"""
+    内置源仅允许改名。改后清搜索缓存并刷新海量库路由。"""
     body = await request.json()
     sid = str(body.get("id", ""))
     cur = next((s for s in config.all_sources() if s["id"] == sid), None)
@@ -10179,7 +10176,7 @@ async def ext_source_update(request: Request):
         return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear()
+    _search_cache.clear(); _AGG_CACHE.clear()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "ok", "data": {"id": info}}
 
