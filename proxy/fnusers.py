@@ -90,30 +90,49 @@ def _lookup(token: str) -> dict | None:
         return None
 
 
+def _result(u: dict | None, token: str) -> dict:
+    if not u:
+        return {"known": False, "guid": "", "name": "", "is_admin": False, "token": token}
+    return {"known": True, "guid": u["guid"], "name": u["name"],
+            "is_admin": u["is_admin"], "token": token}
+
+
 def resolve(request) -> dict:
     """返回当前账号：{known, guid, name, is_admin, token}。
 
     known=False 表示识别不了（本地/异常），调用方按默认策略处理。
+
+    P1-21：锁外查库、锁内只换缓存。原先 ``with _lock`` 内调
+    ``_lookup``（3 次 isfile + 两次 SQLite 查询），未命中时并发请求
+    串行等 DB。现为双重检查：
+    1) 锁外先查缓存（dict.get 是原子的），命中直接走快路径；
+    2) 未命中时锁外查库（SQLite I/O 不持锁，并发请求不再互相堵）；
+    3) 再加锁写入缓存，写前再查一次——并发请求可能已写入更新鲜的
+       条目，别用本次查到的旧结果覆盖它。
+    TTL 语义不变：正缓存 30s、负缓存 10s；查库失败仍返回未知身份，
+    由调用方按 fail-closed 处理。
     """
     token = token_from_request(request)
     if not token:
         return {"known": False, "guid": "", "name": "", "is_admin": False, "token": ""}
     now = time.time()
+    hit = _cache.get(token)
+    if hit and now - hit[0] < (TTL_VALID if hit[1] else _NEG_TTL):
+        return _result(hit[1], token)
+    u = _lookup(token)
+    write_now = time.time()
     with _lock:
-        hit = _cache.get(token)
-        if hit and now - hit[0] < (TTL_VALID if hit[1] else _NEG_TTL):
-            u = hit[1]
+        cur = _cache.get(token)
+        if cur and write_now - cur[0] < (TTL_VALID if cur[1] else _NEG_TTL):
+            # 并发请求已写入更新鲜的缓存：用它，别覆盖
+            u = cur[1]
         else:
-            u = _lookup(token)
-            _cache[token] = (now, u)
+            _cache[token] = (write_now, u)
             if len(_cache) > 2000:
                 # 简单淘汰最旧的一半
                 for k in sorted(_cache, key=lambda x: _cache[x][0])[:1000]:
                     _cache.pop(k, None)
-    if not u:
-        return {"known": False, "guid": "", "name": "", "is_admin": False, "token": token}
-    return {"known": True, "guid": u["guid"], "name": u["name"],
-            "is_admin": u["is_admin"], "token": token}
+    return _result(u, token)
 
 
 TTL_VALID = _TTL
