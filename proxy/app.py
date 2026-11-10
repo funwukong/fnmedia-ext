@@ -4986,6 +4986,7 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     is_tv = inj.is_tv(brief)
     eg = episode_guid(og, "", index)
     base_guid = eg if is_tv else og
+    ep = None
     if is_tv:
         ep = store.get_episode(eg)
         if not ep:
@@ -5017,6 +5018,8 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     # 续播位置：优先该集自己的记录；第 1 集没有集记录时回填标题记录的位置
     #（客户端以标题/季/文件夹 guid 上报进度时落到标题键上，见 history.position）。
     info["ts"] = history.position(base_guid, og, is_first=(index == 0))
+    # 真实时长：顶层 duration 与 item.duration 两处都给（见 _attach_play_duration）。
+    _attach_play_duration(info, ep=ep, brief=brief)
     info = _diag_play_info(guid, info)
     return JSONResponse({"code": 0, "msg": "", "data":
                          clientmod.normalize_detail(info, client)})
@@ -6086,6 +6089,48 @@ async def _stream_list_impl(guid: str, request: Request):
         sl["video_streams"][0]["bps"] = quals[0]["bitrate"]
         sl["qualities"] = quals
         sl["cloud_storage_info"] = None
+    # 真实时长（resume3-duration）：video_streams[0].duration 仍为 0 时
+    # （无 CMS 时长、无 T4 探针结果），用已取到的 playlist 探测：先同步读
+    # _PLAYLIST_CACHE，未命中则等同一单飞任务，上限 _DURATION_PROBE_TIMEOUT，
+    # 超时/失败回 0，不阻塞出线菜单。成功后缓存到集记录上。
+    try:
+        vs = sl.get("video_streams") or []
+        if vs:
+            dur = int(vs[0].get("duration") or 0)
+            probe_target = None
+            if target and target.get("url"):
+                probe_target = target
+            else:
+                _og = None
+                _idx = 0
+                if ep is not None:
+                    _og = ep.get("online_guid")
+                    _idx = ep.get("index", 0)
+                elif target and target.get("og"):
+                    _og = target.get("og")
+                if _og:
+                    probe_target = store.get_episode_target(
+                        episode_guid(_og, "", _idx))
+            if not dur and probe_target and not probe_target.get("t4"):
+                mg = vs[0].get("media_guid") or ""
+                dur = _cached_playlist_seconds(probe_target)
+                if not dur and mg:
+                    try:
+                        body = await asyncio.wait_for(
+                            _get_playlist_cached(mg, probe_target, request),
+                            timeout=_DURATION_PROBE_TIMEOUT)
+                    except Exception:
+                        body = None
+                    if body and body is not _NOT_HLS:
+                        dur = _playlist_total_seconds(body)
+            if dur and probe_target and probe_target.get("online_guid"):
+                vs[0]["duration"] = dur
+                sl["duration"] = dur
+                _remember_episode_duration(
+                    probe_target.get("online_guid", ""),
+                    probe_target.get("index", 0), dur)
+    except Exception:
+        pass
     # 打开详情/线路菜单即后台预热默认线路播放列表（单飞，真正取 main 时并入）
     if target:
         try:
@@ -6435,6 +6480,7 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
         info["ts"] = history.position(
             guid, ep.get("online_guid"),
             is_first=(int(ep.get("index", 0) or 0) == 0))
+        _attach_play_duration(info, ep=ep)
         return _diag_play_info(guid, info)
     brief = store.get_title_by_guid(guid)
     if not brief:
@@ -6453,10 +6499,12 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
                 if ep:
                     info = inj.episode_play_info(ep)
                     info["ts"] = resume_ts
+                    _attach_play_duration(info, ep=ep)
                     return _diag_play_info(guid, info)
     info = inj.play_info(brief)
     if rec:
         info["ts"] = rec.get("ts", 0)
+    _attach_play_duration(info, brief=brief)
     return _diag_play_info(guid, info)
 
 
@@ -6524,6 +6572,7 @@ async def play_info(request: Request):
         info["ts"] = history.position(
             guid, ep.get("online_guid"),
             is_first=(int(ep.get("index", 0) or 0) == 0))
+        _attach_play_duration(info, ep=ep)
         _prewarm_from_info(info)
         info = _diag_play_info(guid, info)
         return JSONResponse({"code": 0, "msg": "",
@@ -9042,6 +9091,161 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
     asyncio.create_task(_get_playlist_cached(mg, picked, request))
 
 
+# ---- 真实时长（resume3-duration）----
+# 背景：诊断定性客户端每次 record 都报 duration=0，且服务端 play/info /
+# stream/list 也只给 duration=0，续播守门拿不到合法时长。
+# 时长来源优先级：
+#   1. CMS vod_duration（providers._map_vod 已取，标题级，见 inject.brief_duration）；
+#   2. HLS playlist 的 EXTINF 求和（_fetch_playlist 已跟随 master 到媒体清单，
+#      这里只对已取到的文本求和，不新增上游请求）；
+#   3. history 里已存下的 record duration（客户端此前报过 >0 时复用）。
+_EXTINF_RE = re.compile(r"#EXTINF:([\d.]+)")
+# stream/list 上无缓存时长时，等同一单飞 playlist 任务的上限（秒）：
+# 超时/失败回退 0，不阻塞出线菜单、不阻塞播放。
+_DURATION_PROBE_TIMEOUT = 2.0
+# 单集时长超过 12 小时视为脏数据（与 providers.parse_duration 同口径）。
+_DURATION_MAX_SECONDS = 43200
+
+
+def _playlist_total_seconds(text) -> int:
+    """媒体 playlist 的 EXTINF 求和（秒）。master 清单（只有
+    EXT-X-STREAM-INF、没有 EXTINF）返回 0——变体清单由 _fetch_playlist
+    在抓取时跟随，正常情况下到这里的已是媒体清单。"""
+    if not text or not isinstance(text, str) or "#EXTINF" not in text:
+        return 0
+    total = 0.0
+    for m in _EXTINF_RE.finditer(text):
+        try:
+            total += float(m.group(1))
+        except ValueError:
+            continue
+    secs = int(round(total))
+    return secs if 0 < secs <= _DURATION_MAX_SECONDS else 0
+
+
+def _cached_playlist_seconds(picked: dict) -> int:
+    """同步读 _PLAYLIST_CACHE 里已有的改写后清单并求和；无缓存返回 0，
+    不发任何请求。"""
+    try:
+        hit = _PLAYLIST_CACHE.get(_playlist_cache_key(picked))
+    except Exception:
+        return 0
+    if not hit:
+        return 0
+    body = hit[1]
+    if body is _NOT_HLS or not isinstance(body, str):
+        return 0
+    return _playlist_total_seconds(body)
+
+
+def _remember_episode_duration(og: str, index: int, seconds: int) -> bool:
+    """探测到的时长缓存到集记录上，随 titles.json 持久化（store 防抖落盘）。
+
+    键：剧集 brief["ep_durations"][str(index)]；电影直接写
+    brief["duration"]。只补缺：已有 CMS 时长 / 已缓存探测时长时不覆盖，
+    避免不同线路的清单长度差互相覆盖。失效条件：标题被重新搜索入库
+    （brief_of 重建会带上新的 CMS duration，ep_durations 随旧 brief
+    一起被替换）或集数/线路变化导致 brief 重建；失败回退：返回 False，
+    调用方继续用 0，不影响播放。"""
+    if not og or not seconds:
+        return False
+    try:
+        seconds = int(seconds)
+    except (TypeError, ValueError):
+        return False
+    if seconds <= 0 or seconds > _DURATION_MAX_SECONDS:
+        return False
+    try:
+        brief = store.get_title_by_guid(og)
+        if not brief:
+            return False
+        with store._lock:
+            if inj.is_tv(brief):
+                eps = brief.setdefault("ep_durations", {})
+                key = str(int(index or 0))
+                if eps.get(key):
+                    return False
+                eps[key] = seconds
+            else:
+                if brief.get("duration"):
+                    return False
+                brief["duration"] = seconds
+            store._schedule_flush()
+    except Exception:
+        return False
+    return True
+
+
+def _play_duration_for(ep: dict | None = None,
+                       brief: dict | None = None) -> int:
+    """play/info 返回的 duration：同步可得的来源按优先级取，
+    均不发网络请求（playlist 只读已缓存的 _PLAYLIST_CACHE）。"""
+    if ep is not None:
+        dur = inj.episode_duration(ep, brief)
+        if dur:
+            return dur
+        try:
+            rec = history.get(ep["ep_guid"])
+        except Exception:
+            rec = None
+        if rec:
+            dur = int(rec.get("duration", 0) or 0)
+            if dur:
+                return dur
+        try:
+            target = store.get_episode_target(ep["ep_guid"])
+        except Exception:
+            target = None
+        if target:
+            dur = _cached_playlist_seconds(target)
+            if dur:
+                _remember_episode_duration(
+                    ep.get("online_guid", ""), target.get("index", 0), dur)
+                return dur
+        return 0
+    if brief is not None:
+        dur = inj.brief_duration(brief)
+        if dur:
+            return dur
+        try:
+            rec = history.get(brief["guid"])
+        except Exception:
+            rec = None
+        if rec:
+            dur = int(rec.get("duration", 0) or 0)
+            if dur:
+                return dur
+        try:
+            line = store.best_line(brief["guid"])
+        except Exception:
+            line = None
+        if line:
+            dur = _cached_playlist_seconds(
+                {"online_guid": brief["guid"], "line": line, "index": 0})
+            if dur:
+                _remember_episode_duration(brief["guid"], 0, dur)
+                return dur
+    return 0
+
+
+def _attach_play_duration(info: dict, *, ep: dict | None = None,
+                          brief: dict | None = None) -> dict:
+    """给 play/info 返回体补上 duration：顶层 duration 与 item.duration
+    两处都给（客户端读哪个字段未证实，两者都给；normalize_detail 不裁剪
+    字段，直通）。无真实时长时保持原值（0），不编造。"""
+    try:
+        dur = _play_duration_for(ep, brief)
+    except Exception:
+        return info
+    if dur:
+        info["duration"] = dur
+        item = info.get("item")
+        if isinstance(item, dict):
+            item["duration"] = dur
+            item["runtime"] = int(dur / 60)
+    return info
+
+
 # main 整条“解析+换线+建清单”的在途服务任务（mg|line|index -> Future）：慢源首个
 # 请求只等到预算，超时回占位但后台任务继续跑完并写播放列表缓存，后续轮询直接命中。
 # （上游 v1.0.0；键与上游一致：mg 是 URL 路径参数，index 为原值拼串。）
@@ -9384,6 +9588,12 @@ async def hls_main(mg: str, request: Request):
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
             q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
             return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
+        # 真实时长（resume3-duration）：手头已是最终媒体清单，EXTINF 求和
+        # 后缓存到集记录上，供下次 play/info / stream/list / play/list
+        # 直接用，不新增请求；失败（0）不影响播放。
+        _remember_episode_duration(
+            picked.get("online_guid", ""), picked.get("index", 0),
+            _playlist_total_seconds(body))
         # 清单活、分片死（如某源 CDN 删流）：先在已解析清单上验首个分片，失败则
         # 标记坏线，并启动「按片名全网回源」后台任务。回源较慢，首个请求不阻塞到
         # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
