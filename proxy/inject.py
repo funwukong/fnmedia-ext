@@ -130,9 +130,53 @@ def brief_of(t: providers.OnlineTitle) -> dict:
         "actor": t.actor,
         "director": t.director,
         "area": t.area,
+        # 标题级时长（秒）：电影=全片，剧集=单集；来自 CMS vod_duration，
+        # 缺失时由 app 层的 playlist 探测补进 ep_durations（见下）。
+        "duration": int(t.duration or 0),
         "lines": {name: [e.__dict__ for e in eps] for name, eps in t.sources.items()},
         "locator": t.locator,
     }
+
+
+def _to_int_seconds(value) -> int:
+    try:
+        n = int(float(value or 0))
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+def brief_duration(b: dict | None) -> int:
+    """标题级时长（秒）：CMS vod_duration；无则 0。"""
+    if not b:
+        return 0
+    return _to_int_seconds(b.get("duration"))
+
+
+def episode_duration(ep: dict | None, b: dict | None = None) -> int:
+    """某一集的真实时长（秒），同步可得的来源，不做网络请求：
+
+    1. 集记录上已缓存的探测时长 brief["ep_durations"][str(index)]；
+    2. 集 dict 自带的 duration（调用方已算好时）；
+    3. 标题级时长 brief["duration"]（CMS vod_duration：剧集=单集时长）。
+    电影直接走第 3 条（brief_duration）。"""
+    if ep:
+        if b is None:
+            try:
+                import store as _st
+                b = _st.store.get_title_by_guid(ep.get("online_guid", "")) or {}
+            except Exception:
+                b = {}
+        if b:
+            cached = (b.get("ep_durations") or {}).get(
+                str(ep.get("index", 0) or 0))
+            n = _to_int_seconds(cached)
+            if n:
+                return n
+        n = _to_int_seconds(ep.get("duration"))
+        if n:
+            return n
+    return brief_duration(b)
 
 
 def _f(b: dict, k, d=""):
@@ -196,12 +240,13 @@ def search_item(b: dict) -> dict:
     area = _f(b, "area")
     typ = fnos_type(b)
     nep = _ep_count(b)
+    dur = brief_duration(b)
     return {
         "guid": guid,
         # TV/盒子端列表模型要求 video_guid/path/runtime，缺失会整库“加载失败”
         "video_guid": video_guid(guid),
         "path": "",
-        "runtime": 0,
+        "runtime": int(dur / 60) if dur else 0,
         "lan": "zh-CN",
         "imdb_id": "",
         "trim_id": "",
@@ -235,7 +280,7 @@ def search_item(b: dict) -> dict:
         (f"🌐在线·{year}·{area}" if area else "🌐在线资源"),
         "ancestor_category": typ,
         "ts": 0,
-        "duration": 0,
+        "duration": dur,
         "single_child_guid": "",
         "file_name": "",
     }
@@ -250,6 +295,7 @@ def detail_item(b: dict) -> dict:
     director = _f(b, "director")
     typ = fnos_type(b)
     nep = _ep_count(b)
+    dur = brief_duration(b)
     ov = overview + (f"\n\n主演：{actor}" if actor else "") + (f"\n导演：{director}" if director else "")
     return {
         "guid": guid,
@@ -268,7 +314,7 @@ def detail_item(b: dict) -> dict:
         "genres": [],
         "content_ratings": "",
         "release_date": year,
-        "runtime": 0,
+        "runtime": int(dur / 60) if dur else 0,
         "production_countries": [_f(b, "area")] if _f(b, "area") else [],
         "overview": ov,
         "is_favorite": 0,
@@ -289,7 +335,7 @@ def detail_item(b: dict) -> dict:
         "ancestor_name": "🌐在线资源",
         "ancestor_category": typ,
         "play_item_guid": guid,
-        "duration": 0,
+        "duration": dur,
         "logic_type": 0,
         "status": "在线",
         "media_stream": {"resolutions": None, "audio_type": None, "color_range_type": None},
@@ -337,8 +383,14 @@ def episode_item(ep: dict, b: dict | None = None) -> dict:
         can_play=1, play_item_guid=eg, play_error="",
         media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
         audio_guid="", subtitle_guid="")
+    dur = episode_duration(ep, b)
+    data["duration"] = dur
+    data["runtime"] = int(dur / 60) if dur else 0
     if b:
         data.update(_series_metadata(b))
+        # _series_metadata 抄 detail_item（标题级时长）会盖掉集时长：集时长优先
+        data["duration"] = dur
+        data["runtime"] = int(dur / 60) if dur else 0
     return data
 
 
@@ -383,6 +435,8 @@ def episode_list(b: dict, season: int | None = None) -> list[dict]:
     for i, e in enumerate(eps):
         eg = e.get("ep_guid") or _st.store.episode_guid_at(guid, i)
         sn = e.get("season", 1)
+        dur = _to_int_seconds(
+            (b.get("ep_durations") or {}).get(str(i))) or brief_duration(b)
         out.append(_base_item(
             guid=eg, type="Episode",
             title=e.get("ep_title") or e.get("title") or f"第{i+1}集",
@@ -391,7 +445,8 @@ def episode_list(b: dict, season: int | None = None) -> list[dict]:
             episode_number=e.get("episode_number", i + 1),
             number_of_seasons=season_count, can_play=1, poster=_poster(_f(b, "poster")),
             media_guid=ep_media_guid(eg), video_guid=ep_video_guid(eg),
-            audio_guid="", subtitle_guid=""))
+            audio_guid="", subtitle_guid="", duration=dur,
+            runtime=int(dur / 60) if dur else 0))
         out[-1].update(metadata)
     return out
 
@@ -399,12 +454,14 @@ def episode_list(b: dict, season: int | None = None) -> list[dict]:
 def play_info(b: dict) -> dict:
     guid = b["guid"]
     typ = fnos_type(b)
+    dur = brief_duration(b)
     return {
         "grand_guid": "",
         "guid": guid,
         "parent_guid": "",
         "play_config": None,
         "ts": 0,
+        "duration": dur,
         "type": typ,
         "video_guid": video_guid(guid),
         "audio_guid": "",
@@ -418,12 +475,14 @@ def play_info(b: dict) -> dict:
 def episode_play_info(ep: dict) -> dict:
     """对伪造 Episode 的 play/info：media/video guid 与该集绑定。"""
     eg = ep["ep_guid"]
+    dur = episode_duration(ep)
     return {
         "grand_guid": "",
         "guid": eg,
         "parent_guid": ep.get("season_guid", ""),
         "play_config": None,
         "ts": 0,
+        "duration": dur,
         "type": "Episode",
         "video_guid": ep_video_guid(eg),
         "audio_guid": "",
@@ -439,8 +498,10 @@ def episode_stream_list(ep: dict) -> dict:
     mg = ep_media_guid(eg)
     vg = ep_video_guid(eg)
     title = ep.get("ep_title", "episode")
+    dur = episode_duration(ep)
     # 与单集相同的 file/video 结构，但 guid 绑定到该集
     return {
+        "duration": dur,
         "files": [{
             "guid": mg, "path": f"在线/{title}.m3u8", "file_name": title + ".m3u8",
             "size": 0, "timestamp": 0, "type": 1, "sort_num": 0, "can_play": 1,
@@ -454,7 +515,7 @@ def episode_stream_list(ep: dict) -> dict:
             "height": 1080, "coded_width": 0, "coded_height": 0,
             "display_aspect_ratio": "16:9", "pix_fmt": "yuv420p", "level": "40",
             "color_space": "", "color_transfer": "", "color_primaries": "",
-            "duration": 0, "dv_profile": 0, "refs": 1, "r_frame_rate": "25 fps",
+            "duration": dur, "dv_profile": 0, "refs": 1, "r_frame_rate": "25 fps",
             "avg_frame_rate": "25 fps", "bits_per_raw_sample": "8", "bps": 0,
             "progressive": 1, "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
             "update_time": 0, "rotation": 0, "ext1": 0, "is_bluray": False,
@@ -469,7 +530,9 @@ def stream_list(b: dict) -> dict:
     mg = media_guid(guid)
     vg = video_guid(guid)
     title = _f(b, "title")
+    dur = brief_duration(b)
     return {
+        "duration": dur,
         "files": [{
             "guid": mg, "path": f"在线/{title}.m3u8", "file_name": title + ".m3u8",
             "size": 0, "timestamp": 0, "type": 1, "sort_num": 0, "can_play": 1,
@@ -483,7 +546,7 @@ def stream_list(b: dict) -> dict:
             "height": 1080, "coded_width": 0, "coded_height": 0,
             "display_aspect_ratio": "16:9", "pix_fmt": "yuv420p", "level": "40",
             "color_space": "", "color_transfer": "", "color_primaries": "",
-            "duration": 0, "dv_profile": 0, "refs": 1, "r_frame_rate": "25 fps",
+            "duration": dur, "dv_profile": 0, "refs": 1, "r_frame_rate": "25 fps",
             "avg_frame_rate": "25 fps", "bits_per_raw_sample": "8", "bps": 0,
             "progressive": 1, "bit_depth": 8, "wrapper": "HLS", "create_time": 0,
             "update_time": 0, "rotation": 0, "ext1": 0, "is_bluray": False,
@@ -517,7 +580,12 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
         season_number = episode_number = 0
         display = title
     ts = int(rec.get("ts", 0) or 0)
+    # 时长：record 自带的优先；客户端此前一直报 duration=0 时，
+    # 用服务端已知的真实时长兜底（CMS vod_duration / playlist 探测缓存），
+    # 否则 play/list 合并记录的 progress 恒为 0，客户端续播守门失败。
     dur = int(rec.get("duration", 0) or 0)
+    if not dur:
+        dur = episode_duration(ep, brief) if is_ep else brief_duration(brief)
     # 已看完（进度≥95%）则从0开始，不占继续观看
     if dur and ts >= dur * 0.95:
         ts = 0

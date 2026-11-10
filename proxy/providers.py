@@ -288,6 +288,10 @@ class OnlineTitle:
     actor: str
     director: str
     sources: dict          # {播放线路名: [Episode,...]}
+    # 标题级时长（秒）：电影=全片时长，剧集=单集时长。苹果 CMS V10 标准
+    # 字段 vod_duration（模板标签 {$obj.vod_duration}=时长），很多源站
+    # 留空或只在详情里给；缺失为 0，播放时再由 HLS playlist 探测补。
+    duration: int = 0
     locator: dict = field(default_factory=dict)
     # 苹果 CMS 分类 id（vod 的 type_id；_map_vod 保留，聚合搜索用它反查
     # 该源的分类路由，见 catalog.cat_for_source_type）。非 CMS 源为空。
@@ -296,6 +300,49 @@ class OnlineTitle:
     @property
     def online_id(self) -> str:
         return f"{self.provider}:{self.vod_id}"
+
+
+def parse_duration(value) -> int:
+    """CMS 时长字段 → 秒（int），解析不出 / 不合法返回 0。
+
+    接受的形态（均来自真实 CMS 记录的写法，不猜新字段名）：
+      - 2700 / 2700.0 / "2700"：秒；
+      - "45分钟" / "45分"：分钟；
+      - "01:30:00" / "45:30"：时:分:秒 / 分:秒。
+    上限 12 小时：超过的视为脏数据（如把毫秒/时间戳误填进来），回 0。
+    """
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, (int, float)):
+        secs = int(value)
+        return secs if 0 < secs <= 43200 else 0
+    s = str(value).strip()
+    if not s:
+        return 0
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*(?:分钟|分|min)", s, re.I)
+    if m:
+        secs = int(float(m.group(1)) * 60)
+        return secs if 0 < secs <= 43200 else 0
+    if ":" in s:
+        parts = s.split(":")
+        try:
+            nums = [float(p) for p in parts]
+        except ValueError:
+            return 0
+        if len(nums) == 2:
+            secs = int(nums[0] * 60 + nums[1])
+        elif len(nums) == 3:
+            secs = int(nums[0] * 3600 + nums[1] * 60 + nums[2])
+        else:
+            return 0
+        return secs if 0 < secs <= 43200 else 0
+    try:
+        secs = int(float(s))
+    except ValueError:
+        return 0
+    return secs if 0 < secs <= 43200 else 0
 
 
 def _parse_play(vod_play_from: str, vod_play_note: str, vod_play_url: str,
@@ -396,6 +443,7 @@ def parse_cms_xml(text: str) -> dict | None:
             "vod_time": child(video, "last"),
             "vod_remarks": child(video, "note"),
             "vod_score": child(video, "score"),
+            "vod_duration": child(video, "duration"),
             "vod_pic": child(video, "pic"),
             "vod_content": child(video, "des") or child(video, "content")
                            or child(video, "blurb"),
@@ -431,6 +479,9 @@ def _map_vod(v: dict, source: dict) -> OnlineTitle | None:
         overview=(v.get("vod_content") or v.get("vod_blurb") or "").strip(),
         actor=v.get("vod_actor", "") or "",
         director=v.get("vod_director", "") or "",
+        duration=parse_duration(
+            v.get("vod_duration") or v.get("vod_length")
+            or v.get("duration") or ""),
         sources=sources,
     )
 
@@ -752,6 +803,7 @@ def _dduo_map_vod(v: dict, source: dict, detail: dict | None = None) -> OnlineTi
         overview=(detail.get("vod_content") or detail.get("vod_blurb") or "").strip(),
         actor=detail.get("vod_actor", "") or "",
         director=detail.get("vod_director", "") or "",
+        duration=parse_duration(detail.get("vod_duration") or ""),
         sources=sources_map,
     )
 

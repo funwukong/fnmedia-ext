@@ -131,6 +131,7 @@ def map_title(row: dict, source: dict, *, detail: bool = False,
         score=str(row.get("vod_score") or ""), poster=str(row.get("vod_pic") or ""),
         overview=str(row.get("vod_content") or row.get("vod_blurb") or ""),
         actor=str(row.get("vod_actor") or ""), director=str(row.get("vod_director") or ""),
+        duration=providers.parse_duration(row.get("vod_duration") or ""),
         sources=sources, locator=original)
 
 
