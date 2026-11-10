@@ -32,6 +32,11 @@ import http.client
 
 import httpx
 
+# 四个底层调用（_auth_cookie/_api/_fresh/_pc）与夸克共用同一实现，
+# 见 pan._make_pan_helpers；绑定时传入本模块（见下方 parse_share 之后），
+# 依赖每次调用时从本模块取。
+from pan import _make_pan_helpers
+
 
 def _ssl_ctx() -> ssl.SSLContext:
     # 每个 client 独立的 SSL 上下文，并禁用 TLS Session Ticket：
@@ -397,52 +402,9 @@ def parse_share(url: str) -> tuple[str, str]:
     return pwd_id, code
 
 
-def _auth_cookie(c: httpx.Client) -> str:
-    return getattr(c, "_pan_auth", "") or ""
-
-
-def _api(c: httpx.Client, method: str, url: str, _retry: int = 8, **kw) -> dict:
-    # 夸克在“访问带码分享”后会对 drive-pc 域返回短时风控（401/非JSON密文），
-    # 间歇性、秒级~十几秒自行恢复。策略：指数退避 + 每次重建全新 client
-    # （断开可能被标记的 keep-alive 连接）。
-    last = ""
-    cur = c
-    for attempt in range(_retry):
-        r = cur.request(method, url, **kw)
-        bad_json = False
-        try:
-            j = r.json()
-        except Exception:
-            j = None
-            bad_json = True
-        risky = bad_json and r.status_code in (401, 403, 429, 503)
-        biz_risk = (not bad_json and j is not None and
-                    (j.get("code") in (32003, 32005, 41001)
-                     or j.get("status") in (401, 429)))
-        if (risky or biz_risk) and attempt < _retry - 1:
-            last = f"夸克风控（HTTP {r.status_code}）"
-            auth = _auth_cookie(c)
-            if cur is not c:
-                cur.close()
-            cur = _client(auth) if auth else _fresh(cur)
-            time.sleep(0.5 * (attempt + 1))
-            continue
-        if bad_json:
-            raise PanError(f"接口返回非 JSON（HTTP {r.status_code}）")
-        code = j.get("code")
-        if code not in (0, None) and j.get("status") not in (2000000,):
-            msg = j.get("message") or j.get("msg") or code
-            raise PanError(f"夸克接口错误：{msg}")
-        return j
-    raise PanError(last or "夸克接口多次重试失败")
-
-
-def _fresh(c: httpx.Client) -> httpx.Client:
-    try:
-        c.close()
-    except Exception:
-        pass
-    return _client()
+# 四个底层调用与夸克共用同一实现（见 pan._make_pan_helpers）；
+# 传入本模块：依赖每次调用时从本模块取（见工厂 docstring）。
+_auth_cookie, _api, _fresh, _pc = _make_pan_helpers(sys.modules[__name__])
 
 
 def share_token(c: httpx.Client, pwd_id: str, passcode: str) -> str:
@@ -475,58 +437,6 @@ def _video_items(items: list[dict]) -> list[dict]:
     return out
 
 
-def _pc(method: str, url: str, cookie: str, _tries: int = 5, **kw) -> dict:
-    """个人网盘域(drive-pc)调用：stdlib + 每请求全新 SSL 连接（禁会话票据）。
-
-    关键：访问过带码分享后，进程内复用 TLS 会话（httpx/h11 或 SSL ticket）
-    会被夸克风控标记，导致 drive-pc 稳定 401。用 http.client 每次新建
-    SSLContext(OP_NO_TICKET) 实测稳定；并对短时风控做退避重试。"""
-    import http.client
-    import urllib.parse
-    u = urllib.parse.urlparse(url)
-    qs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)
-    for k, v in (kw.get("params") or {}).items():
-        qs.append((k, str(v)))
-    path = u.path + ("?" + urllib.parse.urlencode(qs) if qs else "")
-    data = None
-    headers = {"User-Agent": _HEADERS["User-Agent"],
-               "Cookie": cookie, "Accept": "application/json",
-               "Connection": "close"}
-    if kw.get("json") is not None:
-        data = json.dumps(kw["json"]).encode()
-        headers["Content-Type"] = "application/json;charset=UTF-8"
-    last = ""
-    for attempt in range(_tries):
-        # 证书校验保持开启（官方域名证书正常，请求带登录 Cookie）；
-        # 只禁 Session Ticket 防风控 401。
-        ctx = ssl.create_default_context()
-        try:
-            ctx.options |= ssl.OP_NO_TICKET
-        except Exception:
-            pass
-        conn = _V4HTTPSConnection(u.netloc, context=ctx, timeout=20)
-        try:
-            conn.request(method, path, body=data, headers=headers)
-            resp = conn.getresponse()
-            raw = resp.read()
-            code = resp.status
-        finally:
-            conn.close()
-        try:
-            j = json.loads(raw.decode())
-        except Exception:
-            j = None
-        if j is not None and (j.get("code") in (0, None)
-                              or j.get("status") == 2000000):
-            return j
-        last = f"HTTP {code} 非JSON" if j is None else (
-            j.get("message") or j.get("msg") or j.get("code"))
-        if attempt < _tries - 1 and (j is None or code in (401, 403, 429, 503)
-                                     or j.get("code") in (32003, 32005)):
-            time.sleep(0.6 * (attempt + 1))
-            continue
-        raise PanError(f"夸克网盘接口错误：{last}")
-    raise PanError(f"夸克网盘接口多次重试失败：{last}")
 
 
 def _ensure_save_dir(cookie: str) -> str:

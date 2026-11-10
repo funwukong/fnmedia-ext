@@ -734,7 +734,9 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 302)
 
     async def test_access_log_names_client_without_signed_playlink(self):
-        with self.assertLogs(appmod._log, level="INFO") as captured:
+        # P1-14：访问日志正常请求改为采样 info、其余 debug；本用例断言的
+        # 是同一行日志的内容（点名客户端 + 脱敏 playlink），故按 DEBUG 捕获。
+        with self.assertLogs(appmod._log, level="DEBUG") as captured:
             await self.client.get("/v/api/v1/media/range/unknown", params={
                 "playlink": "https://media.test/v.mp4?secret=private-signed-value"},
                 headers={"User-Agent": "com.trim.media.ios"})
