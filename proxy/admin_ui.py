@@ -433,6 +433,17 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
           </label>
         </div>
+        <div class="row" style="margin:8px 0;gap:8px;flex-wrap:wrap;align-items:center">
+          <input type="text" id="srcFilter" placeholder="筛选：名称 / 接口地址" style="flex:2;min-width:160px" oninput="onSrcFilter(this.value)"/>
+          <select id="srcEnabledFilter" onchange="onSrcEnabledFilter(this.value)" style="max-width:130px">
+            <option value="all">全部状态</option>
+            <option value="on">仅已启用</option>
+            <option value="off">仅已停用</option>
+          </select>
+          <span class="muted sm" id="srcPageInfo"></span>
+          <button class="small" onclick="srcPage(-1)">上一页</button>
+          <button class="small" onclick="srcPage(1)">下一页</button>
+        </div>
         <div style="overflow-x:auto">
         <table>
           <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
@@ -931,6 +942,7 @@ async function switchPage(page){
   $$("[data-page]").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
   window.scrollTo(0,0);
   if(page==="overview"){renderOverview();startLivePoll();}
+  else{stopLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
@@ -1247,6 +1259,7 @@ async function copyDiagnosis(){
   }catch(e){toast("复制失败："+e,"fail");}
 }
 function startLivePoll(){ if(LIVE_TIMER)return; LIVE_TIMER=setInterval(loadLive,3000); loadLive(); }
+function stopLivePoll(){ if(LIVE_TIMER){clearInterval(LIVE_TIMER);LIVE_TIMER=null;} }
 
 function renderOverview(){
   if(!STATUS)return;
@@ -1291,8 +1304,8 @@ async function loadLibs(){
 async function loadAccounts(){
   try{const r=await jget("/v/api/ext/accounts");
     ACCOUNTS=(r.data&&r.data.accounts)||[];
-    ACLDEF={visible:r.data&&r.data.acl_default_visible!==false,
-            online:r.data&&r.data.acl_default_online!==false};
+    ACLDEF={visible:r.data&&r.data.acl_default_visible===true,
+            online:r.data&&r.data.acl_default_online===true};
     if($("aclDefVis"))$("aclDefVis").checked=ACLDEF.visible;
     if($("aclDefOnline"))$("aclDefOnline").checked=ACLDEF.online;
   }catch(e){ACCOUNTS=[];}
@@ -1519,10 +1532,30 @@ async function savePreferQ(){
 }
 
 /* ---------- 资源站 ---------- */
+/* 资源站分页/筛选（P1-16）：纯前端分页/筛选，不改后端接口；CFG.sources
+   已在页内。筛选或切换启用状态时回到第 1 页；列表缩短时 renderSources
+   会把超出的页码夹回最后一页。 */
+let SRC_FILTER="",SRC_ENABLED="all",SRC_PAGE=1;const SRC_PAGE_SIZE=20;
+function srcFiltered(){const q=SRC_FILTER.trim().toLowerCase();
+  return (CFG.sources||[]).filter(s=>{
+    if(SRC_ENABLED==="on"&&!s.enabled)return false;
+    if(SRC_ENABLED==="off"&&s.enabled)return false;
+    if(q&&!(String(s.name||"").toLowerCase().includes(q)
+      ||String(s.api||"").toLowerCase().includes(q)))return false;
+    return true;});}
+function onSrcFilter(v){SRC_FILTER=v;SRC_PAGE=1;renderSources();}
+function onSrcEnabledFilter(v){SRC_ENABLED=v;SRC_PAGE=1;renderSources();}
+function srcPage(d){SRC_PAGE=Math.max(1,SRC_PAGE+d);renderSources();}
 function renderSources(){
-  const srcs=CFG.sources;
-  $("srcCount").textContent=srcs.filter(x=>x.enabled).length+"/"+srcs.length+" 启用";
-  $("srcRows").innerHTML=srcs.map(src=>{
+  const srcsAll=srcFiltered();
+  const pages=Math.max(1,Math.ceil(srcsAll.length/SRC_PAGE_SIZE));
+  if(SRC_PAGE>pages)SRC_PAGE=pages;
+  const srcs=srcsAll.slice((SRC_PAGE-1)*SRC_PAGE_SIZE,SRC_PAGE*SRC_PAGE_SIZE);
+  const all=CFG.sources||[];
+  $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
+  const pi=$("srcPageInfo");
+  if(pi)pi.textContent=`第 ${SRC_PAGE}/${pages} 页 · 本页 ${srcs.length} 条 · 筛选后 ${srcsAll.length} 条`;
+  $("srcRows").innerHTML=srcs.length?srcs.map(src=>{
     let extraCell="",extraTag="";
     // >>> PRIVATE:ADULT
     extraCell=FEAT_ADULT?`
@@ -1551,7 +1584,7 @@ function renderSources(){
       <td><button class="small" data-test>测试</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
-  }).join("");
+  }).join(""):'<tr><td colspan="6" class="muted">没有匹配的资源站（调整筛选条件或清空筛选）。</td></tr>';
   $$("#srcRows tr").forEach(tr=>{
     const id=tr.dataset.id;
     tr.querySelector(".en").addEventListener("change",()=>toggleEnable(id,tr.querySelector(".en").checked));
@@ -1574,10 +1607,12 @@ function renderSources(){
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
   const sources=CFG.sources.map(s=>({id:s.id,enabled:s.id===id?on:s.enabled}));
-  const r=await jpost("/v/api/ext/config",{sources});
+  let r;
+  try{r=await jpost("/v/api/ext/config",{sources});}
+  catch(e){toast("保存失败","fail");renderSources();return;}
   if(r.code===0){CFG.sources.find(x=>x.id===id).enabled=on;
     $("srcCount").textContent=CFG.sources.filter(x=>x.enabled).length+"/"+CFG.sources.length+" 启用";toast(on?"已启用":"已停用");}
-  else toast(r.msg||"保存失败","fail");
+  else{toast(r.msg||"保存失败","fail");renderSources();}
 }
 async function toggleStandalone(id,on){
   const r=await jpost("/v/api/ext/source/standalone",{id,standalone:on});
@@ -1610,6 +1645,7 @@ async function testOne(id,tr){
 }
 async function testAll(){
   toast("正在并发测速…");
+  // 分页后仅当前页的行在 DOM 里：测速请求仍覆盖全部源，这里只刷新当前页行的状态。
   $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
   const r=await jpost("/v/api/ext/source/test-all",{});
   (r.data||[]).forEach(d=>{const tr=$("srcRows").querySelector(`tr[data-id="${d.id}"]`);if(!tr)return;
