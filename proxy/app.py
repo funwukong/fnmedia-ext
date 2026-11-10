@@ -5036,7 +5036,55 @@ def _normalize_history_guid(guid: str) -> str:
     season = _parse_line_season_guid(guid)
     if season:
         return season[0]
+    # media/video guid（play/info 返回给播放器的那两个 hash guid）：
+    # 客户端上报进度/收藏/已看时 item_guid 可能直接用它们。hash 不可逆推，
+    # 只能查 store 的反查索引：标题级（"t:"）归一化到标题 guid；集级
+    # （"e:"）归一化到集 guid——但电影按标题续播，集级也归一化到标题，
+    # 否则进度落在集键上、电影重开时按标题查不到。查不到的原样返回，
+    # 调用方守门仍会把它透传给官方，不误吞本地官方条目的上报。
+    target = store.resolve_media_guid(guid)
+    if target:
+        if target.get("kind") == "title":
+            return target.get("online_guid") or guid
+        brief = store.get_title_by_guid(target.get("online_guid", ""))
+        if brief is not None and not inj.is_tv(brief):
+            return target.get("online_guid") or guid
+        return target.get("ep_guid") or guid
     return guid
+
+
+def _record_item_guid(body: dict) -> str:
+    """play/record 一次上报的本地身份：body 里 item_guid / video_guid /
+    media_guid 三个字段，任何一个能解析到本地影片/集就算。
+
+    集身份优先于标题身份：客户端以标题 guid 作 item_guid、却在
+    video/media 字段里带上当集 video guid 时（如第 4 集），进度属于
+    该集；只落到标题的话，标题记录只回填第 1 集，第 4 集进度就丢了。
+    三个字段都解析不到时回退到归一化后的 item_guid（调用方守门透传）。
+    榜单骨架是例外：play/info 已返回标题级 media/video guid，但绑定
+    尚未完成、标题还没进 store；此时按榜单 guid 记下，绑定后同一 guid
+    即标题 guid，续播仍能接上。
+    """
+    cands: list[str] = []
+    for key in ("item_guid", "video_guid", "media_guid"):
+        v = body.get(key)
+        if isinstance(v, str) and v:
+            n = _normalize_history_guid(v)
+            if n and n not in cands:
+                cands.append(n)
+    for n in cands:
+        if store.get_episode(n):
+            return n
+    for n in cands:
+        if store.get_title_by_guid(n):
+            return n
+    for key in ("video_guid", "media_guid"):
+        v = body.get(key)
+        if isinstance(v, str) and v:
+            cg = chart_guid_by_media(v)
+            if cg:
+                return cg
+    return cands[0] if cands else ""
 
 
 @app.post("/v/api/v1/item/list")
@@ -7122,9 +7170,10 @@ async def play_record(request: Request):
     except Exception:
         body = {}
     ig = body.get("item_guid", "")
-    body["item_guid"] = _normalize_history_guid(ig)
+    body["item_guid"] = _record_item_guid(body)
     ig = body["item_guid"]
-    if store.get_title_by_guid(ig) or store.get_episode(ig):
+    if ig and (store.get_title_by_guid(ig) or store.get_episode(ig)
+               or chart_cache.is_chart_guid(ig)):
         # 记录在线播放进度到本地（继续观看），不上报官方库
         history.record(body)
         return JSONResponse({"code": 0, "msg": "", "data": True})
