@@ -76,6 +76,22 @@ def test_parse_config_version_matrix():
     assert parse([]) is None
 
 
+def test_parse_config_version_extra_cells():
+    # P1-23(3)：原矩阵缺 >3、0、整数 float 字符串与更多非数字形。
+    parse = config_mod.parse_config_version
+    assert parse(4) == 4
+    assert parse(99) == 99
+    assert parse(0) == 0
+    assert parse(3.0) == 3
+    assert parse("3.0") == 3
+    assert parse(" 3.0 ") == 3
+    assert parse("   ") is None
+    assert parse("v2") is None
+    assert parse("2a") is None
+    assert parse("2.5.1") is None
+    assert parse({}) is None
+
+
 def test_version_matrix_keeps_explicit_true(monkeypatch, tmp_path):
     # v1→v2→v3 完整链：v1/v2 存量跑迁移，最终都翻回 True；v3 及更新保留
     # 用户显式值；无法解析的版本不跑迁移、原样保留。
@@ -141,6 +157,21 @@ def test_version_unparsable_warns_and_normalizes(monkeypatch, tmp_path, caplog):
     assert saved["config_version"] == 3
     assert saved["acl_default_visible"] is True
     assert "unparsable" in caplog.text
+
+
+def test_version_newer_keeps_explicit_false(monkeypatch, tmp_path):
+    # P1-23(3)：>3 的降级分支此前只用显式 True 测过；显式 False 同样
+    # 不迁移、不翻值、版本号原样保留。
+    state = _patch_state(monkeypatch, tmp_path)
+    state.parent.mkdir(parents=True)
+    state.write_text(json.dumps({"config_version": 99,
+                                 "acl_default_visible": False,
+                                 "acl_default_online": False}),
+                     encoding="utf-8")
+    c = config_mod.Config()
+    assert c.get()["acl_default_visible"] is False
+    assert c.get()["acl_default_online"] is False
+    assert c.get()["config_version"] == 99
 
 
 def test_version_downgrade_warns_and_keeps_values(monkeypatch, tmp_path, caplog):
