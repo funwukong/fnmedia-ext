@@ -252,6 +252,33 @@ def standalone_lib_name(src: dict) -> str:
     return base
 
 
+# —— 以下三件是通用件，被剥离块外的代码直接引用，不能放进加固标记块 ——
+# 飞牛原生媒体库聚合库的 guid（公开构建里 features.GUARD 已关，没有任何分支会
+# 用到它，但 item/list 的可见性换算仍引用该名字）。
+GUARD_NATIVE_PREFIX = "fnmedia-guardnative:"
+GUARD_NATIVE_GUID = hashlib.md5(
+    (GUARD_NATIVE_PREFIX + "root").encode()).hexdigest()
+GUARD_NATIVE_TITLE = "🛡加固影视"
+
+
+# 文件夹 guid 前缀与解析（目录树通用件）：item/list 的可见性检查在公开构建里
+# 也要认它；其余目录树逻辑仍在加固块内。
+_GN_FOLDER_PREFIX = "fnmedia-gnfolder:"
+
+
+def _gn_folder_token(guid: str) -> str | None:
+    if isinstance(guid, str) and guid.startswith(_GN_FOLDER_PREFIX):
+        return guid[len(_GN_FOLDER_PREFIX):]
+    return None
+
+
+def guard_native_enabled() -> bool:
+    # 开关本身是通用件：公开构建里 features.GUARD 已关，恒为 False；
+    # 真正的加固分支仍由 features.GUARD 门控，代码在剥离块内。
+    return bool(features.GUARD
+                and config.get().get("guard_native_enabled", True))
+
+
 # >>> PRIVATE:GUARD
 # —— TVBox 加固源专区：每个“启用且作为专区展示”的加固源生成一张库卡片 ——
 _GUARD_LIB_PREFIX = "fnmedia-guard:"
@@ -321,11 +348,6 @@ def guard_libs_active() -> list[dict]:
         return []
 
 
-# —— 飞牛原生媒体库「🛡加固影视」聚合浏览（后台预取缓存，请求只读缓存）——
-GUARD_NATIVE_PREFIX = "fnmedia-guardnative:"
-GUARD_NATIVE_GUID = hashlib.md5(
-    (GUARD_NATIVE_PREFIX + "root").encode()).hexdigest()
-GUARD_NATIVE_TITLE = "🛡加固影视"
 # 聚合墙每源最多收录条数；分类页每页条数
 _GN_HOT_PER_SOURCE = 60
 _GN_PAGE_SIZE = 30
@@ -804,18 +826,12 @@ async def _gn_deep_worker() -> None:
 
 # —— OK影视 式目录树：库根=源文件夹；源内=分类文件夹；分类内=无限海报墙 ——
 # 文件夹 guid 用固定前缀 + 可逆 token，避免与影片 md5 guid 碰撞，也不命中详情/播放解析。
-_GN_FOLDER_PREFIX = "fnmedia-gnfolder:"
+# （前缀与 _gn_folder_token 已移到加固块外，见块开口前；目录树其余逻辑仍在块内。）
 _GN_HOT_TOKEN = "__hot__"
 
 
 def _gn_folder_guid(token: str) -> str:
     return _GN_FOLDER_PREFIX + token
-
-
-def _gn_folder_token(guid: str) -> str | None:
-    if isinstance(guid, str) and guid.startswith(_GN_FOLDER_PREFIX):
-        return guid[len(_GN_FOLDER_PREFIX):]
-    return None
 
 
 def _gn_src_token(key: str) -> str:
@@ -854,11 +870,6 @@ def _gn_folder_row(guid: str, title: str, subtitle: str = "",
     if subtitle:
         row["overview"] = subtitle
     return _apply_marks(row)
-
-
-def guard_native_enabled() -> bool:
-    return bool(features.GUARD
-                and config.get().get("guard_native_enabled", True))
 
 
 def _gn_sources() -> list[dict]:

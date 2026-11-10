@@ -90,17 +90,43 @@ if features.DRPY:
     except Exception:
         pass
 # <<< PRIVATE:DRPY
-# >>> PRIVATE:GUARD
-# DexGuard 加固源（csp_*Guard）：真实逻辑在 Android 模拟器内解密执行。
-
 # 源质量默认权重（越高越优先；未列出取 0）。基于国内直连可达性、直链率与片源质量
 # 的经验初值，用户可在管理页「片源质量」整体覆盖（存 config.source_priority）。
-# 加固（秒播）源与网盘源默认更高；标准 CMS 站按口碑分档；新增自定义源默认 0。
+# 标准 CMS 站按口碑分档；新增自定义源默认 0。
+# 注意：这两个函数是通用逻辑（聚合搜索与状态接口都直接调 providers.source_priority），
+# 不能放进下面的加固标记块——公开构建剥离该块后它们必须还在。私有源的档位由块内
+# 的 _private_source_priority 钩子补上；公开构建里钩子为 None，只走通用表。
 DEFAULT_PRIORITY: dict[str, int] = {
     "baofeng": 40, "ffzy": 45, "guangsu": 40, "jisu": 38, "xinlang": 36,
     "lzi": 30, "youku": 28, "dytt": 30, "wujin": 20, "ruyi": 20, "s360": 20,
     "xiaoya": 55,
 }
+
+_private_source_priority = None
+
+
+def default_source_priority(source: dict) -> int:
+    if _private_source_priority is not None:
+        v = _private_source_priority(source)
+        if v is not None:
+            return v
+    return DEFAULT_PRIORITY.get(source.get("id", ""), 0)
+
+
+def source_priority(source: dict, overrides: dict | None = None) -> int:
+    """源的有效质量权重：用户覆盖优先，否则内省默认。"""
+    sid = source.get("id", "")
+    if overrides and sid in overrides:
+        try:
+            return int(overrides[sid])
+        except (TypeError, ValueError):
+            pass
+    return default_source_priority(source)
+
+
+# >>> PRIVATE:GUARD
+# DexGuard 加固源（csp_*Guard）：真实逻辑在 Android 模拟器内解密执行。
+
 # 加固源（guard-<key>）默认质量档；guard:// 源通常为秒播、片源较新，给较高基础分。
 GUARD_DEFAULT_PRIORITY = 50
 # 网盘聚合 guard 源（夸克/UC 原画、无广告、>2GB 大文件也可）质量最高。
@@ -115,7 +141,8 @@ DDUO_DEFAULT_PRIORITY = 15
 _GUARD_PAN_KEYS = {"YpanSo"}
 
 
-def default_source_priority(source: dict) -> int:
+def _guard_source_priority(source: dict) -> int | None:
+    """私有源的质量档位；通用源返回 None，走 DEFAULT_PRIORITY 通用表。"""
     sid = source.get("id", "")
     if source.get("guard"):
         if source.get("guard_key") in _GUARD_PAN_KEYS:
@@ -127,18 +154,10 @@ def default_source_priority(source: dict) -> int:
         return DRPY_DEFAULT_PRIORITY
     if source.get("dduo") or sid == "dduo":
         return DDUO_DEFAULT_PRIORITY
-    return DEFAULT_PRIORITY.get(sid, 0)
+    return None
 
 
-def source_priority(source: dict, overrides: dict | None = None) -> int:
-    """源的有效质量权重：用户覆盖优先，否则内省默认。"""
-    sid = source.get("id", "")
-    if overrides and sid in overrides:
-        try:
-            return int(overrides[sid])
-        except (TypeError, ValueError):
-            pass
-    return default_source_priority(source)
+_private_source_priority = _guard_source_priority
 
 
 def guard_source_defs() -> list:
