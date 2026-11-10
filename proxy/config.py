@@ -27,9 +27,42 @@ _LOCK = threading.RLock()
 # 配置版本号：升级时按版本做迁移（见 Config.load）。
 # v2：多用户可见性默认改 fail-closed（acl_default_visible/acl_default_online
 # 由 True 改 False；旧配置首次加载时一次性翻成 False，见 load() 的 v1→v2 迁移）。
-CONFIG_VERSION = 2
+# v3：多用户可见性默认改回 fail-open（两项由 False 改回 True；v2 存量配置
+# 首次加载时一次性翻回 True，见 load() 的 v2→v3 迁移——v1 配置走完整链
+# v1→v2→v3，最终仍为 True）。
+CONFIG_VERSION = 3
 # 每次保存前保留的旧配置备份份数。
 BACKUP_KEEP = 5
+
+
+def parse_config_version(raw):
+    """解析存量 config_version：返回 int，无法确定时返回 None。
+
+    接受 int、整数 float（如 2.0）、数字字符串（如 "2"、"2.0"）；
+    非数字字符串（"abc"）、None、非整数 float（2.5）、bool、空串等一律返回 None，
+    调用方不得将其误判为 v1（否则会重跑破坏性迁移，翻掉用户显式设的值）。
+    与 p0p1-config（P1-11）同一函数、同一语义，合入时去重。
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else None
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        try:
+            return int(s)
+        except ValueError:
+            pass
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        return int(f) if f.is_integer() else None
+    return None
 
 
 def _backup_dir() -> Path:
@@ -151,16 +184,16 @@ DEFAULTS = {
     # 与 guid 解耦）。lib_hidden：管理员隐藏的库键；lib_order：虚拟库自定义
     # 顺序；lib_placement：front/back/after；lib_anchor：after 的锚点本地库
     # guid；lib_acl：{用户 guid: [允许的库键，含 "__online__" 标记]}；
-    # acl_default_visible/acl_default_online：未配置账号的默认（False=隐藏，
-    # fail-closed 默认；True=可见，上游 fail-open 默认。识别不到身份的会话
-    # 始终隐藏，不受这两项控制，见 vlibs.account_can_see）。
+    # acl_default_visible/acl_default_online：未配置账号的默认（True=可见，
+    # fail-open 默认，上游原样；False=隐藏。识别不到身份的会话也按这两项
+    # 处理，见 vlibs.account_can_see）。
     "lib_hidden": [],
     "lib_order": [],
     "lib_placement": "front",
     "lib_anchor": "",
     "lib_acl": {},
-    "acl_default_visible": False,
-    "acl_default_online": False,
+    "acl_default_visible": True,
+    "acl_default_online": True,
     "hot_library_title": "🌐在线热门",
     "hot_limit": 300,          # 四库合计保留条数上限
     "hot_per_source": 120,    # 每个资源站最多抓取的可播条目
@@ -313,12 +346,18 @@ class Config:
                     _log.error("no usable config backup, falling back to defaults")
             cfg = json.loads(json.dumps(DEFAULTS))  # deep copy
             cfg.update(j)
-            # 存量版本号（旧配置可能没有该键，视为 v1）：v1→v2 迁移的判定依据，
-            # 须在下面 setdefault 补当前版本之前读取。
-            try:
-                _stored_version = int(j.get("config_version", 1))
-            except (TypeError, ValueError):
+            # 存量版本号：v1→v2→v3 迁移链的判定依据，须在下面 setdefault
+            # 补当前版本之前读取。缺失该键的旧配置视为 v1；键存在但
+            # 解析失败时（如 "2.0"、"abc"、None）不得误判为 v1——按
+            # “无法确定版本”处理，跳过破坏性迁移（见下），只记 warning。
+            if "config_version" not in j:
                 _stored_version = 1
+                _version_known = True
+                _version_missing = True
+            else:
+                _stored_version = parse_config_version(j.get("config_version"))
+                _version_known = _stored_version is not None
+                _version_missing = False
             # 旧配置没有版本号时补当前版本，后续升级按版本号迁移。
             cfg.setdefault("config_version", CONFIG_VERSION)
             for k in list(cfg.keys()):
@@ -405,22 +444,69 @@ class Config:
                     cfg["hot_pages_per_source"] = DEFAULTS["hot_pages_per_source"]; migrated = True
             except (TypeError, ValueError):
                 pass
-            # v1→v2 一次性迁移：多用户可见性默认改 fail-closed
-            # （decisions-2-failclosed）。旧配置两项默认 True，存量用户也须
-            # 翻成 False；只在存量版本 < 2 时跑一次，之后用户在管理页手动改回
-            # True 会保留（版本号已是 2，不再迁移）。
+            # v1→v2 一次性迁移（decisions-2-failclosed）：多用户可见性默认改
+            # fail-closed。旧配置两项默认 True，存量用户也须翻成 False；只在
+            # 存量版本 < 2 时跑一次，之后立即由 v2→v3 接力（v1 配置走完整链，
+            # 最终仍为 True）。
+            # v2→v3 一次性迁移（fail-open 回滚）：多用户可见性默认改回
+            # fail-open。v2 存量用户（含已在真机跑过 v1→v2、两项已落盘为
+            # False 的）一次性翻回 True；只在存量版本 < 3 时跑一次，之后
+            # 用户在管理页手动改回 False 会保留（版本号已是 3，不再迁移）。
+            # 迁移跑与不跑都记一条日志；版本无法确定或高于当前版本时只警告，
+            # 不重跑破坏性迁移（解析失败误判为 v1 会把用户显式设的值翻掉）。
             _acl_migrated = False
-            if _stored_version < 2:
-                cfg["acl_default_visible"] = False
-                cfg["acl_default_online"] = False
-                cfg["config_version"] = 2
-                _acl_migrated = True
+            _version_normalized = False
+            if not _version_known:
+                # 无法确定版本：跳过 v1→v2 / v2→v3 破坏性迁移，用户值原样保留；
+                # 只把版本号归一化为当前版本（非破坏性），避免每次加载都重复警告。
+                _log.warning(
+                    "config_version unparsable (%r), skipping v1->v2/v2->v3 "
+                    "migration; keeping user values and normalizing "
+                    "version to %d", j.get("config_version"), CONFIG_VERSION)
+                cfg["config_version"] = CONFIG_VERSION
+                _version_normalized = True
                 migrated = True
+            elif _stored_version > CONFIG_VERSION:
+                # 未来版本降级使用：不迁移、不降版本号，只警告（新版本可能
+                # 已写入本版本不认识的键，静默改写会丢数据）。
+                _log.warning(
+                    "config_version %d is newer than supported %d; "
+                    "skipping migration, keeping stored values as-is",
+                    _stored_version, CONFIG_VERSION)
+            else:
+                _cur_version = _stored_version
+                if _cur_version < 2:
+                    cfg["acl_default_visible"] = False
+                    cfg["acl_default_online"] = False
+                    cfg["config_version"] = 2
+                    _cur_version = 2
+                    _acl_migrated = True
+                    migrated = True
+                    _log.info(
+                        "config migration v1->v2: acl defaults flipped to "
+                        "fail-closed (stored version %s%s)", _stored_version,
+                        " (version key missing, treated as v1)"
+                        if _version_missing else "")
+                if _cur_version < 3:
+                    cfg["acl_default_visible"] = True
+                    cfg["acl_default_online"] = True
+                    cfg["config_version"] = 3
+                    _acl_migrated = True
+                    migrated = True
+                    _log.info(
+                        "config migration v2->v3: acl defaults flipped back "
+                        "to fail-open (stored version %s)", _stored_version)
+                else:
+                    _log.info(
+                        "config migration skipped: stored version %d is "
+                        "current, no migration needed", _stored_version)
             if migrated:
                 _mig_keys = ("hot_limit", "hot_per_source", "hot_pages_per_source")
                 if _acl_migrated:
                     _mig_keys += ("acl_default_visible", "acl_default_online",
                                   "config_version")
+                if _version_normalized:
+                    _mig_keys += ("config_version",)
                 j.update({k: cfg[k] for k in _mig_keys})
                 try:
                     # 走 _persist：先备份、再写临时文件 + 原子 rename。
