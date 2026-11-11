@@ -17,6 +17,16 @@ import os
 import threading
 import time
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("sourcehealth")
+
 _STATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "state", "source_health.json")
@@ -64,6 +74,7 @@ def _load() -> dict:
             d = json.load(f)
         return d if isinstance(d, dict) else {}
     except Exception:
+        _log.debug("_load failed", exc_info=True)
         return {}
 
 
@@ -78,6 +89,7 @@ def _save_locked() -> None:
             json.dump(_STATS, f, ensure_ascii=False)
         os.replace(tmp, _STATE_PATH)
     except Exception:
+        _log.debug("_save_locked failed", exc_info=True)
         pass
 
 

@@ -22,6 +22,16 @@ import netutil
 import providers
 from store import make_guid
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("catalog")
+
 PAGE_SIZE = 20
 # 每个大类最多可浏览的页数（页数×20=条数）。250 页 ≈ 5000 部。
 MAX_PAGES = 250
@@ -122,6 +132,7 @@ def _welfare_on() -> bool:
         from config import config as _cfg
         return bool(_cfg.get().get("welfare_library_enabled", False))
     except Exception:
+        _log.debug("_welfare_on failed", exc_info=True)
         return False
 
 
@@ -291,6 +302,7 @@ class Catalog:
             from config import config
             return [s["id"] for s in config.all_sources() if s.get("standalone")]
         except Exception:
+            _log.debug("standalone_scopes failed", exc_info=True)
             return []
 
     # -------------------------------------------------- 分类表 / 路由
@@ -336,6 +348,7 @@ class Catalog:
                         _lst, pc = await _fetch_category_page(
                             client, source, cl["type_id"], 1)
                     except Exception:
+                        _log.debug("probe_one failed: sid=%s", sid, exc_info=True)
                         return None
                     if not _lst:
                         return None
@@ -444,6 +457,7 @@ class Catalog:
         try:
             cls = await _fetch_class_list(client, source)
         except Exception:
+            _log.debug("_load_source_classes failed: source=%s", source, exc_info=True)
             cls = []
         # 只取叶子子类：苹果CMS 的父类（电影片/连续剧…）不聚合子类、只有零星条目，
         # 真正可深翻的是动作片/国产剧这类子分类。
@@ -466,6 +480,7 @@ class Catalog:
                 norm.append({"type_id": tid, "type_name": name,
                              "type_pid": pid, "cat": cat})
             except Exception:
+                _log.debug("_load_source_classes failed: source=%s", source, exc_info=True)
                 continue
         with self._lock:
             self._classes[source["id"]] = norm
@@ -475,6 +490,7 @@ class Catalog:
             from config import config
             return next((s for s in config.all_sources() if s["id"] == sid), None)
         except Exception:
+            _log.debug("_source_by_id failed: sid=%s", sid, exc_info=True)
             return None
 
     def cat_for_source_type(self, source_id: str, type_id) -> str | None:
@@ -584,6 +600,7 @@ class Catalog:
                 try:
                     rows = await self.get_page(cat, pg, scope)
                 except Exception:
+                    _log.debug("bound failed", exc_info=True)
                     return pg, []
                 return pg, rows if isinstance(rows, list) else []
 
@@ -697,6 +714,7 @@ class Catalog:
                         fut.set_result([])
                     raise
                 except Exception:
+                    _log.debug("work failed", exc_info=True)
                     if not fut.done():
                         fut.set_result([])
                 finally:
@@ -737,6 +755,7 @@ class Catalog:
             try:
                 t = providers._map_vod(v, source)
             except Exception:
+                _log.debug("_briefs_from_vods failed: source=%s", source, exc_info=True)
                 continue
             if not t or not t.title:
                 continue
@@ -810,6 +829,7 @@ class Catalog:
                 vods, pc = await _fetch_category_page(
                     client, source, route["type_id"], page, timeout=timeout)
             except Exception:
+                _log.debug("fetch_one failed", exc_info=True)
                 return None
             if not vods:
                 return None
@@ -876,6 +896,7 @@ class Catalog:
                   if self.available(c, scope)],
                 return_exceptions=True)
         except Exception:
+            _log.debug("warm_standalone failed", exc_info=True)
             pass
 
     async def _source_cat_window(self, scope: str, cat: str,

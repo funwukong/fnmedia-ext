@@ -43,6 +43,16 @@ import threading
 import time
 from pathlib import Path
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("history")
+
 _STATE = Path(__file__).resolve().parent.parent / "state" / "history.json"
 _LOCK = threading.RLock()
 _FLUSH_INTERVAL = 3.0
@@ -72,6 +82,7 @@ def key_normalize_title(title: str) -> str:
         from metadata import normalize_title
         t = normalize_title(title)
     except Exception:
+        _log.debug("key_normalize_title failed: title=%s", title, exc_info=True)
         t = (title or "").strip()
     return _NON_WORD_RE.sub("", (t or "").casefold())
 
@@ -150,6 +161,7 @@ def _is_tv_brief(brief: dict | None) -> bool:
         import inject as _inj
         return bool(_inj.is_tv(brief))
     except Exception:
+        _log.debug("_is_tv_brief failed", exc_info=True)
         pass
     typ = (brief.get("type_name") or "").strip()
     if any(w in typ for w in _MOVIE_TYPE_WORDS):
@@ -200,6 +212,7 @@ def canonical_key_for_guid(guid: str) -> str | None:
             if eg and eg != guid:
                 return canonical_key_for_guid(eg)
     except Exception:
+        _log.debug("canonical_key_for_guid failed: guid=%s", guid, exc_info=True)
         return None
     return None
 
@@ -277,7 +290,8 @@ class History:
     def _load(self):
         try:
             j = json.loads(_STATE.read_text())
-        except Exception:
+        except (OSError, ValueError):
+            _log.debug("_load failed", exc_info=True)
             j = {}
         if "users" in j and isinstance(j.get("users"), dict):
             self._users = {u: _Bucket(v) for u, v in j["users"].items()
@@ -323,6 +337,7 @@ class History:
             self._dirty = False
             self._last_flush = now
         except Exception:
+            _log.debug("_flush_locked failed", exc_info=True)
             pass
 
     def flush(self):

@@ -37,6 +37,16 @@ import httpx
 # 依赖每次调用时从本模块取。
 from pan import _make_pan_helpers
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("panuc")
+
 
 def _ssl_ctx() -> ssl.SSLContext:
     # 每个 client 独立的 SSL 上下文，并禁用 TLS Session Ticket：
@@ -47,6 +57,7 @@ def _ssl_ctx() -> ssl.SSLContext:
     try:
         ctx.options |= ssl.OP_NO_TICKET
     except Exception:
+        _log.debug("_ssl_ctx failed", exc_info=True)
         pass
     return ctx
 
@@ -130,7 +141,8 @@ def _load() -> dict:
     try:
         with open(_STATE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_load failed", exc_info=True)
         return {}
 
 
@@ -143,6 +155,7 @@ def _save(st: dict) -> None:
     try:
         os.chmod(_STATE_PATH, 0o600)
     except Exception:
+        _log.debug("_save failed", exc_info=True)
         pass
 
 
@@ -337,6 +350,7 @@ def _redeem_ticket(ticket: str, c: "httpx.Client|None" = None) -> tuple[str, str
         try:
             j = r.json()
         except Exception:
+            _log.debug("_redeem_ticket failed", exc_info=True)
             j = {}
     finally:
         cli.close()
@@ -348,6 +362,7 @@ def _redeem_ticket(ticket: str, c: "httpx.Client|None" = None) -> tuple[str, str
     try:
         cookie = _refresh_puus(cookie)
     except Exception:  # 换票本身成功，puus 可在首次取链时再刷
+        _log.debug("_redeem_ticket failed", exc_info=True)
         pass
     return cookie, nickname, uid
 
@@ -479,6 +494,7 @@ def resolve_share(url: str, passcode_hint: str = "") -> dict:
             try:
                 items += share_detail(cs, pwd_id, stoken, d["fid"])
             except Exception:
+                _log.debug("resolve_share failed", exc_info=True)
                 pass
         vids = _video_items(items)
         if not vids:
@@ -507,6 +523,7 @@ def resolve_share(url: str, passcode_hint: str = "") -> dict:
         try:
             cs.close()
         except Exception:
+            _log.debug("resolve_share failed", exc_info=True)
             pass
     # 分享 client 已彻底关闭；以下个人网盘域调用都用一次性 client。
     # 等待转存落地，按文件名在目标目录里找回真实 fid。
@@ -552,6 +569,7 @@ def _download_url(cookie: str, fid: str) -> str:
         if arr and arr[0].get("download_url"):
             return arr[0]["download_url"]
     except Exception:
+        _log.debug("_download_url failed: fid=%s", fid, exc_info=True)
         return ""
     return ""
 
@@ -566,6 +584,7 @@ def save_dir_fid(cookie: str) -> str:
             if it.get("dir") and it.get("file_name") == SAVE_DIR:
                 return it["fid"]
     except Exception:
+        _log.debug("save_dir_fid failed", exc_info=True)
         pass
     return "0"
 
@@ -621,6 +640,7 @@ def _created_ts(item: dict, now: int | None = None) -> int | None:
                     ts = _dt.datetime.fromisoformat(
                         s.replace("Z", "+00:00")).timestamp()
                 except Exception:
+                    _log.debug("_created_ts failed", exc_info=True)
                     continue
         else:
             continue
@@ -674,6 +694,7 @@ def cleanup_expired(ttl_seconds: int = 6 * 3600,
         cookie = _active_cookie()
         items = _list_save_dir_files(cookie)
     except Exception as exc:  # noqa: BLE001
+        _log.debug("cleanup_expired failed", exc_info=True)
         result["errors"] += 1
         result["error"] = f"{type(exc).__name__}: {exc}"
         return result
@@ -696,6 +717,7 @@ def cleanup_expired(ttl_seconds: int = 6 * 3600,
             _delete_fids(cookie, [it.get("fid") for it in batch
                                   if it.get("fid")])
         except Exception:  # noqa: BLE001
+            _log.debug("cleanup_expired failed", exc_info=True)
             result["errors"] += len(batch)
             result["kept"] += len(batch)
             continue
@@ -748,12 +770,14 @@ def playable(fid: str) -> dict:
     try:
         url = _download_url(cookie, fid)
     except Exception:
+        _log.debug("playable failed: fid=%s", fid, exc_info=True)
         url = ""
     if not url:
         try:
             url, res = _play_url(cookie, fid)
             m3u8 = ".m3u8" in url.split("?", 1)[0].lower()
         except Exception:
+            _log.debug("playable failed: fid=%s", fid, exc_info=True)
             url, res, m3u8 = "", "", False
     if not url:
         raise PanError("取播放地址失败（文件不存在、仍在转码或风控，可稍后重试）")

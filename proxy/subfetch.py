@@ -16,6 +16,16 @@ from urllib.parse import urlparse
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("subfetch")
+
 # 抓取订阅资源用的超时（jar 可能数 MB，给宽一些）
 SUB_TIMEOUT = httpx.Timeout(25.0, connect=10.0)
 _UA = "Mozilla/5.0 (Linux; Android 11) AppleWebKit/537.36"
@@ -31,6 +41,7 @@ def subscription_proxy() -> str:
         import config
         return str(config.config.get().get("subscription_proxy") or "").strip()
     except Exception:  # noqa: BLE001
+        _log.debug("subscription_proxy failed", exc_info=True)
         return ""
 
 
@@ -86,6 +97,7 @@ def github_mirror_candidates(url: str) -> list[str]:
                 if c not in out:
                     out.append(c)
     except Exception:  # noqa: BLE001
+        _log.debug("github_mirror_candidates failed", exc_info=True)
         pass
     return out
 
@@ -117,6 +129,7 @@ def fetch_first(urls, *, want_zip: bool = False, timeout: float | None = None):
                 continue
             return blob, u
         except Exception as exc:  # noqa: BLE001
+            _log.debug("fetch_first failed", exc_info=True)
             last = f"{type(exc).__name__} @ {u}"
             continue
     return None, last

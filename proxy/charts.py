@@ -23,6 +23,16 @@ from typing import Any
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("charts")
+
 STATE = Path(__file__).resolve().parent.parent / "state" / "charts.json"
 REFRESH_TIMEOUT = 60.0
 
@@ -135,6 +145,7 @@ async def _fetch_weekly(client: httpx.AsyncClient, path: str) -> list[dict]:
             if isinstance(data, list) and data:
                 return data
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_fetch_weekly failed", exc_info=True)
             last = exc
     if last:
         raise last
@@ -157,6 +168,7 @@ async def _fetch_tag(client: httpx.AsyncClient, typ: str, tag: str,
             r.raise_for_status()
             subjects = (r.json() or {}).get("subjects") or []
         except Exception:
+            _log.debug("_fetch_tag failed", exc_info=True)
             break
         if not subjects:
             break
@@ -317,6 +329,7 @@ class ChartCache:
                     self._apply(j)
                     return
             except Exception:
+                _log.debug("load failed", exc_info=True)
                 pass
             self._charts = {c: [] for c, _, _ in CHART_CATEGORIES}
             self._index = {}
@@ -348,6 +361,7 @@ class ChartCache:
             try:
                 STATE.unlink(missing_ok=True)
             except Exception:
+                _log.debug("reset failed", exc_info=True)
                 pass
 
     def get_guid(self, guid: str) -> dict | None:
@@ -404,6 +418,7 @@ class ChartCache:
                 self._apply(data)
             result = data
         except Exception as exc:  # noqa: BLE001
+            _log.debug("refresh failed", exc_info=True)
             err = f"{type(exc).__name__}: {str(exc)[:120]}"
             with self._lock:
                 self._meta["last_error"] = err

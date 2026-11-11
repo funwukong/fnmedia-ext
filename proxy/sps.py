@@ -20,6 +20,16 @@ from __future__ import annotations
 
 from typing import Optional
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("sps")
+
 _HIGH_PROFILE_IDCS = frozenset(
     (100, 110, 122, 244, 44, 83, 86, 118, 128, 138, 139, 134, 135))
 
@@ -181,6 +191,7 @@ def parse_sps_profile(nal: bytes) -> Optional[dict]:
         return {"width": width, "height": height, "fps": fps} if fps else \
             {"width": width, "height": height}
     except Exception:
+        _log.debug("parse_sps_profile failed", exc_info=True)
         return None
 
 

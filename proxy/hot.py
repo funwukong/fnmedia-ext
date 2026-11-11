@@ -23,6 +23,16 @@ from typing import Any
 
 import providers
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("hot")
+
 STATE = Path(__file__).resolve().parent.parent / "state" / "hot.json"
 REFRESH_TIMEOUT = 180.0
 
@@ -74,6 +84,7 @@ async def fetch_source_hot(client: httpx.AsyncClient, source: dict,
                 continue
             j = r.json()
         except Exception:
+            _log.debug("fetch_source_hot failed: source=%s", source, exc_info=True)
             continue
         if not isinstance(j, dict) or j.get("code") not in (1, "1"):
             continue
@@ -92,6 +103,7 @@ async def fetch_source_hot(client: httpx.AsyncClient, source: dict,
                 if t and t.title and playable_count(t) > 0:
                     out.append(t)
             except Exception:
+                _log.debug("fetch_source_hot failed: source=%s", source, exc_info=True)
                 continue
         if len(page_items) < 10:
             break
@@ -240,6 +252,7 @@ class HotCache:
                     self._apply(j)
                     return
             except Exception:
+                _log.debug("load failed", exc_info=True)
                 pass
             self._meta = {"updated_at": 0, "updated_at_text": "", "provider_ok": 0,
                           "total_sources": 0, "last_error": "尚未刷新"}
@@ -325,6 +338,7 @@ class HotCache:
                 await asyncio.wait_for(self.refresh(store_obj, force=True),
                                        timeout=REFRESH_TIMEOUT)
             except Exception:
+                _log.debug("_run failed", exc_info=True)
                 pass
 
         loop.create_task(_run())
@@ -380,6 +394,7 @@ class HotCache:
             result = data
         except Exception as exc:
             # 关键容错：任一资源站、整体超时或写盘失败都不清空旧缓存。
+            _log.debug("refresh failed", exc_info=True)
             err = f"{type(exc).__name__}: {str(exc)[:120]}"
             with self._lock:
                 self._meta["last_error"] = err
@@ -396,6 +411,7 @@ def config_hot_enabled() -> bool:
         from config import config
         return bool(config.get().get("hot_library_enabled", True))
     except Exception:
+        _log.debug("config_hot_enabled failed", exc_info=True)
         return True
 
 

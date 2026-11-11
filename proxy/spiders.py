@@ -47,7 +47,8 @@ def feature_on() -> bool:
 def _read_json(path: Path, default):
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_read_json failed", exc_info=True)
         return default
 
 
@@ -329,6 +330,7 @@ def available() -> bool:
         import guard as _g
         return bool(_g.available())
     except Exception:
+        _log.debug("available failed", exc_info=True)
         return False
 
 
@@ -338,6 +340,7 @@ def _runtime_up(force: bool = True) -> bool:
         import guard as _g
         return bool(_g.health(force=force).get("ok"))
     except Exception:  # noqa: BLE001
+        _log.debug("_runtime_up failed", exc_info=True)
         return available()
 
 
@@ -353,10 +356,12 @@ def _ensure_runtime(timeout_s: float = 25.0) -> bool:
             try:
                 _g._docker_exec(["am", "start", "-n", _g._BRIDGE_COMPONENT], timeout=10)
             except Exception:  # noqa: BLE001
+                _log.debug("_ensure_runtime failed", exc_info=True)
                 pass
         else:
             _g.start_android(wait_ready=True)
     except Exception:  # noqa: BLE001
+        _log.debug("_ensure_runtime failed", exc_info=True)
         pass
     t0 = _t.time()
     while _t.time() - t0 < timeout_s:
@@ -449,6 +454,7 @@ def diagnose_empty(key: str, keyword: str) -> dict:
         if isinstance(classes, dict):
             classes = list(classes.values())
     except Exception as exc:  # noqa: BLE001
+        _log.debug("diagnose_empty failed", exc_info=True)
         home_err = str(exc)
 
     def tid_of(c):
@@ -473,6 +479,7 @@ def diagnose_empty(key: str, keyword: str) -> dict:
                         sample, browse_cat = t, (name_of(c) or tid)
                         break
             except Exception:  # noqa: BLE001
+                _log.debug("diagnose_empty failed", exc_info=True)
                 continue
             if sample:
                 break
@@ -484,6 +491,7 @@ def diagnose_empty(key: str, keyword: str) -> dict:
             try:
                 hits = search(conf, probe_kw)
             except Exception:  # noqa: BLE001
+                _log.debug("diagnose_empty failed", exc_info=True)
                 hits = []
             if hits:
                 return {"verdict": "keyword_miss",
@@ -502,6 +510,7 @@ def diagnose_empty(key: str, keyword: str) -> dict:
         try:
             hits = search(conf, w)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("diagnose_empty failed", exc_info=True)
             hot_err = str(exc)
             continue
         if hits:
@@ -566,6 +575,7 @@ def probe(key: str, keyword: str = "庆余年", do_play: bool = False) -> dict:
         out["search_ms"] = int((_t.time() - t) * 1000)
     except Exception as exc:  # noqa: BLE001
         # 运行时可能刚被上一个嗅探源打崩：拉起恢复后重试一次
+        _log.debug("probe failed", exc_info=True)
         if ("后端不可用" in str(exc) or "closed connection" in str(exc).lower()) \
                 and _ensure_runtime(timeout_s=30.0):
             t = _t.time()
@@ -573,6 +583,7 @@ def probe(key: str, keyword: str = "庆余年", do_play: bool = False) -> dict:
                 rows = search(conf, keyword or "庆余年")
                 out["search_ms"] = int((_t.time() - t) * 1000)
             except Exception as exc2:  # noqa: BLE001
+                _log.debug("probe failed", exc_info=True)
                 return {**out, "ok": False, "stage": "search", "error": str(exc2)[:200]}
         else:
             return {**out, "ok": False, "stage": "search",
@@ -596,11 +607,13 @@ def probe(key: str, keyword: str = "庆余年", do_play: bool = False) -> dict:
         det = detail(conf, vid)
         out["detail_ms"] = int((_t.time() - t) * 1000)
     except Exception as exc:  # noqa: BLE001
+        _log.debug("probe failed", exc_info=True)
         return {**out, "ok": False, "stage": "detail", "error": str(exc)[:200]}
     try:
         import guard as _g
         eps = _g.parse_episodes(det)
     except Exception:  # noqa: BLE001
+        _log.debug("probe failed", exc_info=True)
         eps = []
     out["episodes"] = len(eps)
     if not eps:
@@ -623,6 +636,7 @@ def probe(key: str, keyword: str = "庆余年", do_play: bool = False) -> dict:
                 import json as _json
                 pr = _json.loads(pr)
             except Exception:  # noqa: BLE001
+                _log.debug("probe failed", exc_info=True)
                 pass
         url = ""
         if isinstance(pr, dict):
@@ -634,6 +648,7 @@ def probe(key: str, keyword: str = "庆余年", do_play: bool = False) -> dict:
                 "note": "未取得直链（该源可能需 WebView 嗅探/解析接口，headless 不支持）",
                 "raw": str(pr)[:160]}
     except Exception as exc:  # noqa: BLE001
+        _log.debug("probe failed", exc_info=True)
         msg = str(exc)[:200]
         out["play_ms"] = int((_t.time() - t) * 1000)
         crashed = "closed connection" in msg.lower() or not available()
@@ -708,6 +723,7 @@ def _scan_one(key: str, name: str, keyword: str, do_play: bool) -> dict:
     try:
         r = probe(key, keyword=keyword, do_play=do_play)
     except Exception as exc:  # noqa: BLE001
+        _log.debug("_scan_one failed: name=%s", name, exc_info=True)
         r = {"key": key, "name": name, "ok": False, "stage": "unknown",
              "verdict": "unknown", "error": str(exc)[:160]}
     # 归类为统一 verdict
@@ -755,6 +771,7 @@ def start_scan(keyword: str = "庆余年", do_play: bool = False,
                     try:
                         res = fut.result()
                     except Exception as exc:  # noqa: BLE001
+                        _log.debug("run failed", exc_info=True)
                         res = {"key": futs[fut], "name": futs[fut], "verdict": "unknown",
                                "ok": False, "reason": str(exc)[:160],
                                "evidence": "", "suggest_delete": False}

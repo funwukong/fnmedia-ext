@@ -17,6 +17,16 @@ import sqlite3
 import threading
 import time
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("fnusers")
+
 # 官方媒体服务数据目录（trim-media 以 --root 指向；多卷兜底）
 _DB_CANDIDATES = [
     "/usr/local/apps/@appdata/trim.media/database",
@@ -60,6 +70,7 @@ def token_from_request(request) -> str:
                 if k.strip().lower() == "trim-mc-token":
                     return v.strip()
     except Exception:
+        _log.debug("token_from_request failed", exc_info=True)
         return ""
     return ""
 
@@ -87,6 +98,7 @@ def _lookup(token: str) -> dict | None:
         return {"guid": u["guid"], "name": u["username"] or "",
                 "is_admin": bool(u["is_admin"])}
     except Exception:
+        _log.debug("_lookup failed", exc_info=True)
         return None
 
 
@@ -152,4 +164,5 @@ def list_users() -> list[dict]:
         return [{"guid": r["guid"], "name": r["username"] or r["guid"][:8],
                  "is_admin": bool(r["is_admin"]), "status": r["status"]} for r in rows]
     except Exception:
+        _log.debug("list_users failed", exc_info=True)
         return []

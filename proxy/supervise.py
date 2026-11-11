@@ -68,6 +68,7 @@ def is_official(path):
         pid, exe = peer(path)
         return Path(exe).name == OFFICIAL, pid, exe
     except Exception:
+        _log.debug("is_official failed", exc_info=True)
         return False, None, None
 
 
@@ -110,6 +111,7 @@ def health_ok(staged, timeout=20):
             if b"200 OK" in data and b'"ok":true' in data:
                 return True
         except Exception:
+            _log.debug("health_ok failed", exc_info=True)
             pass
         time.sleep(0.3)
     return False
@@ -163,6 +165,7 @@ def main():
                     peer(staged)
                     break
                 except Exception:
+                    _log.debug("main failed", exc_info=True)
                     pass
             time.sleep(0.2)
         else:
@@ -244,6 +247,7 @@ def main():
                 if TARGET.exists():
                     TARGET.unlink()
             except Exception:
+                _log.debug("main failed", exc_info=True)
                 pass
             rollback()
     return 0

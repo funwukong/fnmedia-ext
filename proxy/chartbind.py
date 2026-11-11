@@ -19,6 +19,16 @@ import threading
 import time
 from pathlib import Path
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("chartbind")
+
 STATE = Path(__file__).resolve().parent.parent / "state" / "chart_bindings.json"
 
 # 绑定保鲜期：超过后视为“需懒校验”，恢复进内存但不强制信任，播放失败会重搜。
@@ -50,6 +60,7 @@ class ChartBindStore:
                         if isinstance(v, dict) and v.get("brief")
                     }
             except Exception:
+                _log.debug("load failed", exc_info=True)
                 self._data = {}
 
     def _persist_locked(self) -> None:
@@ -62,6 +73,7 @@ class ChartBindStore:
                 encoding="utf-8")
             tmp.replace(STATE)
         except Exception:
+            _log.debug("_persist_locked failed", exc_info=True)
             pass
 
     def _schedule_flush_locked(self) -> None:
@@ -142,6 +154,7 @@ class ChartBindStore:
         try:
             STATE.unlink(missing_ok=True)
         except Exception:
+            _log.debug("clear failed", exc_info=True)
             pass
 
     def status(self) -> dict:

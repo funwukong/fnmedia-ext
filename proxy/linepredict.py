@@ -18,6 +18,16 @@ import time
 from collections import OrderedDict
 from pathlib import Path
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("linepredict")
+
 # ep_key -> (ts, line, latency_seconds)
 _FAST: "OrderedDict[str, tuple[float, str, float]]" = OrderedDict()
 _LOCK = threading.Lock()
@@ -58,9 +68,11 @@ def load_persisted() -> int:
                         _FAST[str(k)] = (float(ts), line, lat)
                         n += 1
                 except Exception:
+                    _log.debug("load_persisted failed", exc_info=True)
                     continue
         return n
     except Exception:
+        _log.debug("load_persisted failed", exc_info=True)
         return 0
 
 
@@ -74,6 +86,7 @@ def _persist_now() -> None:
                                   separators=(",", ":")), encoding="utf-8")
         tmp.replace(_STATE)
     except Exception:
+        _log.debug("_persist_now failed", exc_info=True)
         pass
 
 

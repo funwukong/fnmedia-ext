@@ -25,6 +25,16 @@ import urllib.parse
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("quality")
+
 _FFPROBE: str | None = None
 # key -> (ts, label)；缓存 6 小时，限 2000 条
 _CACHE: dict[str, tuple[float, str]] = {}
@@ -70,6 +80,7 @@ async def _ffprobe_file(path: str) -> tuple[int, int] | None:
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
         out, _ = await asyncio.wait_for(p.communicate(), timeout=_PROBE_TIMEOUT)
     except Exception:
+        _log.debug("_ffprobe_file failed", exc_info=True)
         return None
     # 可能有多行（广告/占位与正片分辨率不同），取最高（代表正片清晰度）
     wh = None
@@ -125,6 +136,7 @@ async def _probe_mp4(client: httpx.AsyncClient, url: str,
             return None
         return await _probe_bytes(r.content, ".mp4")
     except Exception:
+        _log.debug("_probe_mp4 failed", exc_info=True)
         return None
 
 
@@ -156,6 +168,7 @@ async def _aes_cbc_decrypt(data: bytes, key: bytes, iv: bytes) -> bytes | None:
             p.communicate(data), timeout=_PROBE_TIMEOUT)
         return out if p.returncode == 0 and out else None
     except Exception:
+        _log.debug("_aes_cbc_decrypt failed", exc_info=True)
         return None
 
 
@@ -185,6 +198,7 @@ async def _parse_hls_key(client, text: str, media_url: str,
             return None
         return key, iv
     except Exception:
+        _log.debug("_parse_hls_key failed", exc_info=True)
         return None
 
 
@@ -202,6 +216,7 @@ async def _probe_hls(client: httpx.AsyncClient, media_url: str,
         mm = re.search(r"#EXT-X-MEDIA-SEQUENCE:(\d+)", text)
         media_seq = int(mm.group(1)) if mm else 0
     except Exception:
+        _log.debug("_probe_hls failed", exc_info=True)
         return None
     if not segs:
         return None
@@ -224,6 +239,7 @@ async def _probe_hls(client: httpx.AsyncClient, media_url: str,
             sr = await client.get(seg, headers=headers or {},
                                   timeout=_SEG_TIMEOUT)
         except Exception:
+            _log.debug("_probe_hls failed", exc_info=True)
             continue
         if sr.status_code != 200 or not sr.content:
             continue

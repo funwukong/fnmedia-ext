@@ -21,6 +21,16 @@ import re
 
 from metadata import normalize_title
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("related")
+
 DEFAULT_LIMIT = 12
 # 入选门槛：光“同类型”(+8)或“同地区”(+8)不够，必须至少有一项
 # 实信号（同分类 25 / 同类型名 12 / 同系列 60 / 同演员 10 叠加后达标）。
@@ -68,6 +78,7 @@ def _score(brief: dict, cand: dict) -> int:
         if _inj.fnos_type(cand) == _inj.fnos_type(brief):
             s += 8
     except Exception:
+        _log.debug("_score failed", exc_info=True)
         pass
     if cand.get("area") and cand.get("area") == brief.get("area"):
         s += 8

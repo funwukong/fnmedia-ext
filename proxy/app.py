@@ -373,6 +373,7 @@ def guard_lib_source(lib_guid: str) -> dict | None:
                 if conf:
                     return {"source": s, "conf": conf}
     except Exception:
+        _log.debug("guard_lib_source failed: lib_guid=%s", lib_guid, exc_info=True)
         return None
     return None
 
@@ -392,6 +393,7 @@ async def _guard_prefetch(key: str) -> None:
     try:
         await asyncio.to_thread(_g.prefetch_posters, conf)
     except Exception:
+        _log.debug("_guard_prefetch failed", exc_info=True)
         pass
 
 
@@ -414,6 +416,7 @@ def guard_libs_active() -> list[dict]:
                 out.append({"source": s, "conf": conf})
         return out
     except Exception:
+        _log.debug("guard_libs_active failed", exc_info=True)
         return []
 
 
@@ -490,6 +493,7 @@ def _gn_persist() -> None:
             json.dump(payload, f, ensure_ascii=False)
         os.replace(tmp, _GN_CACHE_PATH)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_persist failed", exc_info=True)
         pass
 
 
@@ -510,6 +514,7 @@ def _gn_load_persist() -> None:
                 _gn_state["per_src"] = d.get("per_src") or {}
                 _gn_state["hot_ts"] = d.get("hot_ts") or time.time()
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_load_persist failed", exc_info=True)
         pass
 
 
@@ -525,7 +530,8 @@ def _gn_catalog_load() -> dict:
             with open(_GN_CATALOG_PATH, "r", encoding="utf-8") as f:
                 d = json.load(f)
             out = d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError):
+        _log.debug("_gn_catalog_load failed", exc_info=True)
         out = ent[1] if ent else {}
     globals()["_GN_CATALOG_MEM"] = (now, out)
     return out
@@ -565,6 +571,7 @@ def _gn_catalog_save(key: str, pages: dict, more: dict,
         os.replace(tmp, _GN_CATALOG_PATH)
         globals()["_GN_CATALOG_MEM"] = (time.time(), d)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_catalog_save failed", exc_info=True)
         pass
 
 
@@ -634,6 +641,7 @@ def _gn_catalog_detect_keys() -> list[str]:
             try:
                 vods = _g.browse_page(conf, tid, 1)
             except Exception:  # noqa: BLE001
+                _log.debug("_gn_catalog_detect_keys failed", exc_info=True)
                 vods = []
             if vods and str(vods[0].get("vod_id", "")).startswith("msearch"):
                 is_ms = True
@@ -650,6 +658,7 @@ def _gn_catalog_detect_keys() -> list[str]:
         os.replace(tmp, _GN_CATALOG_PATH)
         globals()["_GN_CATALOG_MEM"] = (time.time(), full)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_catalog_detect_keys failed", exc_info=True)
         pass
     return keys
 
@@ -670,6 +679,7 @@ async def _gn_catalog_worker() -> None:
                 if k not in src_keys:
                     src_keys.append(k)
         except Exception:  # noqa: BLE001
+            _log.debug("_gn_catalog_worker failed", exc_info=True)
             det = []
         _log.info("guard native catalog sources: %s", src_keys)
         for key in src_keys:
@@ -706,6 +716,7 @@ async def _gn_catalog_worker() -> None:
                         vods = await asyncio.wait_for(asyncio.to_thread(
                             _g.browse_page, conf, tid, pg), timeout=20)
                     except Exception:  # noqa: BLE001
+                        _log.debug("_gn_catalog_worker failed", exc_info=True)
                         vods = []
                     cards = await asyncio.to_thread(
                         _gn_map_cards, group, vods, _GN_PAGE_SIZE, anc, ftype)
@@ -716,6 +727,7 @@ async def _gn_catalog_worker() -> None:
                             vods = await asyncio.wait_for(asyncio.to_thread(
                                 _g.browse_page, conf, tid, pg), timeout=20)
                         except Exception:  # noqa: BLE001
+                            _log.debug("_gn_catalog_worker failed", exc_info=True)
                             vods = []
                         cards = await asyncio.to_thread(
                             _gn_map_cards, group, vods, _GN_PAGE_SIZE, anc, ftype)
@@ -801,6 +813,7 @@ async def _gn_deep_worker() -> None:
                 vods = await asyncio.wait_for(asyncio.to_thread(
                     _g.browse_page, conf, tid, pg), timeout=22)
             except Exception:  # noqa: BLE001
+                _log.debug("fetch_page failed", exc_info=True)
                 vods = []
             anc = (f"{GUARD_NATIVE_TITLE}/"
                    f"{group['source'].get('name') or key}")
@@ -858,6 +871,7 @@ async def _gn_deep_worker() -> None:
                                 _k2, _t, _p, cards = await asyncio.wait_for(
                                     fetch_page(group, conf, c, p), timeout=22)
                             except Exception:  # noqa: BLE001
+                                _log.debug("_gn_deep_worker failed", exc_info=True)
                                 cards = []
                         if not cards:
                             stop_after = p
@@ -923,6 +937,7 @@ def _gn_parse_cls_token(token: str) -> tuple[str, str] | None:
         key, tid = raw.split("|", 1)
         return key, tid
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_parse_cls_token failed", exc_info=True)
         return None
 
 
@@ -989,6 +1004,7 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
         try:
             t = providers._guard_map_item(source, v)
         except Exception:  # noqa: BLE001
+            _log.debug("_gn_map_cards failed", exc_info=True)
             continue
         if not t.title or not t.vod_id:
             continue
@@ -1026,6 +1042,7 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
             try:
                 rm = f"评分 {float(sc):g}" if sc and float(sc) > 0 else ""
             except Exception:  # noqa: BLE001
+                _log.debug("_gn_map_cards failed", exc_info=True)
                 rm = ""
         row["title"] = (t.title or "") + (f" ·{rm}" if rm else "")
         row["ancestor_guid"] = GUARD_NATIVE_GUID
@@ -1061,6 +1078,7 @@ def _gn_refresh_hot() -> None:
                     vs = await asyncio.wait_for(asyncio.to_thread(
                         _g.browse_page, conf, c0["tid"], 1), timeout=18)
                 except Exception:  # noqa: BLE001
+                    _log.debug("one failed", exc_info=True)
                     vs = []
                 cn = str(c0.get("name") or "")
                 if vs:
@@ -1071,6 +1089,7 @@ def _gn_refresh_hot() -> None:
             items = await asyncio.wait_for(one(), timeout=22)
             return items, bool(items)
         except Exception:  # noqa: BLE001
+            _log.debug("_fetch failed", exc_info=True)
             return [], False
 
     groups = _gn_sources()
@@ -1086,6 +1105,7 @@ def _gn_refresh_hot() -> None:
                 try:
                     results.append(await _fetch(g))
                 except Exception:  # noqa: BLE001
+                    _log.debug("run failed", exc_info=True)
                     results.append(([], False))
             # 按源保留：本轮取数失败/为空的源沿用其上次缓存卡，避免单模拟器争用
             # 导致部分源超时后，整面墙越刷新越少。
@@ -1193,6 +1213,7 @@ def _gn_ensure_meta() -> None:
                     errored = False
                     err_reason = ""
                 except Exception as _exc:  # noqa: BLE001
+                    _log.debug("run failed", exc_info=True)
                     meta, errored = {}, True
                     err_reason = repr(_exc)[:160]
                 # 健康源约 1s；保留极小喘息，避免高频连续调用把单设备压挂。
@@ -1315,6 +1336,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                 try:
                     vods = await asyncio.wait_for(_one(), timeout=22)
                 except Exception:  # noqa: BLE001
+                    _log.debug("fetch failed", exc_info=True)
                     vods = []
                 if not vods and pg == 1:
                     try:
@@ -1325,6 +1347,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                                 _g.browse_page_ext, group["conf"], tid, 1, ext),
                             timeout=22)
                     except Exception:  # noqa: BLE001
+                        _log.debug("fetch failed", exc_info=True)
                         vods = []
                 anc = (f"{GUARD_NATIVE_TITLE}/"
                        f"{group['source'].get('name') or key}")
@@ -1574,6 +1597,7 @@ async def _gn_category_page(key: str, tid: str, cname: str, pg: int = 1,
         return cards or [], True, bool(more)
     except Exception:  # noqa: BLE001
         # 本次快速失败，但持久任务仍在后台取数（结果落缓存，下次秒回）
+        _log.debug("_gn_category_page failed: tid=%s", tid, exc_info=True)
         return [], True, True
 
 
@@ -1735,6 +1759,7 @@ async def _gn_warm_worker() -> None:
                     await asyncio.wait_for(
                         _gn_category_task(key, tid, 1, None, ftype), timeout=24)
                 except Exception:  # noqa: BLE001
+                    _log.debug("_gn_warm_worker failed", exc_info=True)
                     pass
                 await asyncio.sleep(_GN_WARM_GAP)
     except Exception:  # noqa: BLE001
@@ -1816,6 +1841,7 @@ def _xlib_on() -> bool:
     try:
         return bool(config.get().get("pan_lib_enabled", True)) and features.CATVOD
     except Exception:
+        _log.debug("_xlib_on failed", exc_info=True)
         return False
 
 
@@ -1831,6 +1857,7 @@ def _xlib_active_cats() -> list[dict]:
         # 调 ensure_build 增量构建该分类（只读 fs/list 条目名，不触发转存）。
         return [xlib.cat_by_id(c[0]) for c in xlib.CATEGORIES]
     except Exception:
+        _log.debug("_xlib_active_cats failed", exc_info=True)
         return []
 
 
@@ -1843,6 +1870,7 @@ def _xlib_cat(lib_guid: str) -> dict | None:
             if xlib.lib_guid(c[0]) == lib_guid:
                 return xlib.cat_by_id(c[0])
     except Exception:
+        _log.debug("_xlib_cat failed: lib_guid=%s", lib_guid, exc_info=True)
         return None
     return None
 
@@ -1867,6 +1895,7 @@ def any_virtual_lib_enabled() -> bool:
         if features.GUARD and guard_native_enabled():
             return True
     except Exception:  # noqa: BLE001
+        _log.debug("any_virtual_lib_enabled failed", exc_info=True)
         pass
     # <<< PRIVATE:GUARD
     return False
@@ -1951,6 +1980,7 @@ def _persist_chart_binding(guid: str, bound: dict) -> None:
         if prewarm_persist_mode() and guid and bound:
             chartbind.bind_store.remember(guid, bound)
     except Exception:
+        _log.debug("_persist_chart_binding failed: guid=%s", guid, exc_info=True)
         pass
 
 
@@ -1981,9 +2011,11 @@ def _restore_chart_bindings() -> int:
                     store.remember_merged([b])
                     restored += 1
                 except Exception:
+                    _log.debug("_restore_chart_bindings failed", exc_info=True)
                     pass
         return restored
     except Exception:
+        _log.debug("_restore_chart_bindings failed", exc_info=True)
         return 0
 
 
@@ -2071,6 +2103,7 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
                 _CHART_FAILED_TS[guid] = time.time()
             fut.set_result(best)
         except Exception:
+            _log.debug("work failed", exc_info=True)
             fut.set_result(None)
         finally:
             _chart_resolving.pop(guid, None)
@@ -2187,6 +2220,7 @@ async def _pan_cache_cleanup_once() -> dict:
     try:
         cfg = config.get()
     except Exception:
+        _log.debug("_pan_cache_cleanup_once failed", exc_info=True)
         return out
     if not bool(cfg.get("pan_cache_cleanup_enabled", True)):
         return out
@@ -2198,6 +2232,7 @@ async def _pan_cache_cleanup_once() -> dict:
         try:
             mod = __import__(modname)
         except Exception:
+            _log.debug("_pan_cache_cleanup_once failed", exc_info=True)
             continue
         try:
             if not getattr(mod, "logged_in", lambda: False)():
@@ -2235,6 +2270,7 @@ async def lifespan(app: FastAPI):
                     if bool(config.get().get("pan_cache_cleanup_enabled", True)):
                         await _pan_cache_cleanup_once()
                 except Exception:
+                    _log.debug("_pan_cache_loop failed", exc_info=True)
                     pass
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
@@ -2255,6 +2291,7 @@ async def lifespan(app: FastAPI):
         if prewarm_persist_mode():
             linepredict.set_persist(True)
     except Exception:  # noqa: BLE001
+        _log.debug("lifespan failed", exc_info=True)
         pass
 
     # 源健康画像：每 5 分钟把内存统计落盘一次（热路径零 IO）
@@ -2264,6 +2301,7 @@ async def lifespan(app: FastAPI):
             try:
                 await asyncio.to_thread(sourcehealth.flush)
             except Exception:
+                _log.debug("_health_flush_loop failed", exc_info=True)
                 pass
     app.state.health_task = asyncio.create_task(_health_flush_loop())
 
@@ -2314,12 +2352,14 @@ async def lifespan(app: FastAPI):
         try:
             app.state.pan_cache_task.cancel()
         except Exception:
+            _log.debug("lifespan failed", exc_info=True)
             pass
         # >>> PRIVATE:GUARD
         try:
             app.state.stop_guard_native.set()
             app.state.guard_native_task.cancel()
         except Exception:
+            _log.debug("lifespan failed", exc_info=True)
             pass
         # <<< PRIVATE:GUARD
         try:
@@ -2329,10 +2369,12 @@ async def lifespan(app: FastAPI):
         try:
             app.state.health_task.cancel()
         except Exception:
+            _log.debug("lifespan failed", exc_info=True)
             pass
         try:
             await asyncio.to_thread(sourcehealth.flush)
         except Exception:
+            _log.debug("lifespan failed", exc_info=True)
             pass
         try:
             app.state.stop_update.set()
@@ -2347,6 +2389,7 @@ async def lifespan(app: FastAPI):
         try:
             await asyncio.to_thread(store.close)
         except Exception:
+            _log.debug("lifespan failed", exc_info=True)
             pass
 
 
@@ -2382,6 +2425,7 @@ async def _hot_worker(app: FastAPI):
                         await asyncio.wait_for(catalog.get_window(_cat, 0, 22),
                                                timeout=25)
                 except Exception:
+                    _log.debug("_hot_worker failed", exc_info=True)
                     pass
         try:
             await asyncio.wait_for(app.state.stop_hot.wait(), timeout=300)
@@ -2452,6 +2496,7 @@ async def _access(request: Request, call_next):
                     _hist_tokens = histmod.set_current_user(
                         _u.get("guid"), bool(_u.get("is_admin")))
     except Exception:
+        _log.debug("_access failed", exc_info=True)
         _hist_tokens = None
         _marks_tokens = None
     try:
@@ -2530,6 +2575,7 @@ def _live_title_for(path: str, query_params) -> str:
             if tgt:
                 return (tgt.get("ep_title") or tgt.get("title") or "")[:40]
     except Exception:
+        _log.debug("_live_title_for failed", exc_info=True)
         pass
     return ""
 
@@ -2556,6 +2602,7 @@ def _live_record(request: Request, status: int, path: str) -> None:
                        request.method, path, _diagnostic_query(request), status,
                        origin, title=title, stage=stage, note=note)
     except Exception:
+        _log.debug("_live_record failed", exc_info=True)
         pass  # 诊断本身绝不影响正常请求
 
 
@@ -2641,6 +2688,7 @@ async def forward_upstream(request: Request) -> Response:
     try:
         request.state.live_upstream = True
     except Exception:
+        _log.debug("forward_upstream failed", exc_info=True)
         pass
     client = up_client(request)
     url = "http://localhost" + request.url.path
@@ -2653,6 +2701,7 @@ async def forward_upstream(request: Request) -> Response:
     try:
         r = await client.request(request.method, url, headers=headers, content=body)
     except Exception as exc:
+        _log.debug("forward_upstream failed", exc_info=True)
         return JSONResponse({"code": -1, "msg": f"upstream {type(exc).__name__}", "data": None},
                             status_code=502)
     resp_headers = _safe_response_headers(r.headers)
@@ -2670,6 +2719,7 @@ async def forward_upstream_streaming(request: Request) -> Response:
     try:
         request.state.live_upstream = True
     except Exception:
+        _log.debug("forward_upstream_streaming failed", exc_info=True)
         pass
     client = up_client(request)
     url = "http://localhost" + request.url.path
@@ -2686,6 +2736,7 @@ async def forward_upstream_streaming(request: Request) -> Response:
     try:
         up = await client.send(req, stream=True)
     except Exception as exc:
+        _log.debug("forward_upstream_streaming failed", exc_info=True)
         return JSONResponse({"code": -1, "msg": f"upstream {type(exc).__name__}",
                              "data": None}, status_code=502)
 
@@ -2721,6 +2772,7 @@ async def forward_upstream_streaming(request: Request) -> Response:
                 _v.encode("latin-1")
                 resp_headers[_k] = _v
             except Exception:
+                _log.debug("forward_upstream_streaming failed", exc_info=True)
                 pass
 
     async def gen():
@@ -2730,6 +2782,7 @@ async def forward_upstream_streaming(request: Request) -> Response:
                     yield chunk
         except Exception:
             # 客户端拖动/中断会触发取消：静默结束，连接由 finally 归还
+            _log.debug("gen failed", exc_info=True)
             pass
         finally:
             await up.aclose()
@@ -2779,6 +2832,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         try:
             return [dict(b) for b in await _fut]
         except Exception:
+            _log.debug("_aggregate_briefs failed", exc_info=True)
             pass  # 前次扇出失败则自己重试
     fut = loop.create_future()
     _AGG_INFLIGHT[cache_key] = fut
@@ -2790,6 +2844,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         try:
             store.remember_merged(result)
         except Exception:
+            _log.debug("_aggregate_briefs failed", exc_info=True)
             pass
         _AGG_CACHE[cache_key] = (time.time(), result)
         if len(_AGG_CACHE) > _AGG_CACHE_MAX:
@@ -2799,6 +2854,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
             fut.set_result(result)
         return [dict(b) for b in result]
     except Exception as exc:
+        _log.debug("_aggregate_briefs failed", exc_info=True)
         if not fut.done():
             fut.set_exception(exc)
         raise
@@ -2869,6 +2925,7 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             if catalogmod.is_redline(t.title, t.remarks):
                 continue
         except Exception:
+            _log.debug("__aggregate_briefs_inner failed", exc_info=True)
             pass
         if t.provider not in loose_ids and config.is_junk(t.title, t.remarks):
             continue
@@ -2945,6 +3002,7 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             _route_cat = catalog.cat_for_source_type(
                 g["rep"].provider, getattr(g["rep"], "type_id", "") or "")
         except Exception:
+            _log.debug("__aggregate_briefs_inner failed", exc_info=True)
             _route_cat = None
         brief["catalog_route"] = {
             "source": g["rep"].provider,
@@ -2957,6 +3015,7 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             brief["_pan"] = _pl
             brief["_health"] = _hg
         except Exception:  # noqa: BLE001
+            _log.debug("__aggregate_briefs_inner failed", exc_info=True)
             pass
         briefs.append(brief)
     return store.remember_merged((remote + briefs)[:maxn])
@@ -2999,6 +3058,7 @@ async def online_search(keyword: str, client: httpx.AsyncClient,
                     inj.brief_of(title), _ctx.can_open_key,
                     gkey_of=_ctx.gkey_of_source)
             except Exception:
+                _log.debug("visible failed: title=%s", title, exc_info=True)
                 return False
     briefs = await _aggregate_briefs(
         keyword, fast_only=fast_only, timeout=timeout,
@@ -3094,6 +3154,7 @@ def _brief_poster_badged(brief: dict) -> str:
     try:
         return inj._poster_badged(cover, pan_label, grade)
     except Exception:  # noqa: BLE001
+        _log.debug("_brief_poster_badged failed", exc_info=True)
         return inj._poster(cover)
 
 
@@ -3212,6 +3273,7 @@ async def _json_from_upstream(upstream: Response) -> dict | None:
         data = json.loads(upstream.body)
         return data if isinstance(data, dict) else None
     except Exception:
+        _log.debug("_json_from_upstream failed", exc_info=True)
         return None
 
 
@@ -3237,6 +3299,7 @@ async def guard_tag_genres(request: Request):
             payload["data"] = data
             return JSONResponse(payload)
     except Exception:  # noqa: BLE001
+        _log.debug("guard_tag_genres failed", exc_info=True)
         pass
     return resp
 
@@ -3261,6 +3324,7 @@ async def guard_tag_iso3166(request: Request):
             payload["data"] = data
             return JSONResponse(payload)
     except Exception:  # noqa: BLE001
+        _log.debug("guard_tag_iso3166 failed", exc_info=True)
         pass
     return resp
 
@@ -3287,6 +3351,7 @@ async def guard_native_tag_list(request: Request):
                     _gn_prefetch_category(_k, str(_cs[0].get("tid") or ""),
                                           1, None, _ft)
         except Exception:  # noqa: BLE001
+            _log.debug("guard_native_tag_list failed", exc_info=True)
             pass
         return JSONResponse({"code": 0, "msg": "",
                              "data": _gn_tag_filter_payload()})
@@ -3309,6 +3374,7 @@ def _all_virtual_lib_guids() -> set[str]:
         for cat in _xlib_active_cats():
             guids.add(xlib.lib_guid(cat["id"]))
     except Exception:
+        _log.debug("_all_virtual_lib_guids failed", exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     if hgdj_enabled():
@@ -3369,6 +3435,7 @@ class _ViewerCtx:
             try:
                 self._user = fnusersmod.resolve(self.request)
             except Exception:
+                _log.debug("user failed", exc_info=True)
                 self._user = {"known": False, "guid": "", "name": "",
                               "is_admin": False, "token": ""}
         return self._user
@@ -3381,6 +3448,7 @@ class _ViewerCtx:
                     standalone_lib_guid(s["id"]): s["id"]
                     for s in config.all_sources()}
             except Exception:
+                _log.debug("_standalone_map failed", exc_info=True)
                 self._standalone_by_guid = {}
         return self._standalone_by_guid
 
@@ -3394,6 +3462,7 @@ class _ViewerCtx:
                         self._guard_by_guid[guard_lib_guid(g["conf"]["key"])] = \
                             vlibsmod.make_key(vlibsmod.K_GUARD, g["conf"]["key"])
                 except Exception:
+                    _log.debug("_guard_map failed", exc_info=True)
                     pass
         return self._guard_by_guid
 
@@ -3407,6 +3476,7 @@ class _ViewerCtx:
                     for s in config.all_sources()
                     if s.get("guard") and s.get("guard" + "_key")}
             except Exception:
+                _log.debug("_gkey_map failed", exc_info=True)
                 self._gkey_by_provider = {}
         return self._gkey_by_provider
 
@@ -3421,6 +3491,7 @@ class _ViewerCtx:
                     self._xlib_by_guid[xlib.lib_guid(cat["id"])] = \
                         vlibsmod.make_key(vlibsmod.K_XLIB, cat["id"])
             except Exception:
+                _log.debug("_xlib_map failed", exc_info=True)
                 pass
             # <<< PRIVATE:CATVOD
         return self._xlib_by_guid
@@ -3440,6 +3511,7 @@ class _ViewerCtx:
             if t4_browser.node(guid):
                 return vlibsmod.K_T4
         except Exception:
+            _log.debug("_vkey_for_guid_uncached failed: guid=%s", guid, exc_info=True)
             pass
         k = vlibsmod.key_of_guid(_canonical_lib_guid(guid))
         if k:
@@ -3459,6 +3531,7 @@ class _ViewerCtx:
                 if guid == hgdjmod.lib_guid():
                     return vlibsmod.K_HGDJ
             except Exception:
+                _log.debug("_vkey_for_guid_uncached failed: guid=%s", guid, exc_info=True)
                 pass
         return None
 
@@ -3514,12 +3587,14 @@ def _viewer_ctx(request):
     try:
         ctx = getattr(request.state, "_fnmedia_viewer_ctx", None)
     except Exception:
+        _log.debug("_viewer_ctx failed", exc_info=True)
         ctx = None
     if ctx is None:
         ctx = _ViewerCtx(request)
         try:
             request.state._fnmedia_viewer_ctx = ctx
         except Exception:
+            _log.debug("_viewer_ctx failed", exc_info=True)
             pass
     return ctx
 
@@ -3542,6 +3617,7 @@ def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
         if t4_browser.node(guid):
             return vlibsmod.K_T4
     except Exception:
+        _log.debug("_vkey_for_guid failed: guid=%s", guid, exc_info=True)
         pass
     k = vlibsmod.key_of_guid(_canonical_lib_guid(guid))
     if k:
@@ -3555,6 +3631,7 @@ def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
                 if guard_lib_guid(g["conf"]["key"]) == guid:
                     return vlibsmod.make_key(vlibsmod.K_GUARD, g["conf"]["key"])
         except Exception:
+            _log.debug("_vkey_for_guid failed: guid=%s", guid, exc_info=True)
             pass
     # >>> PRIVATE:CATVOD
     try:
@@ -3563,6 +3640,7 @@ def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
             if xlib.lib_guid(cat["id"]) == guid:
                 return vlibsmod.make_key(vlibsmod.K_XLIB, cat["id"])
     except Exception:
+        _log.debug("_vkey_for_guid failed: guid=%s", guid, exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     if hgdj_enabled():
@@ -3570,6 +3648,7 @@ def _vkey_for_guid(guid: str, _ctx=None) -> str | None:
             if guid == hgdjmod.lib_guid():
                 return vlibsmod.K_HGDJ
         except Exception:
+            _log.debug("_vkey_for_guid failed: guid=%s", guid, exc_info=True)
             pass
     return None
 
@@ -3605,6 +3684,7 @@ def _lib_guid_for_key(key: str) -> str | None:
         try:
             return hgdjmod.lib_guid()
         except Exception:
+            _log.debug("_lib_guid_for_key failed", exc_info=True)
             return None
     kind, _, ident = key.partition(":")
     if kind == vlibsmod.K_CHART:
@@ -3652,6 +3732,7 @@ def _gkey_of_source(provider: str, _ctx=None) -> str | None:
                 # 配置字典键用拼接写，避免触发公开剥离的残留扫描针。
                 return s.get("guard" + "_key") or None
     except Exception:
+        _log.debug("_gkey_of_source failed", exc_info=True)
         return None
     return None
 
@@ -3897,6 +3978,7 @@ async def mediadb_list(request: Request):
                     if len(ps) >= 8:
                         break
             except Exception:
+                _log.debug("mediadb_list failed", exc_info=True)
                 pass
             inserts.append({
                 "guid": standalone_lib_guid(scope),
@@ -4019,6 +4101,7 @@ async def mediadb_list(request: Request):
                 guid2key[xlib.lib_guid(cat["id"])] = vlibsmod.make_key(
                     vlibsmod.K_XLIB, cat["id"])
         except Exception:
+            _log.debug("mediadb_list failed", exc_info=True)
             pass
         # <<< PRIVATE:CATVOD
         if hgdj_enabled():
@@ -4131,6 +4214,7 @@ async def mdb_detail(guid: str, request: Request):
             posters = await posters_for([it.get("cover") or ""
                                          for it in chart_cache.items(cat)])
         except Exception:
+            _log.debug("mdb_detail failed: guid=%s", guid, exc_info=True)
             posters = []
         payload = {
             "guid": guid,
@@ -4154,6 +4238,7 @@ async def mdb_detail(guid: str, request: Request):
                 posters = [inj._poster(p)
                            for p in catalog.cached_page_posters(cat, 8)]
         except Exception:
+            _log.debug("mdb_detail failed: guid=%s", guid, exc_info=True)
             posters = []
         payload = {
             "guid": guid,
@@ -4205,6 +4290,7 @@ async def mdb_detail(guid: str, request: Request):
                         break
             posters = [inj._poster(p) for p in ps[:8]]
         except Exception:
+            _log.debug("mdb_detail failed: guid=%s", guid, exc_info=True)
             posters = []
         payload = {
             "guid": guid, "name": standalone_lib_name(src),
@@ -4360,6 +4446,7 @@ async def mediadb_sum(request: Request):
                 payload["data"][xlib.lib_guid(cat["id"])] = n
                 total_added += n
     except Exception:
+        _log.debug("mediadb_sum failed", exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     # 红果短剧计数（缺省关闭；未载入则为 0）
@@ -4727,6 +4814,7 @@ def _parse_line_season_guid(guid: str) -> tuple[str, str, int] | None:
         og, line, season = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
         return og, line, int(season or 1)
     except Exception:
+        _log.debug("_parse_line_season_guid failed: guid=%s", guid, exc_info=True)
         return None
 
 
@@ -4756,6 +4844,7 @@ def _parse_line_item_guid(guid: str) -> tuple[str, str, int] | None:
         og, line, index = base64.urlsafe_b64decode(token.encode()).decode().split("|", 2)
         return og, line, int(index or 0)
     except Exception:
+        _log.debug("_parse_line_item_guid failed: guid=%s", guid, exc_info=True)
         return None
 
 
@@ -4799,6 +4888,7 @@ def _provider_display(provider: str) -> str:
         if s and str(s.get("name") or "").strip():
             return str(s["name"]).strip()
     except Exception:
+        _log.debug("_provider_display failed", exc_info=True)
         pass
     return _PROVIDER_CN.get(provider, provider)
 
@@ -4816,6 +4906,7 @@ def _vod_line_card(brief: dict, line: str, index: int, parent: str) -> dict:
         try:
             ep_count = len(store.list_episodes(og, line))
         except Exception:
+            _log.debug("_vod_line_card failed: line=%s", line, exc_info=True)
             ep_count = int(row.get("number_of_episodes") or 0)
         row.update({
             "type": "TV",
@@ -4927,6 +5018,7 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
             try:
                 await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
             except Exception:
+                _log.debug("_vod_line_folder failed", exc_info=True)
                 pass
         brief = store.get_title_by_guid(parent)
     title = (brief or chart_cache.get_guid(parent) or {}).get("title", "")
@@ -4968,6 +5060,7 @@ def _diag_play_info(guid: str, info: dict) -> dict:
     try:
         resume_diagmod.note_info(guid, info)
     except Exception:
+        _log.debug("_diag_play_info failed: guid=%s", guid, exc_info=True)
         pass
     return info
 
@@ -4982,10 +5075,12 @@ def _diag_record_canon_key(ig: str) -> str | None:
         if isinstance(rec, dict) and rec.get("canon_key"):
             return str(rec["canon_key"])
     except Exception:
+        _log.debug("_diag_record_canon_key failed", exc_info=True)
         pass
     try:
         return histmod.canonical_key_for_guid(ig)
     except Exception:
+        _log.debug("_diag_record_canon_key failed", exc_info=True)
         return None
 
 
@@ -5123,7 +5218,8 @@ async def item_list(request: Request):
     raw = await request.body()
     try:
         body = json.loads(raw or b"{}")
-    except Exception:
+    except ValueError:
+        _log.debug("item_list failed", exc_info=True)
         body = {}
     aguid = body.get("ancestor_guid") or body.get("parent_guid") or body.get("guid")
     client = _client_of(request)
@@ -5376,6 +5472,7 @@ async def item_list(request: Request):
         if chart_cache.stale(interval) and not chart_cache._refreshing:
             asyncio.create_task(chart_cache.refresh(force=True))
     except Exception:
+        _log.debug("item_list failed", exc_info=True)
         pass
     all_rows = _chart_rows_all(body, cat)
     page_size, start, end = _page_args(body, len(all_rows))
@@ -6137,6 +6234,7 @@ async def _stream_list_impl(guid: str, request: Request):
                             _get_playlist_cached(mg, probe_target, request),
                             timeout=_DURATION_PROBE_TIMEOUT)
                     except Exception:
+                        _log.debug("_stream_list_impl failed: guid=%s", guid, exc_info=True)
                         body = None
                     if body and body is not _NOT_HLS:
                         dur = _playlist_total_seconds(body)
@@ -6147,6 +6245,7 @@ async def _stream_list_impl(guid: str, request: Request):
                     probe_target.get("online_guid", ""),
                     probe_target.get("index", 0), dur)
     except Exception:
+        _log.debug("_stream_list_impl failed: guid=%s", guid, exc_info=True)
         pass
     # 打开详情/线路菜单即后台预热默认线路播放列表（单飞，真正取 main 时并入）
     if target:
@@ -6279,6 +6378,7 @@ def _mark_lib_keys(guid: str) -> list:
             return sorted(libfiltermod.brief_lib_keys(
                 brief, gkey_of=_gkey_of_source))
         except Exception:
+            _log.debug("_mark_lib_keys failed: guid=%s", guid, exc_info=True)
             return []
     if chart_cache.is_chart_guid(guid):
         return sorted(_chart_extra_keys(guid))
@@ -6310,6 +6410,7 @@ async def item_favorite_add(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("item_favorite_add failed", exc_info=True)
         body = {}
     guid = _normalize_history_guid(
         (body.get("guid") or body.get("item_guid") or "").strip())
@@ -6324,6 +6425,7 @@ async def item_favorite_del(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("item_favorite_del failed", exc_info=True)
         body = {}
     guid = _normalize_history_guid(
         (body.get("guid") or body.get("item_guid") or "").strip())
@@ -6338,6 +6440,7 @@ async def item_watched_set(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("item_watched_set failed", exc_info=True)
         body = {}
     guid = _normalize_history_guid(
         (body.get("guid") or body.get("item_guid") or "").strip())
@@ -6361,6 +6464,7 @@ async def item_watched_del(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("item_watched_del failed", exc_info=True)
         body = {}
     guid = _normalize_history_guid(
         (body.get("guid") or body.get("item_guid") or "").strip())
@@ -6439,11 +6543,13 @@ async def favorite_list(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("favorite_list failed", exc_info=True)
         body = {}
     local = await forward_upstream(request)
     try:
         ldata = json.loads(local.body)
     except Exception:
+        _log.debug("favorite_list failed", exc_info=True)
         return local
     if not isinstance(ldata, dict):
         return local
@@ -7190,6 +7296,7 @@ async def direct_proxy(mg: str, request: Request):
                         "GET", target["url"], headers=fwd)
                     r = await ext_client(request).send(req, stream=True)
                 except Exception as exc2:
+                    _log.debug("direct_proxy failed", exc_info=True)
                     return _direct_to_placeholder(mg, request)
             else:
                 return _direct_to_placeholder(mg, request)
@@ -7247,6 +7354,7 @@ async def play_record(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("play_record failed", exc_info=True)
         body = {}
     ig = body.get("item_guid", "")
     raw_guid = ig
@@ -7265,6 +7373,7 @@ async def play_record(request: Request):
                                        outcome="history", parsed=parsed,
                                        canon_key=_diag_record_canon_key(ig))
         except Exception:
+            _log.debug("play_record failed", exc_info=True)
             pass
         return JSONResponse({"code": 0, "msg": "", "data": True})
     try:
@@ -7272,6 +7381,7 @@ async def play_record(request: Request):
                                    outcome="upstream", parsed=parsed,
                                    canon_key=_diag_record_canon_key(ig))
     except Exception:
+        _log.debug("play_record failed", exc_info=True)
         pass
     return await forward_upstream(request)
 
@@ -7290,6 +7400,7 @@ async def play_record_delete(request: Request):
             elif isinstance(j, list):
                 ids = [x.get("item_guid") if isinstance(x, dict) else x for x in j]
     except Exception:
+        _log.debug("play_record_delete failed", exc_info=True)
         ids = []
     ids = [_normalize_history_guid(g) for g in ids
            if g and (store.get_title_by_guid(_normalize_history_guid(g))
@@ -7307,6 +7418,7 @@ async def play_list(request: Request):
         import json
         data = json.loads(upstream.body)
     except Exception:
+        _log.debug("play_list failed", exc_info=True)
         return upstream
     local_items = data.get("data") if isinstance(data, dict) else None
     if not isinstance(local_items, list):
@@ -7348,6 +7460,7 @@ async def media_p(request: Request):
     try:
         body = json.loads(await request.body() or b"{}")
     except Exception:
+        _log.debug("media_p failed", exc_info=True)
         body = {}
     link = body.get("playLink", "")
     try:
@@ -7490,6 +7603,7 @@ def _dodge_known_bad(picked: dict, request: Request) -> dict:
             sk = sourcehealth.source_key_of(p.get("line"), p)
             return bool(sk) and sourcehealth.is_dead(sk, level="stream")
         except Exception:
+            _log.debug("_is_bad failed", exc_info=True)
             return False
 
     if not _is_bad(picked):
@@ -7620,6 +7734,7 @@ async def _resolve_catvod(picked: dict) -> bool:
         picked["m3u8"] = path.endswith(".m3u8")
         return True
     except Exception:
+        _log.debug("_resolve_catvod failed", exc_info=True)
         return False
 # <<< PRIVATE:CATVOD
 
@@ -7661,6 +7776,7 @@ async def _resolve_drpy(picked: dict) -> bool:
         # JS 解出的多为 CDN 直链/m3u8，走正常直链/HLS 代理（不像小雅必须客户端直连）
         return True
     except Exception:
+        _log.debug("_resolve_drpy failed", exc_info=True)
         return False
 # <<< PRIVATE:DRPY
 
@@ -7735,6 +7851,7 @@ async def _msearch_resolve_one(key: str, vid: str, want_idx: int,
             asyncio.to_thread(guard.detail, conf, vid),
             timeout=_MSEARCH_SEARCH_TIMEOUT)
     except Exception:  # noqa: BLE001
+        _log.debug("_msearch_resolve_one failed: vid=%s", vid, exc_info=True)
         return None
     eps = guard.parse_episodes(det) if det else []
     if not eps:
@@ -7755,6 +7872,7 @@ async def _msearch_resolve_one(key: str, vid: str, want_idx: int,
                 asyncio.to_thread(guard.play, conf, line, ep["id"]),
                 timeout=_MSEARCH_SEARCH_TIMEOUT)
         except Exception:  # noqa: BLE001
+            _log.debug("_msearch_resolve_one failed: vid=%s", vid, exc_info=True)
             res = {}
         url = (res or {}).get("url", "")
         if url:
@@ -7793,6 +7911,7 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
                         guard.search, g["conf"], title, False, 1),
                         timeout=_MSEARCH_SEARCH_TIMEOUT)
                 except Exception:  # noqa: BLE001
+                    _log.debug("_search_one failed", exc_info=True)
                     return None
                 if hits and str(hits[0].get("vod_id", "")):
                     return g["key"], str(hits[0]["vod_id"]), ""
@@ -7836,6 +7955,7 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         _MSEARCH_CACHE[title] = (now, key, vid, line)
         return True
     except Exception:  # noqa: BLE001
+        _log.debug("_resolve_guard_msearch failed", exc_info=True)
         return False
 
 
@@ -7883,6 +8003,7 @@ async def _resolve_guard_pan(picked: dict) -> bool:
     try:
         r = await asyncio.to_thread(mod.resolve_share, share, hint)
     except Exception:  # noqa: BLE001
+        _log.debug("_resolve_guard_pan failed", exc_info=True)
         return False
     items = [x for x in (r.get("items") or []) if x.get("url")]
     if not items:
@@ -8037,6 +8158,7 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
                     _GUARD_RES_CACHE.pop(old, None)
         return True
     except Exception:
+        _log.debug("_resolve_guard_once failed", exc_info=True)
         return False
 # <<< PRIVATE:GUARD
 
@@ -8082,7 +8204,8 @@ async def _resolve_spider(picked: dict) -> bool:
         if isinstance(res, str) and res.strip().startswith("{"):
             try:
                 res = json.loads(res)
-            except Exception:
+            except ValueError:
+                _log.debug("_resolve_spider failed", exc_info=True)
                 res = {"url": res}
         url = (res or {}).get("url", "") if isinstance(res, dict) else str(res or "")
         url = guard._normalize_url(url)
@@ -8095,6 +8218,7 @@ async def _resolve_spider(picked: dict) -> bool:
         picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
         return True
     except Exception:
+        _log.debug("_resolve_spider failed", exc_info=True)
         return False
 # <<< PRIVATE:SPIDER
 
@@ -8137,6 +8261,7 @@ def _autofail_on() -> bool:
     try:
         return bool(config.get().get("line_autofail", True))
     except Exception:
+        _log.debug("_autofail_on failed", exc_info=True)
         return True
 
 
@@ -8150,6 +8275,7 @@ def _source_health_enabled() -> bool:
     try:
         return bool(config.get().get("source_health_enabled", True))
     except Exception:
+        _log.debug("_source_health_enabled failed", exc_info=True)
         return True
 
 
@@ -8161,6 +8287,7 @@ def _domain_heal_enabled() -> bool:
     try:
         return bool(config.get().get("domain_heal_enabled", True))
     except Exception:
+        _log.debug("_domain_heal_enabled failed", exc_info=True)
         return True
 
 
@@ -8248,13 +8375,16 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         body = await r.aread()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
                 finally:
                     try:
                         await r.aclose()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
             except Exception:
+                _log.debug("_probe_latency failed", exc_info=True)
                 return None
             if status >= 400:
                 return None
@@ -8311,6 +8441,7 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         head = await sr.aread()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
                     # 源站对失效分片常回 200/404 + XML/HTML 错误页（非媒体）
                     if not head or head[:1] in (b"<", b"{", b"["):
@@ -8319,11 +8450,14 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         await sr.aclose()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
         except Exception:
+            _log.debug("_probe_latency failed", exc_info=True)
             return None
         return time.time() - t0
     except Exception:
+        _log.debug("_probe_latency failed", exc_info=True)
         return None
 
 
@@ -8377,6 +8511,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
                 headers["Cookie"] = _panu.auth_cookie_or_raise()
                 headers.setdefault("Referer", "https://drive.uc.cn/")
         except Exception:
+            _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
             pass
         # <<< PRIVATE:GUARD
         headers["Range"] = _PROBE_RANGE
@@ -8390,6 +8525,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
             try:
                 b = await r.aread()
             except Exception:
+                _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
                 return True  # 读体失败不判死
             if not b or b[:1] in (b"<", b"{", b"["):
                 return False
@@ -8397,6 +8533,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
             try:
                 await r.aclose()
             except Exception:
+                _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
                 pass
         _SEG_OK_CACHE[real] = now
         if len(_SEG_OK_CACHE) > 1500:
@@ -8404,6 +8541,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
                 _SEG_OK_CACHE.pop(old, None)
         return True
     except Exception:
+        _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
         return True  # 探测本身异常：保守放行，避免误伤好线
 
 
@@ -8449,14 +8587,17 @@ async def _http_head_ok(url: str, headers: dict) -> bool:
             try:
                 b = await r.aread()
             except Exception:
+                _log.debug("_http_head_ok failed", exc_info=True)
                 pass
             return bool(b) and b[:1] not in (b"<", b"{", b"[")
         finally:
             try:
                 await r.aclose()
             except Exception:
+                _log.debug("_http_head_ok failed", exc_info=True)
                 pass
     except Exception:
+        _log.debug("_http_head_ok failed", exc_info=True)
         return False
 
 
@@ -8539,6 +8680,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
                     if not await _http_head_ok(seg_url, hdrs):
                         continue
                 except Exception:
+                    _log.debug("evaluate failed", exc_info=True)
                     continue
                 # 命中：记录可播 og，并补一条可解析线路到该 og（_pick_episode 用）
                 if mg:
@@ -8553,6 +8695,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
         if await evaluate(briefs, True):
             return True
     except Exception:
+        _log.debug("_resurrect_worker failed", exc_info=True)
         pass
     try:
         briefs = await asyncio.wait_for(
@@ -8560,6 +8703,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
         if await evaluate(briefs, False):
             return True
     except Exception:
+        _log.debug("_resurrect_worker failed", exc_info=True)
         pass
     _RESURRECT_FAIL[nkey] = time.time()
     return False
@@ -8594,6 +8738,7 @@ def _remember_fast(picked: dict, line: str, latency: float | None = None) -> Non
             _episode_key(picked), line,
             float(latency) if latency is not None else 0.0)
     except Exception:
+        _log.debug("_remember_fast failed: line=%s", line, exc_info=True)
         pass
 
 
@@ -8621,6 +8766,7 @@ def _fastest_on() -> bool:
     try:
         return bool(config.get().get("line_fastest", True))
     except Exception:
+        _log.debug("_fastest_on failed", exc_info=True)
         return True
 
 
@@ -8679,11 +8825,13 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
         if bool(config.get().get("linepredict_enabled", True)):
             pred = linepredict.fastest(_episode_key(picked))
     except Exception:
+        _log.debug("_race_candidates failed", exc_info=True)
         pred = None
     cands = [c for c in cands if not _line_is_bad(c)] or cands
     try:
         n = int(config.get().get("line_fastest_max", 6))
     except Exception:
+        _log.debug("_race_candidates failed", exc_info=True)
         n = 6
     cands = cands[:max(2, n)]
 
@@ -8697,6 +8845,7 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
             sk = sourcehealth.source_key_of(c.get("line"), c)
             return bool(sk) and sourcehealth.is_dead(sk, level="stream")
         except Exception:
+            _log.debug("_src_dead failed", exc_info=True)
             return False
 
     def rank(c: dict) -> tuple:
@@ -9148,6 +9297,7 @@ def _cached_playlist_seconds(picked: dict) -> int:
     try:
         hit = _PLAYLIST_CACHE.get(_playlist_cache_key(picked))
     except Exception:
+        _log.debug("_cached_playlist_seconds failed", exc_info=True)
         return 0
     if not hit:
         return 0
@@ -9191,6 +9341,7 @@ def _remember_episode_duration(og: str, index: int, seconds: int) -> bool:
                 brief["duration"] = seconds
             store._schedule_flush()
     except Exception:
+        _log.debug("_remember_episode_duration failed", exc_info=True)
         return False
     return True
 
@@ -9206,6 +9357,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             rec = history.get(ep["ep_guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             rec = None
         if rec:
             dur = int(rec.get("duration", 0) or 0)
@@ -9214,6 +9366,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             target = store.get_episode_target(ep["ep_guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             target = None
         if target:
             dur = _cached_playlist_seconds(target)
@@ -9229,6 +9382,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             rec = history.get(brief["guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             rec = None
         if rec:
             dur = int(rec.get("duration", 0) or 0)
@@ -9237,6 +9391,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             line = store.best_line(brief["guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             line = None
         if line:
             dur = _cached_playlist_seconds(
@@ -9255,6 +9410,7 @@ def _attach_play_duration(info: dict, *, ep: dict | None = None,
     try:
         dur = _play_duration_for(ep, brief)
     except Exception:
+        _log.debug("_attach_play_duration failed: ep=%s", ep, exc_info=True)
         return info
     if dur:
         info["duration"] = dur
@@ -9303,6 +9459,7 @@ def _main_slow_budget() -> float:
     try:
         return config.main_ready_budget()
     except Exception:
+        _log.debug("_main_slow_budget failed", exc_info=True)
         return 2.4
 
 
@@ -9726,6 +9883,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     except StopAsyncIteration:
         first = b""
     except Exception:  # noqa: BLE001
+        _log.debug("_try_stream_segment failed", exc_info=True)
         await rs.aclose()
         return None
     if first[:8] == b"\x89PNG\r\n\x1a\n":
@@ -9755,6 +9913,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
                 if nbytes and dt > 0.05:
                     _remember_speed(picked, nbytes / 1024.0 / dt)
             except Exception:
+                _log.debug("pump failed", exc_info=True)
                 pass
             await rs.aclose()
 
@@ -9836,6 +9995,7 @@ async def hls_seg(mg: str, request: Request):
     try:
         src_url = b64d(u)
     except Exception:
+        _log.debug("hls_seg failed", exc_info=True)
         return Response("bad u", status_code=400)
     await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
@@ -9866,6 +10026,7 @@ async def hls_seg(mg: str, request: Request):
             fwd["Cookie"] = _panu.auth_cookie_or_raise()
             fwd.setdefault("Referer", "https://drive.uc.cn/")
     except Exception:
+        _log.debug("hls_seg failed", exc_info=True)
         pass
     # <<< PRIVATE:GUARD
     # 加密 HLS 由本服务解密：不能按密文转发任意字节 Range，需完整拉取后回传纯 TS。
@@ -9921,6 +10082,7 @@ async def hls_seg(mg: str, request: Request):
                 ctype = "video/mp2t"
                 unwrapped = True
         except Exception:
+            _log.debug("hls_seg failed", exc_info=True)
             pass
     drop = {"content-security-policy"}
     if request.query_params.get("dec") == "1":
@@ -9966,6 +10128,7 @@ async def hls_compact(mg: str, request: Request):
             fwd["Cookie"] = _panu.auth_cookie_or_raise()
             fwd["Referer"] = "https://drive.uc.cn/"
     except Exception:
+        _log.debug("hls_compact failed", exc_info=True)
         pass
     # <<< PRIVATE:GUARD
     if request.headers.get("range"):
@@ -9984,6 +10147,7 @@ async def hls_compact(mg: str, request: Request):
             if payload is not body:
                 body, ctype = payload, "video/mp2t"
         except Exception:
+            _log.debug("hls_compact failed", exc_info=True)
             pass
     h = _safe_response_headers(r.headers, {"content-security-policy"})
     h["Access-Control-Allow-Origin"] = "*"
@@ -10015,6 +10179,7 @@ def _decode_poster_tok(tok: str) -> tuple[str, str, int | None]:
                 if j.get("h") is not None:
                     grade = int(j["h"])
         except Exception:
+            _log.debug("_decode_poster_tok failed", exc_info=True)
             url = raw
     return url, pan_label, grade
 
@@ -10039,6 +10204,7 @@ def _poster_fallback() -> Response:
             return Response(data, media_type="image/jpeg",
                             headers={"Cache-Control": "max-age=3600"})
     except Exception:  # noqa: BLE001
+        _log.debug("_poster_fallback failed", exc_info=True)
         pass
     svg = """<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
   <rect width="300" height="450" fill="#1f6feb"/>
@@ -10095,8 +10261,10 @@ async def _poster_upstream_get(request: Request, url: str):
             async with netutil.async_client(timeout=12.0) as cli:
                 r = await cli.get(url, headers=_poster_fetch_headers(url))
         except Exception:  # noqa: BLE001
+            _log.debug("_poster_upstream_get failed", exc_info=True)
             return None
     except Exception:  # noqa: BLE001
+        _log.debug("_poster_upstream_get failed", exc_info=True)
         return None
     if r is not None and r.status_code == 403:
         scheme = urllib.parse.urlsplit(url).scheme or "https"
@@ -10105,6 +10273,7 @@ async def _poster_upstream_get(request: Request, url: str):
         try:
             r = await ext_get_retry(request, url, headers=headers, tries=1)
         except Exception:  # noqa: BLE001
+            _log.debug("_poster_upstream_get failed", exc_info=True)
             return None
     return r
 
@@ -10124,6 +10293,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     try:
         u, pan_label, health_grade = _decode_poster_tok(tok_path)
     except Exception:
+        _log.debug("_serve_online_poster failed", exc_info=True)
         return _poster_fallback()
     if not u.startswith("http"):
         return _poster_fallback()
@@ -10156,6 +10326,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
                 if badged:
                     out_bytes, out_type = badged, "image/jpeg"
         except Exception:  # noqa: BLE001
+            _log.debug("_serve_online_poster failed", exc_info=True)
             pass
     return Response(content=out_bytes, status_code=200,
                     media_type=out_type,
@@ -10228,6 +10399,7 @@ async def ext_titles_cache(request: Request):
         p = store._state
         size = p.stat().st_size if p.exists() else 0
     except Exception:
+        _log.debug("ext_titles_cache failed", exc_info=True)
         size = 0
     with store._lock:
         entries = len(store._titles)
@@ -10240,6 +10412,7 @@ async def ext_titles_cache(request: Request):
                 store._dirty = True
             store._schedule_flush()
     except Exception:
+        _log.debug("ext_titles_cache failed", exc_info=True)
         pass
     return {"code": 0, "entries": entries, "bytes": size, "dirty": dirty}
 
@@ -10256,8 +10429,10 @@ async def ext_titles_cache_clear(request: Request):
         try:
             store._state.unlink(missing_ok=True)
         except Exception:
+            _log.debug("ext_titles_cache_clear failed", exc_info=True)
             pass
     except Exception as exc:
+        _log.debug("ext_titles_cache_clear failed", exc_info=True)
         return {"code": 5000, "msg": f"清空失败：{exc}"}
 
     def _restart():
@@ -10277,12 +10452,14 @@ def _cache_sizes() -> dict:
         out["titles"] = {"bytes": p.stat().st_size if p.exists() else 0,
                          "entries": len(store._titles), "label": "在线资源缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["titles"] = {"bytes": 0, "entries": 0, "label": "在线资源缓存"}
     try:
         cp = chartmod.STATE
         out["charts"] = {"bytes": cp.stat().st_size if cp.exists() else 0,
                          "label": "热门榜单缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["charts"] = {"bytes": 0, "label": "热门榜单缓存"}
     with catalog._lock:
         out["catalog"] = {"routes": len(catalog._routes),
@@ -10291,12 +10468,14 @@ def _cache_sizes() -> dict:
     try:
         out["search"] = {"entries": len(_search_cache), "label": "搜索结果内存缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["search"] = {"entries": 0, "label": "搜索结果内存缓存"}
     try:
         out["health"] = {"entries": len(sourcehealth.snapshot())
                          if hasattr(sourcehealth, "snapshot") else 0,
                          "label": "源健康画像"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["health"] = {"entries": 0, "label": "源健康画像"}
     return out
 
@@ -10322,17 +10501,20 @@ async def ext_cache_clear(request: Request):
         try:
             chart_cache.reset(); done.append("charts")
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "catalog" in targets:
         try:
             catalog.reset(); done.append("catalog")
             _schedule_routes_refresh()
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "health" in targets:
         try:
             sourcehealth.reset(); done.append("health")
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "titles" in targets:
         need_restart = True
@@ -10348,6 +10530,7 @@ async def ext_cache_clear(request: Request):
                     store._dirty = False
                 store._state.unlink(missing_ok=True)
             except Exception:
+                _log.debug("_clear_titles_restart failed", exc_info=True)
                 pass
             time.sleep(1.0)
             os.system("systemctl restart fnmedia-ext >/dev/null 2>&1 &")
@@ -10375,6 +10558,7 @@ def _admin_client_key(request: Request) -> str:
         if request.client and request.client.host:
             return request.client.host
     except Exception:
+        _log.debug("_admin_client_key failed", exc_info=True)
         pass
     return "unknown"
 
@@ -10403,6 +10587,7 @@ async def ext_admin_login(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_admin_login failed", exc_info=True)
         body = {}
     candidate = str((body or {}).get("token") or "")
     ip = _admin_client_key(request)
@@ -10439,6 +10624,7 @@ async def ext_admin_token_rotate(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_admin_token_rotate failed", exc_info=True)
         body = {}
     if not isinstance(body, dict) or body.get("confirm") is not True:
         return JSONResponse({"code": 400, "msg": "轮换须显式确认（confirm=true）"},
@@ -10597,6 +10783,7 @@ async def ext_favorite_enrich(request: Request):
     try:
         cands = [dict(b) for b in store._titles.values()] if hasattr(store, "_titles") else []
     except Exception:
+        _log.debug("ext_favorite_enrich failed", exc_info=True)
         cands = []
     out = []
     for r in recs:
@@ -10628,6 +10815,7 @@ async def ext_update_now(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_update_now failed", exc_info=True)
         body = {}
     if request.headers.get("x-fnmedia-admin") != "1" or body.get("confirm") is not True:
         return JSONResponse({"code": 403,
@@ -10701,6 +10889,7 @@ def _virtual_lib_list() -> list[dict]:
                         "title": cat["title"], "kind": "xlib",
                         "group": "xlib", "enabled": True, "count": 0})
     except Exception:
+        _log.debug("_virtual_lib_list failed", exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     if hgdj_enabled():
@@ -10794,6 +10983,7 @@ async def ext_local_libs(request: Request):
             libs.append({"guid": d.get("guid"),
                          "name": d.get("name") or d.get("mdb_name")})
     except Exception:
+        _log.debug("ext_local_libs failed", exc_info=True)
         pass
     return {"code": 0, "msg": "", "data": {"libs": libs}}
 
@@ -10824,6 +11014,7 @@ async def ext_hot_refresh(request: Request):
             await asyncio.wait_for(
                 catalog.refresh_routes(config.enabled_sources()), timeout=90)
     except Exception:
+        _log.debug("ext_hot_refresh failed", exc_info=True)
         pass
     return {"code": 0, "msg": "", "data": chart_cache.status()}
 
@@ -10927,6 +11118,7 @@ async def ext_set_config(request: Request):
         try:
             linepredict.set_persist(patch["prewarm_mode"] == "persist")
         except Exception:
+            _log.debug("ext_set_config failed", exc_info=True)
             pass
     if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
@@ -10961,6 +11153,7 @@ async def ext_set_subscription_proxy(request: Request):
                 test_ok = rr.status_code in (200, 204)
                 test_msg = f"HTTP {rr.status_code}"
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_set_subscription_proxy failed", exc_info=True)
             test_msg = f"{type(exc).__name__}: {str(exc)[:100]}"
     return {"code": 0, "msg": "",
             "data": {"proxy": subfetch.subscription_proxy(),
@@ -11013,6 +11206,7 @@ async def ext_set_source_proxy(request: Request):
             test_ok = rr.status_code == 200
             test_msg = f"{(src or {}).get('name', api[:30])} HTTP {rr.status_code} / {ms}ms"
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_set_source_proxy failed", exc_info=True)
             test_msg = f"{type(exc).__name__}: {str(exc)[:100]}"
     return {"code": 0, "msg": "",
             "data": {"proxy": netutil.source_proxy(),
@@ -11036,6 +11230,7 @@ def _schedule_routes_refresh():
     try:
         asyncio.create_task(_run_after_current())
     except Exception:
+        _log.debug("_schedule_routes_refresh failed", exc_info=True)
         pass
 
 
@@ -11089,6 +11284,7 @@ async def ext_source_loose(request: Request):
                         catalog._scanned_page, catalog._dense_count):
                 buf.pop(catalog._scope_key(sid, k[1]), None)
     except Exception:
+        _log.debug("ext_source_loose failed", exc_info=True)
         pass
     _schedule_routes_refresh()
     return {"code": 0, "msg": "ok"}
@@ -11183,6 +11379,7 @@ async def ext_source_health_check(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_source_health_check failed", exc_info=True)
         body = {}
     # 限制并发，避免一次性打爆源站
     try:
@@ -11197,6 +11394,7 @@ async def ext_source_health_check(request: Request):
             try:
                 r = await providers.probe_source_alive(s)
             except Exception as exc:  # noqa: BLE001
+                _log.debug("one failed", exc_info=True)
                 r = {"alive": False, "ok": False, "status": 0,
                      "elapsed_ms": 0, "count": 0, "sample": "",
                      "error": type(exc).__name__, "hit": "", "tried": []}
@@ -11290,6 +11488,7 @@ async def ext_source_import_file(request: Request):
                     sid = config.make_custom_id(api)
                     config.set_loose_filter(sid, True)
                 except Exception:
+                    _log.debug("ext_source_import_file failed", exc_info=True)
                     pass
         else:
             skipped += 1
@@ -11317,6 +11516,7 @@ async def ext_source_update(request: Request):
     try:
         ok, info = config.update_source(sid, name=name, api=api)
     except Exception as exc:
+        _log.debug("ext_source_update failed", exc_info=True)
         return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
@@ -11347,6 +11547,7 @@ async def ext_import_tvbox(request: Request):
         else:
             return JSONResponse({"code": 400, "msg": "缺少 url 或 text"}, status_code=400)
     except Exception as exc:
+        _log.debug("ext_import_tvbox failed", exc_info=True)
         return JSONResponse({"code": 502, "msg": f"获取配置失败：{type(exc).__name__}"},
                             status_code=502)
 
@@ -11381,6 +11582,7 @@ async def ext_import_tvbox(request: Request):
                 probe = await asyncio.wait_for(
                     providers.probe_source(c["api"], timeout=8.0), timeout=10)
             except Exception:
+                _log.debug("check failed", exc_info=True)
                 probe = {"ok": False}
             return c, probe
 
@@ -11466,6 +11668,7 @@ async def ext_import_subscription(request: Request):
             return JSONResponse({"code": 400, "msg": "缺少 url 或 text"},
                                 status_code=400)
     except Exception as exc:
+        _log.debug("ext_import_subscription failed", exc_info=True)
         return JSONResponse({"code": 502,
                              "msg": f"获取/解析订阅失败：{type(exc).__name__}"},
                             status_code=502)
@@ -11499,6 +11702,7 @@ async def ext_import_subscription(request: Request):
                 pr = await asyncio.wait_for(
                     providers.probe_source(c["api"], timeout=8.0), timeout=10)
             except Exception:
+                _log.debug("_probe failed", exc_info=True)
                 pr = {"ok": False}
             return c, pr
 
@@ -11558,6 +11762,7 @@ async def ext_import_subscription(request: Request):
                 "risk_names": g_risk,
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             guard_report = {"error": f"加固源写入失败：{type(exc).__name__}"}
         # 运行时就绪（短超时；未就绪不影响登记，前端引导一键部署）
         try:
@@ -11569,11 +11774,13 @@ async def ext_import_subscription(request: Request):
                 "runner": h.get("runner", _gmod.RUNNER_URL),
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             runtime = {"feature": True, "ready": False,
                        "reason": str(exc)[:120]}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif guard_sites:
         guard_report = {"skipped_build": True}
@@ -11603,10 +11810,12 @@ async def ext_import_subscription(request: Request):
                         **(jar_status or {"ok": False, "error": "订阅未声明 spider jar"})},
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             csp_report = {"error": f"普通爬虫写入失败：{type(exc).__name__}"}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif csp_items:
         csp_report = {"skipped_build": True}
@@ -11619,10 +11828,12 @@ async def ext_import_subscription(request: Request):
             drpy_report = {"added": res["added"], "updated": res["updated"],
                            "items": res["items"]}
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             drpy_report = {"error": f"远程DRPY导入失败：{type(exc).__name__}"}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif drpy_items:
         drpy_report = {"skipped_build": True}
@@ -11734,6 +11945,7 @@ if features.CATVOD:
                 body.get("server"), body.get("username"), body.get("password"))
             return JSONResponse({"code": 0, "msg": "已保存并生效", "data": st})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_credentials_save failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200],
                                  "data": None}, status_code=500)
 
@@ -11749,6 +11961,7 @@ if features.CATVOD:
                     "filters": home.get("filters", {})}
             return JSONResponse({"code": 0, "msg": "", "data": data})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_home failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/catvod/category")
@@ -11765,6 +11978,7 @@ if features.CATVOD:
             res = await asyncio.to_thread(_catvod.category, tid, pg, extend, tok)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_category failed: tid=%s", tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/catvod/detail")
@@ -11779,6 +11993,7 @@ if features.CATVOD:
             data = {"vod": det, "episodes": eps}
             return JSONResponse({"code": 0, "msg": "", "data": data})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_detail failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/catvod/search")
@@ -11791,6 +12006,7 @@ if features.CATVOD:
             lst = await asyncio.to_thread(_catvod.search, q, tok)
             return JSONResponse({"code": 0, "msg": "", "data": {"list": lst}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_search failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/catvod/play")
@@ -11813,10 +12029,12 @@ if features.CATVOD:
                         if str(rr.url) != url:
                             url = str(rr.url)
                 except Exception:
+                    _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
                     pass
             return JSONResponse({"code": 0, "msg": "",
                                  "data": {"url": url, "headers": headers}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/ext/catvod/redirect")
@@ -11833,6 +12051,7 @@ if features.CATVOD:
             return RedirectResponse(url, status_code=302,
                                     headers={"Cache-Control": "no-store"})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_redirect failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]}, status_code=500)
 
     @app.get("/v/ext/xlib/play")
@@ -11855,6 +12074,7 @@ if features.CATVOD:
         try:
             url = await _xl.library.signed_raw(files[i])
         except Exception as exc:  # noqa: BLE001
+            _log.debug("xlib_play failed", exc_info=True)
             return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
         return RedirectResponse(url, status_code=302,
                                 headers={"Cache-Control": "no-store"})
@@ -11900,6 +12120,7 @@ if features.DRPY:
             return JSONResponse({"code": 0, "msg": "", "data": {
                 "classes": home.get("class", []), "filters": home.get("filters", {})}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_home failed: sid=%s", sid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/drpy/category")
@@ -11914,6 +12135,7 @@ if features.DRPY:
             res = await asyncio.to_thread(_drpy.category, providers._drpy_site(src), tid, pg)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_category failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/drpy/detail")
@@ -11930,6 +12152,7 @@ if features.DRPY:
             return JSONResponse({"code": 0, "msg": "",
                                  "data": {"vod": det, "episodes": eps}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_detail failed: sid=%s vid=%s", sid, vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/drpy/play")
@@ -11944,6 +12167,7 @@ if features.DRPY:
             res = await asyncio.to_thread(_drpy.play, providers._drpy_site(src), flag, vid)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_play failed: sid=%s vid=%s", sid, vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @app.get("/v/api/ext/drpy/remote")
@@ -11957,6 +12181,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_toggle failed", exc_info=True)
             body = {}
         key, on = str(body.get("key", "")), bool(body.get("enabled"))
         ok = await asyncio.to_thread(_drpy.set_remote_enabled, key, on)
@@ -11972,6 +12197,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_remove failed", exc_info=True)
             body = {}
         key = str(body.get("key", ""))
         if not key or not await asyncio.to_thread(_drpy.remove_remote, key):
@@ -11984,6 +12210,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_retry failed", exc_info=True)
             body = {}
         key = str(body.get("key", ""))
         res = await asyncio.to_thread(_drpy.retry_remote_script, key)
@@ -12012,6 +12239,7 @@ async def source_health_reset(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("source_health_reset failed", exc_info=True)
         body = {}
     sourcehealth.reset((body or {}).get("key"))
     return JSONResponse({"code": 0})
@@ -12079,6 +12307,7 @@ if features.GUARD:
         try:
             return await request.json()
         except Exception:
+            _log.debug("_guard_body failed", exc_info=True)
             return {}
 
     @app.post("/v/api/ext/guard/import")
@@ -12100,16 +12329,19 @@ if features.GUARD:
                     rr = await cli.get(raw, headers={"User-Agent": "okhttp/3.15"})
                     text = rr.text
             except Exception as exc:  # noqa: BLE001
+                _log.debug("guard_import failed", exc_info=True)
                 return JSONResponse({"code": 502, "msg": f"配置下载失败: {exc}"[:200]})
         enable = body.get("enable", None)
         try:
             res = await asyncio.to_thread(_guard.import_tvbox, text, enable)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_import failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"解析失败: {exc}"[:200]})
         # 让新源立即进入配置底表
         try:
             config.load()
         except Exception:
+            _log.debug("guard_import failed", exc_info=True)
             pass
         return JSONResponse({"code": 0, "msg": "", "data": res})
 
@@ -12158,6 +12390,7 @@ if features.GUARD:
         try:
             raw = base64.b64decode(b64, validate=False)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_jar_upload failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"}, status_code=400)
         res = await asyncio.to_thread(_guard.save_user_jar, raw, str(body.get("name") or ""))
         if not res.get("ok"):
@@ -12216,6 +12449,7 @@ if features.GUARD:
         try:
             raw = base64.b64decode(b64, validate=False)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("spider_jar_upload failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"},
                                 status_code=400)
         res = await asyncio.to_thread(_spider.upload_jar, jar_url, raw)
@@ -12321,6 +12555,7 @@ if features.GUARD:
                                                      "warm_running": warm,
                                                      "missing": missing}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_gnstate failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.get("/v/api/ext/guard/home")
@@ -12335,6 +12570,7 @@ if features.GUARD:
                 "classes": home.get("class", []),
                 "filters": home.get("filters", {})}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_home failed: sid=%s", sid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.get("/v/api/ext/guard/category")
@@ -12346,6 +12582,7 @@ if features.GUARD:
             res = await asyncio.to_thread(_guard.category, conf, tid, pg)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_category failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     # ================= 网盘（夸克 / UC 等）登录/转存/直链 =================
@@ -12384,6 +12621,7 @@ if features.GUARD:
                 try:
                     logins[key] = mod.account_info_safe()
                 except Exception:  # noqa: BLE001
+                    _log.debug("pan_status failed", exc_info=True)
                     pass
         supported = any(m is not None for m in _PAN_MODS.values())
         qk = logins.get("quark", {})
@@ -12419,9 +12657,11 @@ if features.GUARD:
                         lambda: __import__("base64").b64encode(
                             mod.qr_png(s["qr_text"])).decode()))
             except Exception:  # noqa: BLE001
+                _log.debug("_pan_qr_start failed", exc_info=True)
                 pass
             return JSONResponse({"code": 0, "data": s})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_qr_start failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.post("/v/api/ext/pan/qr/start")
@@ -12444,6 +12684,7 @@ if features.GUARD:
                                     body.get("client_secret", ""))
             return JSONResponse({"code": 0})
         except Exception as exc:
+            _log.debug("pan_ali_cred failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": str(exc)[:200]})
 
     _PAN_PAGE_HTML = """<!doctype html><html lang="zh-CN"><head>
@@ -12694,6 +12935,7 @@ refresh();
             r = await asyncio.to_thread(mod.qr_poll, body)
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_poll failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.post("/v/api/ext/pan/qr/poll")
@@ -12715,6 +12957,7 @@ refresh();
             r = await asyncio.to_thread(mod.set_cookie, body.get("cookie", ""))
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_cookie failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": str(exc)[:200]})
 
     @app.post("/v/api/ext/pan/cookie")
@@ -12738,6 +12981,7 @@ refresh();
                 body.get("passcode", ""))
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_resolve failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.post("/v/api/ext/pan/resolve")
@@ -12759,6 +13003,7 @@ refresh();
             r = await asyncio.to_thread(mod.list_dir, fid)
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_list failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @app.get("/v/api/ext/pan/list")
@@ -12823,6 +13068,7 @@ refresh();
             url = meta["url"]
             cookie = await asyncio.to_thread(mod.auth_cookie_or_raise)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_stream failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]},
                                 status_code=500)
         is_m3u8 = meta.get("m3u8") or ".m3u8" in url.split("?", 1)[0].lower()
@@ -12856,6 +13102,7 @@ refresh();
                 client.build_request(request.method, url, headers=fwd),
                 stream=True)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_stream failed", exc_info=True)
             await client.aclose()
             return JSONResponse({"code": 502, "msg": str(exc)[:200]},
                                 status_code=502)
@@ -12939,6 +13186,7 @@ refresh();
                 "play": f"{ONLINE_PREFIX}/{mg}/main.m3u8",
             }
         except Exception:  # noqa: BLE001
+            _log.debug("_browse_card failed: source=%s", source, exc_info=True)
             return None
 
     def _admin_poster(url: str) -> str:
@@ -12956,6 +13204,7 @@ refresh();
             try:
                 t = providers._guard_map_item(source, v)
             except Exception:  # noqa: BLE001
+                _log.debug("_cards_from_vods failed: source=%s", source, exc_info=True)
                 continue
             if not t.title or not t.vod_id:
                 continue
@@ -12992,6 +13241,7 @@ refresh();
                             asyncio.to_thread(_guard.browse_classes, conf),
                             timeout=8)
                     except Exception:  # noqa: BLE001
+                        _log.debug("_src_classes failed", exc_info=True)
                         classes = []
                     if not classes:
                         return None
@@ -13039,6 +13289,7 @@ refresh();
                         return vods
                     vods = await asyncio.wait_for(_fetch(), timeout=18)
                 except Exception:  # noqa: BLE001
+                    _log.debug("_one failed", exc_info=True)
                     return []
                 per = max(6, limit // max(1, len(keys)))
                 return await asyncio.to_thread(
@@ -13060,6 +13311,7 @@ refresh();
                     break
             return JSONResponse({"code": 0, "msg": "", "data": {"list": cards}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_browse failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200],
                                  "data": None}, status_code=500)
 
@@ -13074,6 +13326,7 @@ refresh();
         try:
             body = json.loads(await request.body() or b"{}")
         except Exception:
+            _log.debug("sidecar_install failed", exc_info=True)
             body = {}
         what = str(body.get("what") or "all")
         res = await asyncio.to_thread(_guard.start_install, what)

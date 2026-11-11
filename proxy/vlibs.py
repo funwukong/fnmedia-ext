@@ -23,6 +23,16 @@ import hashlib
 from config import config
 import features
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("vlibs")
+
 # —— 与 app.py 完全一致的固定 guid ——（勿改，改了旧入口会失效）
 CHART_LIB_GUIDS = {
     "movie":   "0b10d767319eb8cab9d99373ede48d0a",
@@ -130,6 +140,7 @@ def hidden_libs() -> set[str]:
     try:
         return set(config.get().get("lib_hidden", []) or [])
     except Exception:
+        _log.debug("hidden_libs failed", exc_info=True)
         return set()
 
 
@@ -161,6 +172,7 @@ def lib_order() -> list[str]:
     try:
         return list(config.get().get("lib_order", []) or [])
     except Exception:
+        _log.debug("lib_order failed", exc_info=True)
         return []
 
 
@@ -225,6 +237,7 @@ def _acl() -> dict:
     try:
         return dict(config.get().get("lib_acl", {}) or {})
     except Exception:
+        _log.debug("_acl failed", exc_info=True)
         return {}
 
 
@@ -266,6 +279,7 @@ def acl_default_visible() -> bool:
     try:
         return bool(config.get().get("acl_default_visible", True))
     except Exception:
+        _log.debug("acl_default_visible failed", exc_info=True)
         return True
 
 
@@ -274,6 +288,7 @@ def acl_default_online() -> bool:
     try:
         return bool(config.get().get("acl_default_online", True))
     except Exception:
+        _log.debug("acl_default_online failed", exc_info=True)
         return True
 
 
@@ -310,6 +325,7 @@ class ViewerContext:
         try:
             cfg = config.get()
         except Exception:
+            _log.debug("for_user failed: user=%s", user, exc_info=True)
             cfg = {}
         return cls(
             user,

@@ -23,6 +23,16 @@ import threading
 import time
 from pathlib import Path
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("follow")
+
 _STATE = Path(__file__).resolve().parent.parent / "state" / "follow.json"
 _LOCK = threading.RLock()
 _MAX = 500
@@ -39,6 +49,7 @@ class FollowList:
             j = json.loads(self._path.read_text(encoding="utf-8"))
             self._items = j.get("items", {}) if isinstance(j, dict) else {}
         except Exception:
+            _log.debug("_load failed", exc_info=True)
             self._items = {}
 
     def _persist_locked(self):
@@ -55,6 +66,7 @@ class FollowList:
                            encoding="utf-8")
             tmp.replace(self._path)
         except Exception:
+            _log.debug("_persist_locked failed", exc_info=True)
             pass
 
     def follow(self, guid: str, title: str = "", episodes: int = 0) -> bool:

@@ -21,6 +21,16 @@ import time
 import urllib.parse
 from typing import Any
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("fnmedia_authx")
+
 SECRET = "NDzZTVxnRKP8Z0jXg1VAMonaG8akvh"
 APIKEY = "16CCEB3D-AB42-077D-36A1-F355324E4237"
 UPSTREAM = "/var/run/trim_media_upstream.sock"   # 接管态下直连官方
@@ -119,7 +129,8 @@ def call(method: str, path: str, params: dict | None = None, body: Any = None,
         return head.decode("latin1"), b
     try:
         return json.loads(b.decode("utf-8", "replace"))
-    except Exception:
+    except ValueError:
+        _log.debug("call failed", exc_info=True)
         return {"_raw": b[:500].decode("utf-8", "replace"), "_head": head.decode("latin1")[:300]}
 
 

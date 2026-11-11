@@ -3,6 +3,16 @@
 import json, re, time, urllib.parse
 import httpx, asyncio
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("probe_sources")
+
 SOURCES = [
     ("暴风资源", "https://bfzyapi.com/api.php/provide/vod"),
     ("非凡资源", "https://cj.ffzyapi.com/api.php/provide/vod"),
@@ -59,8 +69,10 @@ async def probe(client, name, url):
                 if ok and not row["sample"]:
                     row["sample"] = u[:80]
             except Exception:
+                _log.debug("probe failed: name=%s", name, exc_info=True)
                 pass
     except Exception as e:
+        _log.debug("probe failed: name=%s", name, exc_info=True)
         row["err"] = type(e).__name__ + ":" + str(e)[:40]
     return row
 

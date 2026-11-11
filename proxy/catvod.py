@@ -41,7 +41,8 @@ def _load_private() -> dict:
     try:
         with open(_PRIVATE_CONF, encoding="utf-8") as fh:
             return json.load(fh)
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_load_private failed", exc_info=True)
         return {}
 
 
@@ -126,6 +127,7 @@ def _java() -> str:
             subprocess.run([cand, "-version"], capture_output=True, timeout=8)
             return cand
         except Exception:
+            _log.debug("_java failed", exc_info=True)
             continue
     return "java"
 
@@ -187,6 +189,7 @@ class Sidecar:
                     raise RuntimeError("catvod sidecar 无响应")
                 resp = json.loads(line)
             except Exception:
+                _log.debug("call failed", exc_info=True)
                 self.stop()
                 raise
             if "error" in resp:
@@ -199,6 +202,7 @@ class Sidecar:
                 self._proc.stdin.close()
                 self._proc.terminate()
         except Exception:
+            _log.debug("stop failed", exc_info=True)
             pass
         self._proc = None
 
@@ -319,6 +323,7 @@ async def resolve_play(vid: str, flag: str = "") -> dict:
         try:
             headers = json.loads(h) if isinstance(h, str) else dict(h)
         except Exception:
+            _log.debug("resolve_play failed: vid=%s", vid, exc_info=True)
             headers = {}
     return {"url": res.get("url", ""), "headers": headers,
             "parse": res.get("parse", 0)}

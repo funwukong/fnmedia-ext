@@ -155,6 +155,7 @@ def _restore_from_backup() -> dict | None:
         backups = sorted(_backup_dir().glob("config-*.json"),
                          key=lambda b: (b.stat().st_mtime, b.name), reverse=True)
     except Exception:
+        _log.debug("_restore_from_backup failed", exc_info=True)
         return None
     for b in backups:
         try:
@@ -163,6 +164,7 @@ def _restore_from_backup() -> dict | None:
                 _log.error("config corrupted, restored from backup: %s", b.name)
                 return j
         except Exception:
+            _log.debug("_restore_from_backup failed", exc_info=True)
             continue
     return None
 
@@ -359,6 +361,7 @@ class Config:
                     import spiders as _sp
                     live.update({d["id"]: d for d in _sp.source_defs()})
                 except Exception:
+                    _log.debug("_sync_guard_defaults failed", exc_info=True)
                     _sp = None
                 # 移除已不存在的 guard/普通爬虫底表项（保留其它与内置项）
                 for s in list(DEFAULT_SOURCES):
@@ -377,6 +380,7 @@ class Config:
                         ex["name"] = d["name"]
                         ex["spider_key"] = d.get("spider_key", "")
             except Exception:
+                _log.debug("_sync_guard_defaults failed", exc_info=True)
                 pass
         # <<< PRIVATE:GUARD
 
@@ -615,6 +619,7 @@ class Config:
                     self._persist(cfg)
                     self._mtime = _STATE.stat().st_mtime
                 except Exception:
+                    _log.debug("load failed", exc_info=True)
                     pass
 
     def maybe_reload(self):
@@ -876,6 +881,7 @@ class Config:
             m = str(self.get().get("source_proxy_mode") or "auto").strip().lower()
             return m if m in ("off", "on", "auto") else "auto"
         except Exception:
+            _log.debug("source_proxy_mode failed", exc_info=True)
             return "auto"
 
     def main_ready_budget(self) -> float:
@@ -888,6 +894,7 @@ class Config:
             return clamp_main_ready_budget(self.get().get(
                 "main_ready_budget", MAIN_READY_BUDGET_DEFAULT))
         except Exception:
+            _log.debug("main_ready_budget failed", exc_info=True)
             return MAIN_READY_BUDGET_DEFAULT
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
