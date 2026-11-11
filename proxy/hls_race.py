@@ -1412,7 +1412,7 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
-    from app import _autofail_on, _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _ensure_playable, _get_playlist_cached, _main_slow_budget, _online_target_viewable, _pick_episode, _resolve_catvod, _verify_rewritten_first_seg, _viewer_ctx, app, chart_guid_by_media  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import _autofail_on, _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _ensure_playable, _get_playlist_cached, _main_slow_budget, _online_target_viewable, _pick_episode, _verify_rewritten_first_seg, _viewer_ctx, app, chart_guid_by_media  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     _req_t0 = time.time()  # hls_main 入口处、任何分支之前（上游 v1.0.0）
 
     def _budget_left(floor: float) -> float:
@@ -1454,13 +1454,14 @@ async def hls_main(mg: str, request: Request):
         # 有意偏离：不含 auto 起播快路径——pick_faster_line（播放中静默换线）与
         # _cached_sibling_playlist 是已冻结、明确不接线的功能，本次不搬。
         # 线路健康探测 + 自动选最快线
-        from app import _autofail_on, _ensure_playable, _get_playlist_cached, _pick_episode, _resolve_catvod, _verify_rewritten_first_seg  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+        from app import _autofail_on, _ensure_playable, _get_playlist_cached, _pick_episode, _verify_rewritten_first_seg  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         if _autofail_on():
             picked = await _ensure_playable(picked, request, auto=auto_play)
             # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
             request.state._failover_picked = picked
 
         # >>> PRIVATE:CATVOD
+        from app import _resolve_catvod  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
         if features.CATVOD and picked.get("catvod"):
             if await _resolve_catvod(picked):
@@ -1493,6 +1494,7 @@ async def hls_main(mg: str, request: Request):
                     request.state._failover_picked = alt
                     # 小雅等非 HLS 直链
                     # >>> PRIVATE:CATVOD
+                    from app import _resolve_catvod  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
                     if features.CATVOD and picked.get("catvod"):
                         if await _resolve_catvod(picked) and picked.get("catvod_direct"):
                             return RedirectResponse(picked["url"], status_code=302,

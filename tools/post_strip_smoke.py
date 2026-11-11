@@ -108,6 +108,8 @@ _PYTEST_CMD = [
     # 完整构建的路由数；剥离树上跳过。
     "--ignore=tests/test_p2_except_narrowing.py",
     "--ignore=tests/test_app_split.py",
+    # P2 新增：counts 测试调 tools/count_except.py（剥离删 tools/），剥离树上跳过。
+    "--ignore=tests/test_p2_except_counts.py",
     "-k", "not dduo_probe_source",
 ]
 

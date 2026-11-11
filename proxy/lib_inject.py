@@ -30,7 +30,7 @@ _log = get_logger("app")  # 与 app._log 同一 logger 对象
 
 def _all_virtual_lib_guids() -> set[str]:
     """当前所有注入的在线媒体库 guid（含兼容旧热门 guid）。"""
-    from app import CATALOG_LIB_GUIDS, CHART_LIB_GUIDS, GUARD_NATIVE_GUID, HOT_LEGACY_GUID, HOT_LIB_GUIDS, _xlib_active_cats, config, guard_lib_guid, guard_libs_active, guard_native_enabled, hgdj_enabled, standalone_lib_guid  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import CATALOG_LIB_GUIDS, CHART_LIB_GUIDS, GUARD_NATIVE_GUID, HOT_LEGACY_GUID, HOT_LIB_GUIDS, config, guard_lib_guid, guard_libs_active, guard_native_enabled, hgdj_enabled, standalone_lib_guid  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     guids = set(CHART_LIB_GUIDS.values()) | set(CATALOG_LIB_GUIDS.values())
     guids |= set(HOT_LIB_GUIDS.values()) | {HOT_LEGACY_GUID}
     guids |= {standalone_lib_guid(s["id"]) for s in config.all_sources()}
@@ -41,6 +41,7 @@ def _all_virtual_lib_guids() -> set[str]:
     # >>> PRIVATE:CATVOD
     try:
         import xlib
+        from app import _xlib_active_cats  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         for cat in _xlib_active_cats():
             guids.add(xlib.lib_guid(cat["id"]))
     except Exception:
