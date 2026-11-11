@@ -92,6 +92,7 @@ async def ext_titles_cache(request: Request):
         p = store._state
         size = p.stat().st_size if p.exists() else 0
     except Exception:
+        _log.debug("ext_titles_cache failed", exc_info=True)
         size = 0
     with store._lock:
         entries = len(store._titles)
@@ -104,6 +105,7 @@ async def ext_titles_cache(request: Request):
                 store._dirty = True
             store._schedule_flush()
     except Exception:
+        _log.debug("ext_titles_cache failed", exc_info=True)
         pass
     return {"code": 0, "entries": entries, "bytes": size, "dirty": dirty}
 
@@ -121,8 +123,10 @@ async def ext_titles_cache_clear(request: Request):
         try:
             store._state.unlink(missing_ok=True)
         except Exception:
+            _log.debug("ext_titles_cache_clear failed", exc_info=True)
             pass
     except Exception as exc:
+        _log.debug("ext_titles_cache_clear failed", exc_info=True)
         return {"code": 5000, "msg": f"清空失败：{exc}"}
 
     def _restart():
@@ -143,12 +147,14 @@ def _cache_sizes() -> dict:
         out["titles"] = {"bytes": p.stat().st_size if p.exists() else 0,
                          "entries": len(store._titles), "label": "在线资源缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["titles"] = {"bytes": 0, "entries": 0, "label": "在线资源缓存"}
     try:
         cp = chartmod.STATE
         out["charts"] = {"bytes": cp.stat().st_size if cp.exists() else 0,
                          "label": "热门榜单缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["charts"] = {"bytes": 0, "label": "热门榜单缓存"}
     with catalog._lock:
         out["catalog"] = {"routes": len(catalog._routes),
@@ -157,12 +163,14 @@ def _cache_sizes() -> dict:
     try:
         out["search"] = {"entries": len(_search_cache), "label": "搜索结果内存缓存"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["search"] = {"entries": 0, "label": "搜索结果内存缓存"}
     try:
         out["health"] = {"entries": len(sourcehealth.snapshot())
                          if hasattr(sourcehealth, "snapshot") else 0,
                          "label": "源健康画像"}
     except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
         out["health"] = {"entries": 0, "label": "源健康画像"}
     return out
 
@@ -190,17 +198,20 @@ async def ext_cache_clear(request: Request):
         try:
             chart_cache.reset(); done.append("charts")
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "catalog" in targets:
         try:
             catalog.reset(); done.append("catalog")
             _schedule_routes_refresh()
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "health" in targets:
         try:
             sourcehealth.reset(); done.append("health")
         except Exception:
+            _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "titles" in targets:
         need_restart = True
@@ -217,6 +228,7 @@ async def ext_cache_clear(request: Request):
                     store._dirty = False
                 store._state.unlink(missing_ok=True)
             except Exception:
+                _log.debug("_clear_titles_restart failed", exc_info=True)
                 pass
             time.sleep(1.0)
             os.system("systemctl restart fnmedia-ext >/dev/null 2>&1 &")
@@ -244,6 +256,7 @@ def _admin_client_key(request: Request) -> str:
         if request.client and request.client.host:
             return request.client.host
     except Exception:
+        _log.debug("_admin_client_key failed", exc_info=True)
         pass
     return "unknown"
 
@@ -275,6 +288,7 @@ async def ext_admin_login(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_admin_login failed", exc_info=True)
         body = {}
     candidate = str((body or {}).get("token") or "")
     ip = _admin_client_key(request)
@@ -312,6 +326,7 @@ async def ext_admin_token_rotate(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_admin_token_rotate failed", exc_info=True)
         body = {}
     if not isinstance(body, dict) or body.get("confirm") is not True:
         return JSONResponse({"code": 400, "msg": "轮换须显式确认（confirm=true）"},
@@ -480,6 +495,7 @@ async def ext_favorite_enrich(request: Request):
     try:
         cands = [dict(b) for b in store._titles.values()] if hasattr(store, "_titles") else []
     except Exception:
+        _log.debug("ext_favorite_enrich failed", exc_info=True)
         cands = []
     out = []
     for r in recs:
@@ -514,6 +530,7 @@ async def ext_update_now(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_update_now failed", exc_info=True)
         body = {}
     if request.headers.get("x-fnmedia-admin") != "1" or body.get("confirm") is not True:
         return JSONResponse({"code": 403,
@@ -589,6 +606,7 @@ def _virtual_lib_list() -> list[dict]:
                         "title": cat["title"], "kind": "xlib",
                         "group": "xlib", "enabled": True, "count": 0})
     except Exception:
+        _log.debug("_virtual_lib_list failed", exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     if hgdj_enabled():
@@ -688,6 +706,7 @@ async def ext_local_libs(request: Request):
             libs.append({"guid": d.get("guid"),
                          "name": d.get("name") or d.get("mdb_name")})
     except Exception:
+        _log.debug("ext_local_libs failed", exc_info=True)
         pass
     return {"code": 0, "msg": "", "data": {"libs": libs}}
 
@@ -721,6 +740,7 @@ async def ext_hot_refresh(request: Request):
             await asyncio.wait_for(
                 catalog.refresh_routes(config.enabled_sources()), timeout=90)
     except Exception:
+        _log.debug("ext_hot_refresh failed", exc_info=True)
         pass
     return {"code": 0, "msg": "", "data": chart_cache.status()}
 
@@ -826,6 +846,7 @@ async def ext_set_config(request: Request):
         try:
             linepredict.set_persist(patch["prewarm_mode"] == "persist")
         except Exception:
+            _log.debug("ext_set_config failed", exc_info=True)
             pass
     if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
@@ -861,6 +882,7 @@ async def ext_set_subscription_proxy(request: Request):
                 test_ok = rr.status_code in (200, 204)
                 test_msg = f"HTTP {rr.status_code}"
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_set_subscription_proxy failed", exc_info=True)
             test_msg = f"{type(exc).__name__}: {str(exc)[:100]}"
     return {"code": 0, "msg": "",
             "data": {"proxy": subfetch.subscription_proxy(),
@@ -915,6 +937,7 @@ async def ext_set_source_proxy(request: Request):
             test_ok = rr.status_code == 200
             test_msg = f"{(src or {}).get('name', api[:30])} HTTP {rr.status_code} / {ms}ms"
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_set_source_proxy failed", exc_info=True)
             test_msg = f"{type(exc).__name__}: {str(exc)[:100]}"
     return {"code": 0, "msg": "",
             "data": {"proxy": netutil.source_proxy(),
@@ -940,6 +963,7 @@ def _schedule_routes_refresh():
     try:
         asyncio.create_task(_run_after_current())
     except Exception:
+        _log.debug("_schedule_routes_refresh failed", exc_info=True)
         pass
 
 
@@ -996,6 +1020,7 @@ async def ext_source_loose(request: Request):
                         catalog._scanned_page, catalog._dense_count):
                 buf.pop(catalog._scope_key(sid, k[1]), None)
     except Exception:
+        _log.debug("ext_source_loose failed", exc_info=True)
         pass
     _schedule_routes_refresh()
     return {"code": 0, "msg": "ok"}
@@ -1096,6 +1121,7 @@ async def ext_source_health_check(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("ext_source_health_check failed", exc_info=True)
         body = {}
     # 限制并发，避免一次性打爆源站
     try:
@@ -1111,6 +1137,7 @@ async def ext_source_health_check(request: Request):
             try:
                 r = await providers.probe_source_alive(s)
             except Exception as exc:  # noqa: BLE001
+                _log.debug("one failed", exc_info=True)
                 r = {"alive": False, "ok": False, "status": 0,
                      "elapsed_ms": 0, "count": 0, "sample": "",
                      "error": type(exc).__name__, "hit": "", "tried": []}
@@ -1206,6 +1233,7 @@ async def ext_source_import_file(request: Request):
                     sid = config.make_custom_id(api)
                     config.set_loose_filter(sid, True)
                 except Exception:
+                    _log.debug("ext_source_import_file failed", exc_info=True)
                     pass
         else:
             skipped += 1
@@ -1234,6 +1262,7 @@ async def ext_source_update(request: Request):
     try:
         ok, info = config.update_source(sid, name=name, api=api)
     except Exception as exc:
+        _log.debug("ext_source_update failed", exc_info=True)
         return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
@@ -1265,6 +1294,7 @@ async def ext_import_tvbox(request: Request):
         else:
             return JSONResponse({"code": 400, "msg": "缺少 url 或 text"}, status_code=400)
     except Exception as exc:
+        _log.debug("ext_import_tvbox failed", exc_info=True)
         return JSONResponse({"code": 502, "msg": f"获取配置失败：{type(exc).__name__}"},
                             status_code=502)
 
@@ -1299,6 +1329,7 @@ async def ext_import_tvbox(request: Request):
                 probe = await asyncio.wait_for(
                     providers.probe_source(c["api"], timeout=8.0), timeout=10)
             except Exception:
+                _log.debug("check failed", exc_info=True)
                 probe = {"ok": False}
             return c, probe
 
@@ -1385,6 +1416,7 @@ async def ext_import_subscription(request: Request):
             return JSONResponse({"code": 400, "msg": "缺少 url 或 text"},
                                 status_code=400)
     except Exception as exc:
+        _log.debug("ext_import_subscription failed", exc_info=True)
         return JSONResponse({"code": 502,
                              "msg": f"获取/解析订阅失败：{type(exc).__name__}"},
                             status_code=502)
@@ -1418,6 +1450,7 @@ async def ext_import_subscription(request: Request):
                 pr = await asyncio.wait_for(
                     providers.probe_source(c["api"], timeout=8.0), timeout=10)
             except Exception:
+                _log.debug("_probe failed", exc_info=True)
                 pr = {"ok": False}
             return c, pr
 
@@ -1477,6 +1510,7 @@ async def ext_import_subscription(request: Request):
                 "risk_names": g_risk,
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             guard_report = {"error": f"加固源写入失败：{type(exc).__name__}"}
         # 运行时就绪（短超时；未就绪不影响登记，前端引导一键部署）
         try:
@@ -1488,11 +1522,13 @@ async def ext_import_subscription(request: Request):
                 "runner": h.get("runner", _gmod.RUNNER_URL),
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             runtime = {"feature": True, "ready": False,
                        "reason": str(exc)[:120]}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif guard_sites:
         guard_report = {"skipped_build": True}
@@ -1522,10 +1558,12 @@ async def ext_import_subscription(request: Request):
                         **(jar_status or {"ok": False, "error": "订阅未声明 spider jar"})},
             }
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             csp_report = {"error": f"普通爬虫写入失败：{type(exc).__name__}"}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif csp_items:
         csp_report = {"skipped_build": True}
@@ -1538,10 +1576,12 @@ async def ext_import_subscription(request: Request):
             drpy_report = {"added": res["added"], "updated": res["updated"],
                            "items": res["items"]}
         except Exception as exc:  # noqa: BLE001
+            _log.debug("ext_import_subscription failed", exc_info=True)
             drpy_report = {"error": f"远程DRPY导入失败：{type(exc).__name__}"}
         try:
             config.load()
         except Exception:
+            _log.debug("ext_import_subscription failed", exc_info=True)
             pass
     elif drpy_items:
         drpy_report = {"skipped_build": True}
@@ -1659,6 +1699,7 @@ if features.CATVOD:
                 body.get("server"), body.get("username"), body.get("password"))
             return JSONResponse({"code": 0, "msg": "已保存并生效", "data": st})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_credentials_save failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200],
                                  "data": None}, status_code=500)
 
@@ -1675,6 +1716,7 @@ if features.CATVOD:
                     "filters": home.get("filters", {})}
             return JSONResponse({"code": 0, "msg": "", "data": data})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_home failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/catvod/category")
@@ -1692,6 +1734,7 @@ if features.CATVOD:
             res = await asyncio.to_thread(_catvod.category, tid, pg, extend, tok)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_category failed: tid=%s", tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/catvod/detail")
@@ -1707,6 +1750,7 @@ if features.CATVOD:
             data = {"vod": det, "episodes": eps}
             return JSONResponse({"code": 0, "msg": "", "data": data})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_detail failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/catvod/search")
@@ -1720,6 +1764,7 @@ if features.CATVOD:
             lst = await asyncio.to_thread(_catvod.search, q, tok)
             return JSONResponse({"code": 0, "msg": "", "data": {"list": lst}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_search failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/catvod/play")
@@ -1743,10 +1788,12 @@ if features.CATVOD:
                         if str(rr.url) != url:
                             url = str(rr.url)
                 except Exception:
+                    _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
                     pass
             return JSONResponse({"code": 0, "msg": "",
                                  "data": {"url": url, "headers": headers}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/ext/catvod/redirect")
@@ -1764,6 +1811,7 @@ if features.CATVOD:
             return RedirectResponse(url, status_code=302,
                                     headers={"Cache-Control": "no-store"})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("catvod_redirect failed: vid=%s", vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]}, status_code=500)
 
     @admin_router.get("/v/ext/xlib/play")
@@ -1787,6 +1835,7 @@ if features.CATVOD:
         try:
             url = await _xl.library.signed_raw(files[i])
         except Exception as exc:  # noqa: BLE001
+            _log.debug("xlib_play failed", exc_info=True)
             return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
         return RedirectResponse(url, status_code=302,
                                 headers={"Cache-Control": "no-store"})
@@ -1835,6 +1884,7 @@ if features.DRPY:
             return JSONResponse({"code": 0, "msg": "", "data": {
                 "classes": home.get("class", []), "filters": home.get("filters", {})}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_home failed: sid=%s", sid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/drpy/category")
@@ -1850,6 +1900,7 @@ if features.DRPY:
             res = await asyncio.to_thread(_drpy.category, providers._drpy_site(src), tid, pg)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_category failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/drpy/detail")
@@ -1867,6 +1918,7 @@ if features.DRPY:
             return JSONResponse({"code": 0, "msg": "",
                                  "data": {"vod": det, "episodes": eps}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_detail failed: sid=%s vid=%s", sid, vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/drpy/play")
@@ -1882,6 +1934,7 @@ if features.DRPY:
             res = await asyncio.to_thread(_drpy.play, providers._drpy_site(src), flag, vid)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("drpy_play failed: sid=%s vid=%s", sid, vid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
 
     @admin_router.get("/v/api/ext/drpy/remote")
@@ -1897,6 +1950,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_toggle failed", exc_info=True)
             body = {}
         key, on = str(body.get("key", "")), bool(body.get("enabled"))
         ok = await asyncio.to_thread(_drpy.set_remote_enabled, key, on)
@@ -1913,6 +1967,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_remove failed", exc_info=True)
             body = {}
         key = str(body.get("key", ""))
         if not key or not await asyncio.to_thread(_drpy.remove_remote, key):
@@ -1926,6 +1981,7 @@ if features.DRPY:
         try:
             body = await request.json()
         except Exception:
+            _log.debug("drpy_remote_retry failed", exc_info=True)
             body = {}
         key = str(body.get("key", ""))
         res = await asyncio.to_thread(_drpy.retry_remote_script, key)
@@ -1956,6 +2012,7 @@ async def source_health_reset(request: Request):
     try:
         body = await request.json()
     except Exception:
+        _log.debug("source_health_reset failed", exc_info=True)
         body = {}
     sourcehealth.reset((body or {}).get("key"))
     return JSONResponse({"code": 0})
@@ -2027,6 +2084,7 @@ if features.GUARD:
         try:
             return await request.json()
         except Exception:
+            _log.debug("_guard_body failed", exc_info=True)
             return {}
 
     @admin_router.post("/v/api/ext/guard/import")
@@ -2049,16 +2107,19 @@ if features.GUARD:
                     rr = await cli.get(raw, headers={"User-Agent": "okhttp/3.15"})
                     text = rr.text
             except Exception as exc:  # noqa: BLE001
+                _log.debug("guard_import failed", exc_info=True)
                 return JSONResponse({"code": 502, "msg": f"配置下载失败: {exc}"[:200]})
         enable = body.get("enable", None)
         try:
             res = await asyncio.to_thread(_guard.import_tvbox, text, enable)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_import failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"解析失败: {exc}"[:200]})
         # 让新源立即进入配置底表
         try:
             config.load()
         except Exception:
+            _log.debug("guard_import failed", exc_info=True)
             pass
         return JSONResponse({"code": 0, "msg": "", "data": res})
 
@@ -2111,6 +2172,7 @@ if features.GUARD:
         try:
             raw = base64.b64decode(b64, validate=False)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_jar_upload failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"}, status_code=400)
         res = await asyncio.to_thread(_guard.save_user_jar, raw, str(body.get("name") or ""))
         if not res.get("ok"):
@@ -2173,6 +2235,7 @@ if features.GUARD:
         try:
             raw = base64.b64decode(b64, validate=False)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("spider_jar_upload failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"},
                                 status_code=400)
         res = await asyncio.to_thread(_spider.upload_jar, jar_url, raw)
@@ -2284,6 +2347,7 @@ if features.GUARD:
                                                      "warm_running": warm,
                                                      "missing": missing}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_gnstate failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.get("/v/api/ext/guard/home")
@@ -2299,6 +2363,7 @@ if features.GUARD:
                 "classes": home.get("class", []),
                 "filters": home.get("filters", {})}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_home failed: sid=%s", sid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.get("/v/api/ext/guard/category")
@@ -2311,6 +2376,7 @@ if features.GUARD:
             res = await asyncio.to_thread(_guard.category, conf, tid, pg)
             return JSONResponse({"code": 0, "msg": "", "data": res})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_category failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     # ================= 网盘（夸克 / UC 等）登录/转存/直链 =================
@@ -2351,6 +2417,7 @@ if features.GUARD:
                 try:
                     logins[key] = mod.account_info_safe()
                 except Exception:  # noqa: BLE001
+                    _log.debug("pan_status failed", exc_info=True)
                     pass
         supported = any(m is not None for m in _PAN_MODS.values())
         qk = logins.get("quark", {})
@@ -2387,9 +2454,11 @@ if features.GUARD:
                         lambda: __import__("base64").b64encode(
                             mod.qr_png(s["qr_text"])).decode()))
             except Exception:  # noqa: BLE001
+                _log.debug("_pan_qr_start failed", exc_info=True)
                 pass
             return JSONResponse({"code": 0, "data": s})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_qr_start failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.post("/v/api/ext/pan/qr/start")
@@ -2416,6 +2485,7 @@ if features.GUARD:
                                     body.get("client_secret", ""))
             return JSONResponse({"code": 0})
         except Exception as exc:
+            _log.debug("pan_ali_cred failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": str(exc)[:200]})
 
     _PAN_PAGE_HTML = """<!doctype html><html lang="zh-CN"><head>
@@ -2667,6 +2737,7 @@ refresh();
             r = await asyncio.to_thread(mod.qr_poll, body)
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_poll failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.post("/v/api/ext/pan/qr/poll")
@@ -2691,6 +2762,7 @@ refresh();
             r = await asyncio.to_thread(mod.set_cookie, body.get("cookie", ""))
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_cookie failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": str(exc)[:200]})
 
     @admin_router.post("/v/api/ext/pan/cookie")
@@ -2717,6 +2789,7 @@ refresh();
                 body.get("passcode", ""))
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_resolve failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.post("/v/api/ext/pan/resolve")
@@ -2741,6 +2814,7 @@ refresh();
             r = await asyncio.to_thread(mod.list_dir, fid)
             return JSONResponse({"code": 0, "data": r})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_list failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]})
 
     @admin_router.get("/v/api/ext/pan/list")
@@ -2811,6 +2885,7 @@ refresh();
             url = meta["url"]
             cookie = await asyncio.to_thread(mod.auth_cookie_or_raise)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_stream failed", exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200]},
                                 status_code=500)
         is_m3u8 = meta.get("m3u8") or ".m3u8" in url.split("?", 1)[0].lower()
@@ -2844,6 +2919,7 @@ refresh();
                 client.build_request(request.method, url, headers=fwd),
                 stream=True)
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_pan_stream failed", exc_info=True)
             await client.aclose()
             return JSONResponse({"code": 502, "msg": str(exc)[:200]},
                                 status_code=502)
@@ -2932,6 +3008,7 @@ refresh();
                 "play": f"{ONLINE_PREFIX}/{mg}/main.m3u8",
             }
         except Exception:  # noqa: BLE001
+            _log.debug("_browse_card failed: source=%s", source, exc_info=True)
             return None
 
     def _admin_poster(url: str) -> str:
@@ -2950,6 +3027,7 @@ refresh();
             try:
                 t = providers._guard_map_item(source, v)
             except Exception:  # noqa: BLE001
+                _log.debug("_cards_from_vods failed: source=%s", source, exc_info=True)
                 continue
             if not t.title or not t.vod_id:
                 continue
@@ -2987,6 +3065,7 @@ refresh();
                             asyncio.to_thread(_guard.browse_classes, conf),
                             timeout=8)
                     except Exception:  # noqa: BLE001
+                        _log.debug("_src_classes failed", exc_info=True)
                         classes = []
                     if not classes:
                         return None
@@ -3034,6 +3113,7 @@ refresh();
                         return vods
                     vods = await asyncio.wait_for(_fetch(), timeout=18)
                 except Exception:  # noqa: BLE001
+                    _log.debug("_one failed", exc_info=True)
                     return []
                 per = max(6, limit // max(1, len(keys)))
                 return await asyncio.to_thread(
@@ -3055,6 +3135,7 @@ refresh();
                     break
             return JSONResponse({"code": 0, "msg": "", "data": {"list": cards}})
         except Exception as exc:  # noqa: BLE001
+            _log.debug("guard_browse failed: sid=%s tid=%s", sid, tid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200],
                                  "data": None}, status_code=500)
 
@@ -3071,6 +3152,7 @@ refresh();
         try:
             body = json.loads(await request.body() or b"{}")
         except Exception:
+            _log.debug("sidecar_install failed", exc_info=True)
             body = {}
         what = str(body.get("what") or "all")
         res = await asyncio.to_thread(_guard.start_install, what)

@@ -101,6 +101,7 @@ def _real_ips(host: str) -> list[str]:
         data = json.load(urllib.request.urlopen(req, timeout=6))
         ips = [a["data"] for a in data.get("Answer", []) if a.get("type") == 1]
     except Exception:  # noqa: BLE001
+        _log.debug("_real_ips failed: host=%s", host, exc_info=True)
         ips = []
     if ips:
         _doh_cache[host] = (now, ips)
@@ -239,7 +240,8 @@ class _CatIndex:
                 continue
             try:
                 it = json.loads(line)
-            except Exception:
+            except ValueError:
+                _log.debug("_ingest failed", exc_info=True)
                 continue
             sid = it.get("id", "")
             if sid and sid not in self.seen:
@@ -310,6 +312,7 @@ class XiaoyaLibrary:
         try:
             return bool(catvod.available() and catvod.XIAOYA.get("password"))
         except Exception:
+            _log.debug("available failed", exc_info=True)
             return False
 
     def base(self) -> str:
@@ -341,6 +344,7 @@ class XiaoyaLibrary:
             if out:
                 candidates.append(f"http://{out}:{_DPROXY_PORT}")
         except Exception:
+            _log.debug("_dproxy failed", exc_info=True)
             out = ""
         # 回退：小雅主机同端口（个别部署把 45678 发布到宿主）
         if host:
@@ -370,6 +374,7 @@ class XiaoyaLibrary:
                     return loc
                 last = f"status={r.status_code}"
             except Exception as exc:  # noqa: BLE001
+                _log.debug("_dproxy_get_location failed", exc_info=True)
                 last = type(exc).__name__
         raise RuntimeError("小雅转存代理无直链: " + str(last))
 
@@ -382,7 +387,8 @@ class XiaoyaLibrary:
         try:
             with open(self._poster_path, encoding="utf-8") as fh:
                 self._posters = json.load(fh) or {}
-        except Exception:
+        except (OSError, ValueError):
+            _log.debug("_load_posters failed", exc_info=True)
             self._posters = {}
 
     def save_poster(self, show_id: str, poster: str, overview: str = "") -> None:
@@ -396,6 +402,7 @@ class XiaoyaLibrary:
                     json.dump(self._posters, fh, ensure_ascii=False)
                 os.replace(tmp, self._poster_path)
             except Exception:
+                _log.debug("save_poster failed", exc_info=True)
                 pass
 
     def poster_of(self, show_id: str) -> dict:
@@ -426,6 +433,7 @@ class XiaoyaLibrary:
                     j = r.json()
                     break
                 except Exception:
+                    _log.debug("list_dir failed", exc_info=True)
                     if attempt == 2:
                         raise
                     await asyncio.sleep(0.8 * (attempt + 1))
@@ -470,6 +478,7 @@ class XiaoyaLibrary:
             try:
                 url = await self._dproxy_get_location(path)
             except Exception as exc:  # noqa: BLE001
+                _log.debug("signed_raw failed", exc_info=True)
                 logging.getLogger("xlib").warning(
                     "/d 转存失败，回退 fs/get: %s %s", type(exc).__name__, exc)
             if not url:
@@ -480,6 +489,7 @@ class XiaoyaLibrary:
             fut.set_result(url)
             return url
         except Exception as exc:
+            _log.debug("signed_raw failed", exc_info=True)
             fut.set_exception(exc)
             raise
         finally:
@@ -538,6 +548,7 @@ class XiaoyaLibrary:
                 try:
                     entries = await self.list_dir(client, token, path)
                 except Exception:
+                    _log.debug("ls_files failed", exc_info=True)
                     return [], []
                 vids = sorted(os.path.join(path, e["name"]) for e in entries
                               if not e.get("is_dir") and _is_video(e["name"])
@@ -618,6 +629,7 @@ class XiaoyaLibrary:
                          "Referer": "https://movie.douban.com/"}, timeout=10)
             cands = r.json() or []
         except Exception:
+            _log.debug("_fill_one failed", exc_info=True)
             return
         if not isinstance(cands, list):
             return
@@ -761,7 +773,8 @@ class XiaoyaLibrary:
         try:
             with open(self._queue_path(cat_id), encoding="utf-8") as fh:
                 return json.load(fh)
-        except Exception:
+        except (OSError, ValueError):
+            _log.debug("_load_queue failed", exc_info=True)
             return []
 
     def _save_queue(self, cat_id: str, q: list[str]) -> None:
@@ -771,6 +784,7 @@ class XiaoyaLibrary:
                 json.dump(q, fh, ensure_ascii=False)
             os.replace(tmp, self._queue_path(cat_id))
         except Exception:
+            _log.debug("_save_queue failed", exc_info=True)
             pass
 
     async def _build(self, cat_id: str) -> None:

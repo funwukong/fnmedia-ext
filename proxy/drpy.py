@@ -41,6 +41,7 @@ def _node() -> str:
             subprocess.run([c, "--version"], capture_output=True, timeout=8)
             return c
         except Exception:
+            _log.debug("_node failed", exc_info=True)
             continue
     return "node"
 
@@ -71,6 +72,7 @@ def available() -> bool:
         subprocess.run([_node(), "--version"], capture_output=True, timeout=8)
         return True
     except Exception:
+        _log.debug("available failed", exc_info=True)
         return False
 
 
@@ -110,6 +112,7 @@ class Sidecar:
                     raise RuntimeError("drpy sidecar 无响应")
                 resp = json.loads(line)
             except Exception:
+                _log.debug("call failed", exc_info=True)
                 self.stop()
                 raise
             if "error" in resp:
@@ -122,6 +125,7 @@ class Sidecar:
                 self._proc.stdin.close()
                 self._proc.terminate()
         except Exception:
+            _log.debug("stop failed", exc_info=True)
             pass
         self._proc = None
 
@@ -188,7 +192,8 @@ def play(site: dict, flag: str, vid: str) -> dict:
 def _read_remote_registry() -> dict:
     try:
         return json.loads(Path(_SUB_REG).read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_read_remote_registry failed", exc_info=True)
         return {}
 
 

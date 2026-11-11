@@ -28,6 +28,16 @@ from urllib.parse import urljoin
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("tvbox")
+
 HTTP_TIMEOUT = 12.0
 MAX_SUB = 12
 MAX_DEPTH = 2
@@ -129,6 +139,7 @@ def _json_loads_dict(text: str) -> dict | None:
             j = json.loads(candidate)
             return j if isinstance(j, dict) else None
         except Exception:
+            _log.debug("_json_loads_dict failed", exc_info=True)
             continue
     return None
 
@@ -216,15 +227,18 @@ def _fongmi_decrypt(text: str) -> str | None:
             unp = _pad.PKCS7(128).unpadder()
             pt = unp.update(raw) + unp.finalize()
         except Exception:
+            _log.debug("_fongmi_decrypt failed", exc_info=True)
             try:  # 兜底：pycryptodome
                 from Crypto.Cipher import AES  # type: ignore
                 from Crypto.Util.Padding import unpad as _unpad  # type: ignore
                 pt = _unpad(AES.new(key, AES.MODE_CBC, iv).decrypt(ct), 16)
             except Exception:
+                _log.debug("_fongmi_decrypt failed", exc_info=True)
                 return None
         out = pt.decode("utf-8", "replace")
         return out if ('"' in out) else None
     except Exception:
+        _log.debug("_fongmi_decrypt failed", exc_info=True)
         return None
 
 
@@ -345,6 +359,7 @@ async def fetch_text(client: httpx.AsyncClient, url: str) -> str:
                                  timeout=HTTP_TIMEOUT, follow_redirects=True)
             r.raise_for_status()
         except Exception:
+            _log.debug("fetch_text failed", exc_info=True)
             continue
         data = r.content or b""
         # 图片伪装：JPEG/PNG 头
@@ -614,6 +629,7 @@ async def load_subscription_full(url: str | None = None,
                 async with subfetch.async_sub_client() as client:
                     raw = await fetch_text(client, u)
             except Exception:
+                _log.debug("walk failed", exc_info=True)
                 return
         cfg = parse_config_text(raw or "")
         if not cfg:
@@ -670,6 +686,7 @@ async def load_fantaiying():
             if sites:
                 return sites, spider, base, u
         except Exception as exc:  # noqa: BLE001
+            _log.debug("load_fantaiying failed", exc_info=True)
             last = exc
     raise RuntimeError(f"内置饭太硬订阅所有镜像均不可达：{last}")
 

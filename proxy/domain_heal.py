@@ -19,6 +19,16 @@ import json
 import re
 import urllib.parse
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("domain_heal")
+
 _CHALLENGE_MARKERS = (
     "正在验证", "ge_js_validator", "cloudflare", "cf-challenge",
     "Attention Required", "Just a moment", "请完成验证",
@@ -37,7 +47,8 @@ def normalize_host(raw: str) -> str:
         try:
             j = json.loads(s)
             s = (j.get("host") or j.get("url") or "").strip()
-        except Exception:
+        except ValueError:
+            _log.debug("normalize_host failed", exc_info=True)
             return ""
     if not s:
         return ""
@@ -48,7 +59,8 @@ def normalize_host(raw: str) -> str:
         if not p.netloc:
             return ""
         return f"{p.scheme or 'https'}://{p.netloc}"
-    except Exception:
+    except ValueError:
+        _log.debug("normalize_host failed", exc_info=True)
         return ""
 
 
@@ -63,7 +75,8 @@ def is_challenge_page(status: int, body: str) -> bool:
         try:
             json.loads(b)
             return False
-        except Exception:
+        except ValueError:
+            _log.debug("is_challenge_page failed", exc_info=True)
             pass
     if len(b) < 200:
         return True
@@ -78,7 +91,8 @@ def is_challenge_page(status: int, body: str) -> bool:
 def is_valid_cms_json(body: str) -> bool:
     try:
         j = json.loads(body)
-    except Exception:
+    except ValueError:
+        _log.debug("is_valid_cms_json failed", exc_info=True)
         return False
     if not isinstance(j, dict):
         return False
@@ -118,6 +132,7 @@ def heal(primary_api: str, ext: str = "", backups: list[str] | None = None,
     try:
         primary_host = normalize_host(primary_api)
     except Exception:
+        _log.debug("heal failed", exc_info=True)
         return None
     if not primary_host:
         return None
@@ -128,6 +143,7 @@ def heal(primary_api: str, ext: str = "", backups: list[str] | None = None,
         try:
             status, body = fetch(url)
         except Exception:
+            _log.debug("heal failed", exc_info=True)
             continue
         if is_valid_list_page(status, body, expect_json=expect_json):
             return url

@@ -33,6 +33,16 @@ import httpx
 
 from config import config
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("hgdj")
+
 # 与 app.py:60 保持一致；播放直链与代理路由都挂在这个前缀下。
 ONLINE_PREFIX = "/v/media/online"
 HGDJ_DEFAULT_URL = "http://127.0.0.1:18098"
@@ -128,6 +138,7 @@ async def _get_json(client: httpx.AsyncClient, url: str, timeout: float = 20.0) 
             return None
         return r.json()
     except Exception:
+        _log.debug("_get_json failed", exc_info=True)
         return None
 
 
@@ -196,7 +207,8 @@ def _load_disk() -> bool:
     global _cache
     try:
         j = json.loads(STATE.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_load_disk failed", exc_info=True)
         return False
     if not isinstance(j, dict):
         return False
@@ -635,6 +647,7 @@ async def proxy_media(guid: str, ep: int, req_headers: dict[str, str]):
     try:
         r = await client.send(client.build_request("GET", url, headers=fwd), stream=True)
     except Exception:
+        _log.debug("proxy_media failed: guid=%s ep=%s", guid, ep, exc_info=True)
         await client.aclose()
         return 502, {}, None
 

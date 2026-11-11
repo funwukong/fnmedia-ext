@@ -23,6 +23,16 @@ import time
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("panali")
+
 # 复用内联 segno 渲染二维码
 _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 if os.path.isdir(_VENDOR) and _VENDOR not in sys.path:
@@ -50,7 +60,8 @@ def _load() -> dict:
     try:
         with open(_STATE_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_load failed", exc_info=True)
         return {}
 
 
@@ -63,6 +74,7 @@ def _save(st: dict) -> None:
     try:
         os.chmod(_STATE_PATH, 0o600)
     except Exception:
+        _log.debug("_save failed", exc_info=True)
         pass
 
 
@@ -125,6 +137,7 @@ def _post(cli: httpx.Client, path: str, body: dict,
     try:
         j = r.json()
     except Exception:
+        _log.debug("_post failed", exc_info=True)
         raise PanError(f"阿里云盘接口返回非 JSON（HTTP {r.status_code}）")
     if isinstance(j, dict) and j.get("code") and j["code"] not in (
             "0", "200", "Success", "AccessTokenInvalid"):
@@ -144,6 +157,7 @@ def _token_post(cli: httpx.Client, data: dict) -> dict:
     try:
         j = r.json()
     except Exception:
+        _log.debug("_token_post failed", exc_info=True)
         raise PanError(f"换取 token 失败（HTTP {r.status_code}）")
     if j.get("error") or j.get("code") in ("InvalidClient",):
         raise PanError(j.get("error_description") or j.get("message")
@@ -196,6 +210,7 @@ def set_cookie(raw: str) -> dict:
                 set_credentials(j.get("client_id", ""),
                                 j.get("client_secret", ""))
         except Exception:
+            _log.debug("set_cookie failed", exc_info=True)
             pass
     if not rt:
         rt = raw
@@ -263,6 +278,7 @@ def qr_poll(session: dict) -> dict:
         try:
             _fill_profile()
         except Exception:
+            _log.debug("qr_poll failed", exc_info=True)
             pass
         info = account_info_safe()
         return {"status": "success", "nickname": info.get("nickname", "")}

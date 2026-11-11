@@ -58,6 +58,7 @@ def _source_health_enabled() -> bool:
         from config import config as _cfg
         return bool(_cfg.get().get("source_health_enabled", True))
     except Exception:
+        _log.debug("_source_health_enabled failed", exc_info=True)
         return True
 
 # 2026-10-17 国内直连实测（搜索+m3u8 直链可达性）。403/404 多为走 Clash 代理所致。
@@ -210,6 +211,7 @@ def guard_source_defs() -> list:
             })
         return out
     except Exception:
+        _log.debug("guard_source_defs failed", exc_info=True)
         return []
 
 
@@ -226,6 +228,7 @@ def _bootstrap_guard_sources() -> None:
             if not any(s["id"] == d["id"] for s in DEFAULT_SOURCES):
                 DEFAULT_SOURCES.append(d)
     except Exception:
+        _log.debug("_bootstrap_guard_sources failed", exc_info=True)
         pass
 
 
@@ -370,6 +373,7 @@ def _parse_play(vod_play_from: str, vod_play_note: str, vod_play_url: str,
                 if _adf.is_ad_episode(ep_name):
                     continue
             except Exception:
+                _log.debug("_parse_play failed", exc_info=True)
                 pass
             direct = bool(_MEDIA_RE.search(url))
             # /share/<id> 等播放页：非直链但可按需解析出媒体地址
@@ -411,6 +415,7 @@ def parse_cms_xml(text: str) -> dict | None:
         import xml.etree.ElementTree as ET
         root = ET.fromstring(text)
     except Exception:
+        _log.debug("parse_cms_xml failed", exc_info=True)
         return None
     # 根可能是 <rss>，列表在其下 <list>；也兼容直接 <list>
     list_node = root.find(".//list")
@@ -546,6 +551,7 @@ async def search_source(client: httpx.AsyncClient, source: dict,
             t = _map_vod(v, source)
         except Exception as exc:
             # 单条 vod 映射失败只丢该条（上游 JSON 字段不可信），按调用汇总记一条日志。
+            _log.debug("search_source failed: source=%s", source, exc_info=True)
             dropped += 1
             if not first_err:
                 first_err = type(exc).__name__
@@ -680,6 +686,7 @@ async def probe_source(api: str, keyword: str = "庆余年",
             # 同时支持 at/json 与 at/xml（XML 先转等价 dict）
             j = parse_cms_xml(r.text) if _is_xml_api(api) else r.json()
     except Exception as exc:
+        _log.debug("probe_source failed: source=%s", source, exc_info=True)
         return {"ok": False, "status": 0,
                 "elapsed_ms": int((time.monotonic() - t0) * 1000),
                 "count": 0, "sample": "", "error": type(exc).__name__}
@@ -828,6 +835,7 @@ async def dduo_search_source(client: httpx.AsyncClient, source: dict,
             if t and t.title and t.sources:
                 return t
         except Exception:
+            _log.debug("one failed", exc_info=True)
             return None
         return None
 
@@ -855,6 +863,7 @@ async def dduo_probe_source(source: dict, keyword: str = "庆余年",
             return {"ok": True, "status": 200, "elapsed_ms": ms, "count": 0,
                     "sample": "", "error": "接口正常（该词无结果）"}
     except Exception as exc:
+        _log.debug("dduo_probe_source failed: source=%s", source, exc_info=True)
         return {"ok": False, "status": 0,
                 "elapsed_ms": int((time.monotonic() - t0) * 1000),
                 "count": 0, "sample": "", "error": type(exc).__name__}
@@ -907,6 +916,7 @@ async def xiaoya_search_source(client, source: dict,
         lst = await asyncio.to_thread(catvod.search, keyword,
                                       (await catvod.xiaoya_token()))
     except Exception:
+        _log.debug("xiaoya_search_source failed: source=%s", source, exc_info=True)
         return []
     out = []
     for v in lst:
@@ -968,6 +978,7 @@ async def drpy_search_source(client, source: dict,
         site = _drpy_site(source)
         lst = await asyncio.to_thread(drpy.search, site, keyword, False, 1)
     except Exception:
+        _log.debug("drpy_search_source failed: source=%s", source, exc_info=True)
         return []
     out = []
     for v in lst:
@@ -1032,6 +1043,7 @@ async def guard_search_source(client, source: dict, keyword: str) -> list[Online
             asyncio.to_thread(guard.search, conf, keyword, False, 1),
             timeout=GUARD_SEARCH_TIMEOUT)
     except Exception:
+        _log.debug("guard_search_source failed: source=%s", source, exc_info=True)
         return []
     out = []
     for v in lst:
@@ -1092,6 +1104,7 @@ async def spider_search_source(client, source: dict, keyword: str) -> list[Onlin
     try:
         lst = await asyncio.to_thread(spiders.search, conf, keyword, False, 1)
     except Exception:
+        _log.debug("spider_search_source failed: source=%s", source, exc_info=True)
         return []
     out = []
     for v in lst:
@@ -1176,6 +1189,7 @@ async def search_all(keyword: str, sources=None,
                                         if visible(title):
                                             visible_total += 1
                                     except Exception:
+                                        _log.debug("search_all failed", exc_info=True)
                                         pass
                 if visible is not None:
                     total = visible_total

@@ -25,6 +25,16 @@ from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("netutil")
+
 
 # 阻塞式源适配器（例如需要同步 HTTP/RPC 的源）不能占用 asyncio 默认线程池：
 # 默认池还负责 httpx 的 DNS/连接等异步底层工作，一旦被慢源排队占满，海报、
@@ -71,6 +81,7 @@ def source_proxy() -> str:
         from config import config as _cfg
         return str(_cfg.get().get("source_proxy") or "").strip()
     except Exception:  # noqa: BLE001
+        _log.debug("source_proxy failed", exc_info=True)
         return ""
 
 
@@ -81,6 +92,7 @@ def proxy_mode() -> str:
         m = str(_cfg.source_proxy_mode() or "auto").strip().lower()
         return m if m in ("off", "on", "auto") else "auto"
     except Exception:  # noqa: BLE001
+        _log.debug("proxy_mode failed", exc_info=True)
         return "auto"
 
 
@@ -89,9 +101,11 @@ def host_of(url: str | httpx.URL) -> str:
         u = url if isinstance(url, httpx.URL) else httpx.URL(url)
         return (u.host or "").lower()
     except Exception:  # noqa: BLE001
+        _log.debug("host_of failed", exc_info=True)
         try:
             return (urlsplit(str(url)).hostname or "").lower()
         except Exception:  # noqa: BLE001
+            _log.debug("host_of failed", exc_info=True)
             return ""
 
 
@@ -208,6 +222,7 @@ class _AdaptiveBase:
         try:
             return (request.url.host or "").lower()
         except Exception:  # noqa: BLE001
+            _log.debug("_host_of failed", exc_info=True)
             return ""
 
     def _is_conn_error(self, exc: BaseException) -> bool:
@@ -226,6 +241,7 @@ class _AdaptiveAsyncClient(_AdaptiveBase):
         try:
             return await client.send(request, stream=stream, **kwargs)
         except Exception as exc:
+            _log.debug("send failed", exc_info=True)
             if use_proxy or stream or not self._is_conn_error(exc):
                 raise
             # 直连连接级失败：学习该主机并改用代理重发同一次请求（重建请求对象，
@@ -251,6 +267,7 @@ class _AdaptiveAsyncClient(_AdaptiveBase):
             try:
                 await c.aclose()
             except Exception:  # noqa: BLE001
+                _log.debug("aclose failed", exc_info=True)
                 pass
 
     async def __aenter__(self):
@@ -285,6 +302,7 @@ class _AdaptiveSyncClient(_AdaptiveBase):
         try:
             return client.send(request, stream=stream, **kwargs)
         except Exception as exc:
+            _log.debug("send failed", exc_info=True)
             if use_proxy or stream or not self._is_conn_error(exc):
                 raise
             mark_host_proxy(host)
@@ -304,6 +322,7 @@ class _AdaptiveSyncClient(_AdaptiveBase):
             try:
                 c.close()
             except Exception:  # noqa: BLE001
+                _log.debug("close failed", exc_info=True)
                 pass
 
     def __enter__(self):

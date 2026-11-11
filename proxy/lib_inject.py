@@ -43,6 +43,7 @@ def _all_virtual_lib_guids() -> set[str]:
         for cat in _xlib_active_cats():
             guids.add(xlib.lib_guid(cat["id"]))
     except Exception:
+        _log.debug("_all_virtual_lib_guids failed", exc_info=True)
         pass
     # <<< PRIVATE:CATVOD
     if hgdj_enabled():

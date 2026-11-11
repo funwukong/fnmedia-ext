@@ -27,6 +27,16 @@ from urllib.parse import urljoin, urlsplit
 
 import config as _cfg
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("adfilter")
+
 # ---- 持久化 --------------------------------------------------------------
 _STATE_DIR = Path(__file__).resolve().parent.parent / "state"
 _RULES_FILE = _STATE_DIR / "ad_rules.json"   # 订阅合并来的去广告规则
@@ -71,6 +81,7 @@ def enabled() -> bool:
     try:
         return bool(_cfg.config.get().get(_ENABLE_KEY, True))
     except Exception:
+        _log.debug("enabled failed", exc_info=True)
         return True
 
 
@@ -83,7 +94,8 @@ def _load_rules() -> list[dict]:
         if _RULES_FILE.exists():
             r = json.loads(_RULES_FILE.read_text(encoding="utf-8"))
             return r if isinstance(r, list) else []
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_load_rules failed", exc_info=True)
         pass
     return []
 
@@ -163,6 +175,7 @@ def _host_matches(hosts: list[str], media_url: str) -> bool:
     try:
         host = urlsplit(media_url).netloc.lower()
     except Exception:
+        _log.debug("_host_matches failed", exc_info=True)
         host = ""
     if not host:
         return False
@@ -200,6 +213,7 @@ def _apply_host_regex(text: str, patterns: list[str]) -> str:
             # 个别源的正则在 Python 引擎不兼容（如占有量词）：忽略该条，不影响其它
             continue
         except Exception:
+            _log.debug("_apply_host_regex failed", exc_info=True)
             continue
     return text
 
@@ -304,6 +318,7 @@ def _dynamic_enabled() -> bool:
     try:
         return bool(_cfg.config.get().get("ad_filter_dynamic", True))
     except Exception:
+        _log.debug("_dynamic_enabled failed", exc_info=True)
         return True
 
 
@@ -311,6 +326,7 @@ def _host_of(url: str) -> str:
     try:
         return urlsplit(url.strip()).netloc.lower().split(":", 1)[0]
     except Exception:
+        _log.debug("_host_of failed", exc_info=True)
         return ""
 
 
@@ -487,6 +503,7 @@ def filter_hls(text: str | None, media_url: str = "",
             return original, 0
         return text, removed
     except Exception:
+        _log.debug("filter_hls failed", exc_info=True)
         return original, 0
 
 
@@ -519,6 +536,7 @@ def sps_enabled() -> bool:
     try:
         return bool(_cfg.config.get().get("ad_filter_sps", True))
     except Exception:
+        _log.debug("sps_enabled failed", exc_info=True)
         return True
 
 
@@ -623,6 +641,7 @@ def _dominant_profile(weighted, min_ratio=_SPS_MIN_DOMINANT_RATIO):
             import sps as _sps
             k = _sps.profile_key(p)
         except Exception:
+            _log.debug("_dominant_profile failed", exc_info=True)
             continue
         total += w
         if k in tally:
@@ -693,6 +712,7 @@ async def _probe_one(url, fetch_head, sem, deadline):
                 _sps_cache_put(url, prof)
             return prof
     except Exception:
+        _log.debug("_probe_one failed", exc_info=True)
         return None
 
 
@@ -730,6 +750,7 @@ async def filter_hls_async(text, media_url, fetch_head, use_heuristic=True):
                 try:
                     absu = urljoin(media_url, uri)
                 except Exception:
+                    _log.debug("probe_block failed", exc_info=True)
                     continue
                 p = await _probe_one(absu, fetch_head, sem, deadline)
                 if p:
@@ -776,6 +797,7 @@ async def filter_hls_async(text, media_url, fetch_head, use_heuristic=True):
             return text, removed
         return new_text, removed + drop_n
     except Exception:
+        _log.debug("filter_hls_async failed", exc_info=True)
         return text, removed
 
 

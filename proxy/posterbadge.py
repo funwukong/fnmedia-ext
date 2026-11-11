@@ -15,6 +15,16 @@ import io
 import threading
 
 try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("posterbadge")
+
+try:
     from PIL import Image, ImageDraw, ImageFont
 except Exception:  # noqa: BLE001
     Image = None  # type: ignore
@@ -42,6 +52,7 @@ def _font(size: int):
         try:
             return ImageFont.truetype(path, size)
         except Exception:  # noqa: BLE001
+            _log.debug("_font failed", exc_info=True)
             continue
     return ImageFont.load_default()
 
@@ -56,6 +67,7 @@ def _cjk_font(size: int):
         try:
             return ImageFont.truetype(path, size)
         except Exception:  # noqa: BLE001
+            _log.debug("_cjk_font failed", exc_info=True)
             continue
     return _font(size)
 
@@ -79,6 +91,7 @@ def badge(poster_bytes: bytes, pan_label: str = "",
     try:
         im = Image.open(io.BytesIO(poster_bytes)).convert("RGB")
     except Exception:  # noqa: BLE001
+        _log.debug("badge failed", exc_info=True)
         return None
     w, h = im.size
     draw = ImageDraw.Draw(im, "RGBA")
@@ -96,6 +109,7 @@ def badge(poster_bytes: bytes, pan_label: str = "",
             tb = draw.textbbox((0, 0), text, font=f)
             tw, th = tb[2] - tb[0], tb[3] - tb[1]
         except Exception:  # noqa: BLE001
+            _log.debug("badge failed", exc_info=True)
             tw, th = int(len(text) * fs * 0.7), fs
         pad = int(7 * scale)
         x0, y0 = int(8 * scale), int(8 * scale)

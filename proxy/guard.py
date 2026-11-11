@@ -62,11 +62,13 @@ def _restart_bridge_app() -> None:
     try:
         _docker_exec(["am", "force-stop", "com.fnmedia.catvodbridge"], timeout=10)
     except Exception:  # noqa: BLE001
+        _log.debug("_restart_bridge_app failed", exc_info=True)
         pass
     time.sleep(1.0)
     try:
         _docker_exec(["am", "start", "-n", _BRIDGE_COMPONENT], timeout=8)
     except Exception:  # noqa: BLE001
+        _log.debug("_restart_bridge_app failed", exc_info=True)
         pass
     for _ in range(8):
         if _redroid_bridge_up():
@@ -116,6 +118,7 @@ def _manual_stop_requested() -> bool:
     try:
         return _ANDROID_STOP_FLAG.exists()
     except Exception:
+        _log.debug("_manual_stop_requested failed", exc_info=True)
         return False
 
 
@@ -124,6 +127,7 @@ def _request_manual_stop() -> None:
         _SIDECAR_STATE_DIR.mkdir(parents=True, exist_ok=True)
         _ANDROID_STOP_FLAG.write_text(str(time.time()), encoding="utf-8")
     except Exception:
+        _log.debug("_request_manual_stop failed", exc_info=True)
         pass
 
 
@@ -133,6 +137,7 @@ def _clear_manual_stop() -> None:
     except FileNotFoundError:
         pass
     except Exception:
+        _log.debug("_clear_manual_stop failed", exc_info=True)
         pass
 
 
@@ -141,13 +146,15 @@ def _mark_android_used() -> None:
         _SIDECAR_STATE_DIR.mkdir(parents=True, exist_ok=True)
         _ANDROID_USE_FILE.write_text(str(time.time()), encoding="utf-8")
     except Exception:
+        _log.debug("_mark_android_used failed", exc_info=True)
         pass
 
 
 def android_last_use() -> float:
     try:
         return float(_ANDROID_USE_FILE.read_text(encoding="utf-8").strip())
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("android_last_use failed", exc_info=True)
         return 0.0
 
 
@@ -163,6 +170,7 @@ def _container_exists(name: str = REDROID_CONTAINER) -> bool:
                              capture_output=True, text=True, timeout=6)
         return out.returncode == 0
     except Exception:
+        _log.debug("_container_exists failed: name=%s", name, exc_info=True)
         return False
 
 
@@ -174,6 +182,7 @@ def _container_running(name: str = REDROID_CONTAINER) -> bool:
                              capture_output=True, text=True, timeout=6)
         return out.stdout.strip() == "true"
     except Exception:
+        _log.debug("_container_running failed: name=%s", name, exc_info=True)
         return False
 
 
@@ -193,6 +202,7 @@ def pool_containers() -> list[str]:
             if nm and nm.startswith("fnmedia-redroid") and nm not in names:
                 names.append(nm)
     except Exception:
+        _log.debug("pool_containers failed", exc_info=True)
         pass
     return [n for n in names if _container_running(n)]
 
@@ -212,6 +222,7 @@ def _redroid_booted() -> bool:
         out = _docker_exec(["getprop", "sys.boot_completed"], timeout=8)
         return out.stdout.strip() == "1"
     except Exception:
+        _log.debug("_redroid_booted failed", exc_info=True)
         return False
 
 
@@ -221,6 +232,7 @@ def _redroid_bridge_up() -> bool:
         with urllib.request.urlopen(f"http://127.0.0.1:{REDROID_BRIDGE_PORT}/ping", timeout=4) as r:
             return b'"ok"' in r.read(200)
     except Exception:
+        _log.debug("_redroid_bridge_up failed", exc_info=True)
         return False
 
 
@@ -232,6 +244,7 @@ def _ensure_binderfs() -> None:
         subprocess.run(["mkdir", "-p", "/dev/binderfs"], timeout=5)
         subprocess.run(["mount", "-t", "binder", "binder", "/dev/binderfs"], timeout=5)
     except Exception:
+        _log.debug("_ensure_binderfs failed", exc_info=True)
         pass
 
 
@@ -241,6 +254,7 @@ def _redroid_image_present(name: str | None = None) -> bool:
                              capture_output=True, text=True, timeout=8)
         return out.returncode == 0
     except Exception:
+        _log.debug("_redroid_image_present failed: name=%s", name, exc_info=True)
         return False
 
 
@@ -255,6 +269,7 @@ def _resolve_redroid_image() -> str:
             if pull.returncode == 0 and _redroid_image_present(ref):
                 return ref
         except Exception:
+            _log.debug("_resolve_redroid_image failed", exc_info=True)
             continue
     raise RuntimeError(f"无法获取 redroid 镜像（{REDROID_IMAGE} 与回退 {REDROID_BASE} 均失败）")
 
@@ -280,6 +295,7 @@ def _ensure_redroid_dns(net: str, dns1: str) -> None:
         if ins:
             subnet = ins.split()[0]
     except Exception:  # noqa: BLE001
+        _log.debug("_ensure_redroid_dns failed", exc_info=True)
         pass
     if not subnet:
         try:
@@ -288,6 +304,7 @@ def _ensure_redroid_dns(net: str, dns1: str) -> None:
                                 capture_output=True, text=True, timeout=8).stdout.strip()
             subnet = (br.split()[0] if br else "172.17.0.0/16")
         except Exception:  # noqa: BLE001
+            _log.debug("_ensure_redroid_dns failed", exc_info=True)
             subnet = "172.17.0.0/16"
     for proto in ("udp", "tcp"):
         check = ["iptables", "-t", "nat", "-C", "PREROUTING", "-s", subnet,
@@ -363,6 +380,7 @@ def _install_bridge_assets() -> None:
         chk = _docker_exec(["sh", "-c", "test -f /fnmedia/catvod-bridge.apk && echo y"], timeout=8)
         has_builtin = chk.stdout.strip() == "y"
     except Exception:
+        _log.debug("_install_bridge_assets failed", exc_info=True)
         has_builtin = False
     if has_builtin:
         _docker_exec(["pm", "install", "-r", "/fnmedia/catvod-bridge.apk"], timeout=60)
@@ -477,6 +495,7 @@ def user_jar_status() -> dict:
                               f"test -f {DEVICE_JAR} && stat -c %s {DEVICE_JAR}"], timeout=8)
             device = bool((r.stdout or "").strip().isdigit())
         except Exception:
+            _log.debug("user_jar_status failed", exc_info=True)
             device = False
     return {"present": local, "size": size, "on_device": device,
             "container_running": _container_running()}
@@ -494,6 +513,7 @@ def _redroid_bringup(timeout_s: float = 120.0) -> None:
         try:
             _docker_exec(["am", "start", "-n", _BRIDGE_COMPONENT], timeout=10)
         except Exception:
+            _log.debug("_redroid_bringup failed", exc_info=True)
             pass
         for _ in range(20):
             if _redroid_bridge_up():
@@ -519,6 +539,7 @@ def stop_android() -> dict:
             return {"ok": True, "log": "redroid 已停止，内存已释放；需要时点“启动运行时”", "backend": "redroid"}
         return {"ok": True, "log": "redroid 本就未运行", "backend": "redroid"}
     except Exception as exc:  # noqa: BLE001
+        _log.debug("stop_android failed", exc_info=True)
         return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:160]}"}
 
 
@@ -543,6 +564,7 @@ def _start_android_blocking() -> None:
     try:
         _push_user_jar()
     except Exception:
+        _log.debug("_start_android_blocking failed", exc_info=True)
         pass
 
 
@@ -562,12 +584,14 @@ def start_android(wait_ready: bool = False) -> dict:
                 _start_android_blocking()
                 return {"ok": True, "ready": _redroid_bridge_up(), "backend": "redroid"}
             except Exception as exc:  # noqa: BLE001
+                _log.debug("start_android failed", exc_info=True)
                 return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
         def _bg():
             try:
                 _start_android_blocking()
             except Exception:
+                _log.debug("_bg failed", exc_info=True)
                 pass
             finally:
                 try:
@@ -627,6 +651,7 @@ def autostart_android(blocking: bool = False) -> dict:
             _start_android_blocking()
             return {"ok": True, "started": True, "ready": _redroid_bridge_up()}
         except Exception as exc:  # noqa: BLE001
+            _log.debug("autostart_android failed", exc_info=True)
             return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
     # 后台拉起，不阻塞插件启动
     start_android(wait_ready=False)
@@ -694,7 +719,8 @@ def feature_on() -> bool:
 def _read_json(path: Path) -> dict:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
+    except (OSError, ValueError):
+        _log.debug("_read_json failed", exc_info=True)
         return {}
 
 
@@ -939,6 +965,7 @@ def health(force: bool = False) -> dict:
             out = {"ok": bool(j.get("runtimes", {}).get("android")),
                    "runner": RUNNER_URL, "runtimes": j.get("runtimes", {})}
         except Exception as exc:  # noqa: BLE001
+            _log.debug("health failed", exc_info=True)
             out = {"ok": False, "runner": RUNNER_URL, "error": str(exc)[:160]}
     _health_cache = (now, out)
     return out
@@ -964,6 +991,7 @@ def _call(site_conf: dict, method: str, **params):
             res = _runner_post("/invoke", payload, timeout=22.0)
             _bridge_fail = 0
         except Exception:
+            _log.debug("_call failed", exc_info=True)
             _bridge_fail += 1
             # 单实例时代的整机卡死在池里已罕见；连续失败且过冷却期才串行重启主桥，
             # 然后只重试一次本次调用。重启动作本身用独立锁串行，避免并发重复拉起。
@@ -974,6 +1002,7 @@ def _call(site_conf: dict, method: str, **params):
                     try:
                         _restart_bridge_app()
                     except Exception:  # noqa: BLE001
+                        _log.debug("_call failed", exc_info=True)
                         pass
                 res = _runner_post("/invoke", payload)
                 _bridge_fail = 0
@@ -1034,7 +1063,8 @@ def play(site_conf: dict, flag: str, vod_id: str) -> dict:
     if isinstance(res, str) and res.strip().startswith("{"):
         try:
             res = json.loads(res)
-        except Exception:
+        except ValueError:
+            _log.debug("play failed", exc_info=True)
             return {"url": res}
     if not isinstance(res, dict):
         return {"url": _normalize_url(str(res or ""))}
@@ -1045,7 +1075,8 @@ def play(site_conf: dict, flag: str, vod_id: str) -> dict:
     if isinstance(headers, str) and headers:
         try:
             headers = json.loads(headers)
-        except Exception:
+        except ValueError:
+            _log.debug("play failed", exc_info=True)
             headers = {}
     res["_headers"] = headers or {}
     return res
@@ -1086,6 +1117,7 @@ def parse_episodes(detail: dict) -> list[dict]:
                 if _adf.is_ad_episode(ep_name):
                     continue
             except Exception:
+                _log.debug("parse_episodes failed", exc_info=True)
                 pass
             if vid:
                 out.append({"line": line, "title": ep_name, "id": vid})
@@ -1121,6 +1153,7 @@ def prefetch_posters(site_conf: dict) -> list[str]:
             if len(ps) >= 8:
                 break
     except Exception:
+        _log.debug("prefetch_posters failed", exc_info=True)
         pass
     with _lock:
         if ps:
@@ -1249,6 +1282,7 @@ def filters_for(site_conf: dict, tid: str) -> list[dict]:
     try:
         return (browse_meta(site_conf).get("filters") or {}).get(str(tid)) or []
     except Exception:  # noqa: BLE001
+        _log.debug("filters_for failed: tid=%s", tid, exc_info=True)
         return []
 
 
@@ -1315,6 +1349,7 @@ def sidecar_status() -> dict:
         out.update(runner_ok=bool(j.get("ok")), java=bool(rt.get("java")),
                    node=bool(rt.get("node")), android=bool(rt.get("android")))
     except Exception as ex:  # noqa: BLE001
+        _log.debug("sidecar_status failed", exc_info=True)
         out["error"] = str(ex)[:120]
     with _job_lock:
         out["installing"] = bool(_job and _job.get("proc")
@@ -1328,6 +1363,7 @@ def install_log_tail(n: int = 200) -> str:
         lines = _INSTALL_LOG.read_text(errors="replace").splitlines()
         return "\n".join(lines[-n:])
     except Exception:
+        _log.debug("install_log_tail failed", exc_info=True)
         return ""
 
 
@@ -1367,4 +1403,5 @@ def reconnect_network() -> dict:
         ok = _redroid_bridge_up()
         return {"ok": ok, "out": "bridge 已就绪" if ok else "bridge 尚未就绪，稍后重试"}
     except Exception as ex:  # noqa: BLE001
+        _log.debug("reconnect_network failed", exc_info=True)
         return {"ok": False, "error": str(ex)[:160]}

@@ -22,6 +22,16 @@ import re
 import time
 import urllib.parse
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("sniff")
+
 # 直链媒体后缀/特征
 _MEDIA_EXT = re.compile(r"\.(m3u8|mp4|flv|mkv|ts|mpd)(\?|$)", re.I)
 # 明显是媒体 CDN（无后缀但路径像流）
@@ -81,6 +91,7 @@ def _decode_escapes(s: str) -> str:
                        lambda m: chr(int(m.group(1), 16)), s)
         s = html.unescape(s)
     except Exception:
+        _log.debug("_decode_escapes failed", exc_info=True)
         pass
     return s
 
@@ -91,6 +102,7 @@ def _try_b64_media(text: str) -> str:
         try:
             dec = base64.b64decode(m.group(0)).decode("utf-8", "ignore")
         except Exception:
+            _log.debug("_try_b64_media failed", exc_info=True)
             continue
         mm = _MEDIA_EXT.search(dec)
         if not mm:
@@ -146,11 +158,13 @@ def _extract_player_aaaa(html_text: str) -> dict | None:
         return j if isinstance(j, dict) else None
     except Exception:
         # 单引号/尾逗号等宽松修复
+        _log.debug("_extract_player_aaaa failed", exc_info=True)
         try:
             fixed = re.sub(r",\s*}", "}", obj_s)
             fixed = re.sub(r",\s*]", "]", fixed).replace("'", '"')
             return json.loads(fixed)
         except Exception:
+            _log.debug("_extract_player_aaaa failed", exc_info=True)
             return None
 
 
@@ -203,6 +217,7 @@ async def sniff(client, page_url: str, referer: str = "",
         try:
             r = await _get(client, url, ref)
         except Exception:
+            _log.debug("sniff failed", exc_info=True)
             return None
         if r.status_code != 200:
             return None

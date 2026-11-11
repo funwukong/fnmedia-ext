@@ -132,6 +132,7 @@ def guard_lib_source(lib_guid: str) -> dict | None:
                 if conf:
                     return {"source": s, "conf": conf}
     except Exception:
+        _log.debug("guard_lib_source failed: lib_guid=%s", lib_guid, exc_info=True)
         return None
     return None
 
@@ -151,6 +152,7 @@ async def _guard_prefetch(key: str) -> None:
     try:
         await asyncio.to_thread(_g.prefetch_posters, conf)
     except Exception:
+        _log.debug("_guard_prefetch failed", exc_info=True)
         pass
 
 
@@ -174,6 +176,7 @@ def guard_libs_active() -> list[dict]:
                 out.append({"source": s, "conf": conf})
         return out
     except Exception:
+        _log.debug("guard_libs_active failed", exc_info=True)
         return []
 
 
@@ -250,6 +253,7 @@ def _gn_persist() -> None:
             json.dump(payload, f, ensure_ascii=False)
         os.replace(tmp, _GN_CACHE_PATH)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_persist failed", exc_info=True)
         pass
 
 
@@ -270,6 +274,7 @@ def _gn_load_persist() -> None:
                 _gn_state["per_src"] = d.get("per_src") or {}
                 _gn_state["hot_ts"] = d.get("hot_ts") or time.time()
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_load_persist failed", exc_info=True)
         pass
 
 
@@ -285,7 +290,8 @@ def _gn_catalog_load() -> dict:
             with open(_GN_CATALOG_PATH, "r", encoding="utf-8") as f:
                 d = json.load(f)
             out = d if isinstance(d, dict) else {}
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError):
+        _log.debug("_gn_catalog_load failed", exc_info=True)
         out = ent[1] if ent else {}
     globals()["_GN_CATALOG_MEM"] = (now, out)
     return out
@@ -325,6 +331,7 @@ def _gn_catalog_save(key: str, pages: dict, more: dict,
         os.replace(tmp, _GN_CATALOG_PATH)
         globals()["_GN_CATALOG_MEM"] = (time.time(), d)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_catalog_save failed", exc_info=True)
         pass
 
 
@@ -394,6 +401,7 @@ def _gn_catalog_detect_keys() -> list[str]:
             try:
                 vods = _g.browse_page(conf, tid, 1)
             except Exception:  # noqa: BLE001
+                _log.debug("_gn_catalog_detect_keys failed", exc_info=True)
                 vods = []
             if vods and str(vods[0].get("vod_id", "")).startswith("msearch"):
                 is_ms = True
@@ -410,6 +418,7 @@ def _gn_catalog_detect_keys() -> list[str]:
         os.replace(tmp, _GN_CATALOG_PATH)
         globals()["_GN_CATALOG_MEM"] = (time.time(), full)
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_catalog_detect_keys failed", exc_info=True)
         pass
     return keys
 
@@ -430,6 +439,7 @@ async def _gn_catalog_worker() -> None:
                 if k not in src_keys:
                     src_keys.append(k)
         except Exception:  # noqa: BLE001
+            _log.debug("_gn_catalog_worker failed", exc_info=True)
             det = []
         _log.info("guard native catalog sources: %s", src_keys)
         for key in src_keys:
@@ -466,6 +476,7 @@ async def _gn_catalog_worker() -> None:
                         vods = await asyncio.wait_for(asyncio.to_thread(
                             _g.browse_page, conf, tid, pg), timeout=20)
                     except Exception:  # noqa: BLE001
+                        _log.debug("_gn_catalog_worker failed", exc_info=True)
                         vods = []
                     cards = await asyncio.to_thread(
                         _gn_map_cards, group, vods, _GN_PAGE_SIZE, anc, ftype)
@@ -476,6 +487,7 @@ async def _gn_catalog_worker() -> None:
                             vods = await asyncio.wait_for(asyncio.to_thread(
                                 _g.browse_page, conf, tid, pg), timeout=20)
                         except Exception:  # noqa: BLE001
+                            _log.debug("_gn_catalog_worker failed", exc_info=True)
                             vods = []
                         cards = await asyncio.to_thread(
                             _gn_map_cards, group, vods, _GN_PAGE_SIZE, anc, ftype)
@@ -562,6 +574,7 @@ async def _gn_deep_worker() -> None:
                 vods = await asyncio.wait_for(asyncio.to_thread(
                     _g.browse_page, conf, tid, pg), timeout=22)
             except Exception:  # noqa: BLE001
+                _log.debug("fetch_page failed", exc_info=True)
                 vods = []
             anc = (f"{GUARD_NATIVE_TITLE}/"
                    f"{group['source'].get('name') or key}")
@@ -619,6 +632,7 @@ async def _gn_deep_worker() -> None:
                                 _k2, _t, _p, cards = await asyncio.wait_for(
                                     fetch_page(group, conf, c, p), timeout=22)
                             except Exception:  # noqa: BLE001
+                                _log.debug("_gn_deep_worker failed", exc_info=True)
                                 cards = []
                         if not cards:
                             stop_after = p
@@ -684,6 +698,7 @@ def _gn_parse_cls_token(token: str) -> tuple[str, str] | None:
         key, tid = raw.split("|", 1)
         return key, tid
     except Exception:  # noqa: BLE001
+        _log.debug("_gn_parse_cls_token failed", exc_info=True)
         return None
 
 
@@ -753,6 +768,7 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
         try:
             t = providers._guard_map_item(source, v)
         except Exception:  # noqa: BLE001
+            _log.debug("_gn_map_cards failed", exc_info=True)
             continue
         if not t.title or not t.vod_id:
             continue
@@ -790,6 +806,7 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
             try:
                 rm = f"评分 {float(sc):g}" if sc and float(sc) > 0 else ""
             except Exception:  # noqa: BLE001
+                _log.debug("_gn_map_cards failed", exc_info=True)
                 rm = ""
         row["title"] = (t.title or "") + (f" ·{rm}" if rm else "")
         row["ancestor_guid"] = GUARD_NATIVE_GUID
@@ -825,6 +842,7 @@ def _gn_refresh_hot() -> None:
                     vs = await asyncio.wait_for(asyncio.to_thread(
                         _g.browse_page, conf, c0["tid"], 1), timeout=18)
                 except Exception:  # noqa: BLE001
+                    _log.debug("one failed", exc_info=True)
                     vs = []
                 cn = str(c0.get("name") or "")
                 if vs:
@@ -835,6 +853,7 @@ def _gn_refresh_hot() -> None:
             items = await asyncio.wait_for(one(), timeout=22)
             return items, bool(items)
         except Exception:  # noqa: BLE001
+            _log.debug("_fetch failed", exc_info=True)
             return [], False
 
     groups = _gn_sources()
@@ -850,6 +869,7 @@ def _gn_refresh_hot() -> None:
                 try:
                     results.append(await _fetch(g))
                 except Exception:  # noqa: BLE001
+                    _log.debug("run failed", exc_info=True)
                     results.append(([], False))
             # 按源保留：本轮取数失败/为空的源沿用其上次缓存卡，避免单模拟器争用
             # 导致部分源超时后，整面墙越刷新越少。
@@ -957,6 +977,7 @@ def _gn_ensure_meta() -> None:
                     errored = False
                     err_reason = ""
                 except Exception as _exc:  # noqa: BLE001
+                    _log.debug("run failed", exc_info=True)
                     meta, errored = {}, True
                     err_reason = repr(_exc)[:160]
                 # 健康源约 1s；保留极小喘息，避免高频连续调用把单设备压挂。
@@ -1079,6 +1100,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                 try:
                     vods = await asyncio.wait_for(_one(), timeout=22)
                 except Exception:  # noqa: BLE001
+                    _log.debug("fetch failed", exc_info=True)
                     vods = []
                 if not vods and pg == 1:
                     try:
@@ -1089,6 +1111,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                                 _g.browse_page_ext, group["conf"], tid, 1, ext),
                             timeout=22)
                     except Exception:  # noqa: BLE001
+                        _log.debug("fetch failed", exc_info=True)
                         vods = []
                 anc = (f"{GUARD_NATIVE_TITLE}/"
                        f"{group['source'].get('name') or key}")
@@ -1338,6 +1361,7 @@ async def _gn_category_page(key: str, tid: str, cname: str, pg: int = 1,
         return cards or [], True, bool(more)
     except Exception:  # noqa: BLE001
         # 本次快速失败，但持久任务仍在后台取数（结果落缓存，下次秒回）
+        _log.debug("_gn_category_page failed: tid=%s", tid, exc_info=True)
         return [], True, True
 
 
@@ -1499,6 +1523,7 @@ async def _gn_warm_worker() -> None:
                     await asyncio.wait_for(
                         _gn_category_task(key, tid, 1, None, ftype), timeout=24)
                 except Exception:  # noqa: BLE001
+                    _log.debug("_gn_warm_worker failed", exc_info=True)
                     pass
                 await asyncio.sleep(_GN_WARM_GAP)
     except Exception:  # noqa: BLE001

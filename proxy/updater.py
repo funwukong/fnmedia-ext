@@ -26,6 +26,16 @@ from pathlib import Path
 import httpx
 
 try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("updater")
+
+try:
     import config as _config
 except Exception:  # pragma: no cover
     _config = None
@@ -72,6 +82,7 @@ def _persist() -> None:
         tmp.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
         tmp.replace(_STATE_FILE)
     except Exception:  # noqa: BLE001
+        _log.debug("_persist failed", exc_info=True)
         pass
 
 
@@ -86,6 +97,7 @@ def _restore() -> None:
                 snap["finished_at"] = time.time()
             _STATE.update(snap)
     except Exception:  # noqa: BLE001
+        _log.debug("_restore failed", exc_info=True)
         pass
 
 
@@ -121,6 +133,7 @@ def edition_full() -> bool:
     try:
         return bool(getattr(features, "DDUO", False) or getattr(features, "GUARD", False))
     except Exception:
+        _log.debug("edition_full failed", exc_info=True)
         return False
 
 
@@ -212,6 +225,7 @@ def check_sync(force: bool = False) -> dict:
                           status="idle", progress="")
         _persist()
     except Exception as exc:  # noqa: BLE001
+        _log.debug("check_sync failed", exc_info=True)
         with _LOCK:
             _STATE.update(last_check=now, last_error=str(exc),
                           status="error", progress="检查更新失败")
@@ -298,6 +312,7 @@ def _proxy_candidates() -> list[str | None]:
                 if v and v not in cands:
                     cands.append(v)
         except Exception:  # noqa: BLE001
+            _log.debug("_proxy_candidates failed", exc_info=True)
             pass
     cands.append(None)  # 直连兜底
     return cands
@@ -335,10 +350,12 @@ def _download_with_fallbacks(url: str, dest: Path, total_hint: int = 0) -> None:
                     tmp.replace(dest)
             return
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_download_with_fallbacks failed", exc_info=True)
             last_err = f"{tag}：{type(exc).__name__} {str(exc)[:80]}"
             try:
                 dest.with_suffix(dest.suffix + ".part").unlink(missing_ok=True)
             except Exception:  # noqa: BLE001
+                _log.debug("_download_with_fallbacks failed", exc_info=True)
                 pass
             continue
     raise RuntimeError("所有下载通道均失败：" + last_err)
@@ -358,6 +375,7 @@ def _get_text_with_fallbacks(url: str) -> str:
                 r.raise_for_status()
                 return r.text
         except Exception as exc:  # noqa: BLE001
+            _log.debug("_get_text_with_fallbacks failed", exc_info=True)
             last_err = str(exc)
             continue
     raise RuntimeError("下载校验文件失败：" + last_err)
@@ -459,6 +477,7 @@ def _launch_transient_updater(pkg: Path, target_version: str) -> None:
     try:
         (Path("/tmp/fnmedia-update") / "apply-result").unlink(missing_ok=True)
     except Exception:  # noqa: BLE001
+        _log.debug("_launch_transient_updater failed", exc_info=True)
         pass
     unit = "fnmedia-ext-auto-update.service"
     if shutil.which("systemd-run"):
@@ -521,6 +540,7 @@ def _blocking_install(info: dict, binp: str) -> None:
                           finished_at=time.time())
         _persist()
     except Exception as exc:  # noqa: BLE001
+        _log.debug("_blocking_install failed", exc_info=True)
         with _LOCK:
             _STATE.update(status="error",
                           progress=f"更新失败：{exc}",
@@ -542,6 +562,7 @@ async def periodic_loop(stop_event: asyncio.Event) -> None:
         try:
             await asyncio.to_thread(check_sync, False)
         except Exception:  # noqa: BLE001
+            _log.debug("periodic_loop failed", exc_info=True)
             pass
         try:
             await asyncio.wait_for(

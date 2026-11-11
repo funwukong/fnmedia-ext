@@ -28,6 +28,16 @@ from dataclasses import dataclass, field
 import httpx
 
 try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("dduo")
+
+try:
     import wasmtime as _wt
 except Exception:  # pragma: no cover - 依赖缺失时延迟报错
     _wt = None
@@ -321,6 +331,7 @@ async def search(client: httpx.AsyncClient, source: dict,
             headers=_headers(base), timeout=HTTP_TIMEOUT)
         j = r.json()
     except Exception:
+        _log.debug("search failed: source=%s", source, exc_info=True)
         return []
     if not isinstance(j, dict) or j.get("code") != 200:
         return []
@@ -338,6 +349,7 @@ async def get_detail(client: httpx.AsyncClient, source: dict,
             headers=_headers(base), timeout=HTTP_TIMEOUT)
         j = r.json()
     except Exception:
+        _log.debug("get_detail failed: source=%s", source, exc_info=True)
         return None
     if not isinstance(j, dict) or j.get("code") != 200:
         return None
@@ -396,6 +408,7 @@ async def decode_url(client: httpx.AsyncClient, source: dict,
         code, msg, url = await asyncio.to_thread(
             DduoWasm.get().parse_response, raw)
     except Exception:
+        _log.debug("decode_url failed: source=%s", source, exc_info=True)
         return None
     if code == 1 and url.startswith(("http://", "https://")):
         return url

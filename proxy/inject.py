@@ -9,6 +9,16 @@ import t4
 from store import (make_guid, media_guid, video_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("inject")
+
 # 海报地址格式与上游一致：/online/<token>.jpg。
 # 上游（yujian0815/fnmedia-ext，v0.2.42+）就是这个格式；本 fork 之前改成
 # /v/api/v1/sys/img/online/ 前缀后，App 端海报一直出不来（灰色胶片图标），
@@ -166,6 +176,7 @@ def episode_duration(ep: dict | None, b: dict | None = None) -> int:
                 import store as _st
                 b = _st.store.get_title_by_guid(ep.get("online_guid", "")) or {}
             except Exception:
+                _log.debug("episode_duration failed: ep=%s", ep, exc_info=True)
                 b = {}
         if b:
             cached = (b.get("ep_durations") or {}).get(
@@ -226,6 +237,7 @@ def _poster_for_brief(b: dict) -> str:
         try:
             pan, hg = _badge_provider(b)
         except Exception:  # noqa: BLE001
+            _log.debug("_poster_for_brief failed", exc_info=True)
             pan, hg = "", None
     if pan or hg is not None:
         return _poster_badged(cover, pan, hg if isinstance(hg, int) else None)

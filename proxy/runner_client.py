@@ -17,6 +17,16 @@ import os
 
 import httpx
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("runner_client")
+
 _URL = os.environ.get("FNM_RUNNER_URL", "").rstrip("/")
 _TIMEOUT = float(os.environ.get("FNM_RUNNER_TIMEOUT", "120"))
 
@@ -36,6 +46,7 @@ def health() -> dict:
         r = httpx.get(_URL + "/health", timeout=6, trust_env=False)
         return r.json()
     except Exception as exc:  # noqa: BLE001
+        _log.debug("health failed", exc_info=True)
         return {"ok": False, "enabled": True, "error": str(exc)[:160]}
 
 
@@ -50,6 +61,7 @@ def invoke(payload: dict, timeout: float | None = None):
                        timeout=timeout or _TIMEOUT, trust_env=False)
         j = r.json()
     except Exception as exc:  # noqa: BLE001
+        _log.debug("invoke failed", exc_info=True)
         raise RuntimeError(f"spider-runner 调用失败: {exc}") from exc
     if not j.get("ok"):
         raise RuntimeError(str(j.get("error") or j)[:300])

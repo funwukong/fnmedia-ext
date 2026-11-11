@@ -29,6 +29,16 @@ import sys
 import time
 from pathlib import Path
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("tap")
+
 TARGET = Path("/var/run/trim_media.sock")
 UPSTREAM = Path("/var/run/trim_media_upstream.sock")
 STATE_DIR = Path("/run/fnmedia-tap")
@@ -105,6 +115,7 @@ def take_over() -> None:
         try:
             move_no_replace(UPSTREAM, TARGET)
         except Exception:
+            _log.debug("take_over failed", exc_info=True)
             pass
         raise RuntimeError(f"换名后身份变化: {u}")
     log("接管完成：官方 socket 已重命名为 upstream。")
@@ -161,6 +172,7 @@ def parse_head(raw: bytes) -> tuple[str, str, dict] | None:
     try:
         head = raw.split(b"\r\n\r\n", 1)[0].decode("latin1")
     except Exception:
+        _log.debug("parse_head failed", exc_info=True)
         return None
     lines = head.split("\r\n")
     if not lines:
@@ -335,6 +347,7 @@ async def handle(reader, writer, counter):
         try:
             writer.close()
         except Exception:
+            _log.debug("handle failed", exc_info=True)
             pass
 
 

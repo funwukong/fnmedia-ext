@@ -69,6 +69,7 @@ def _autofail_on() -> bool:
     try:
         return bool(config.get().get("line_autofail", True))
     except Exception:
+        _log.debug("_autofail_on failed", exc_info=True)
         return True
 
 
@@ -83,6 +84,7 @@ def _source_health_enabled() -> bool:
     try:
         return bool(config.get().get("source_health_enabled", True))
     except Exception:
+        _log.debug("_source_health_enabled failed", exc_info=True)
         return True
 
 
@@ -95,6 +97,7 @@ def _domain_heal_enabled() -> bool:
     try:
         return bool(config.get().get("domain_heal_enabled", True))
     except Exception:
+        _log.debug("_domain_heal_enabled failed", exc_info=True)
         return True
 
 
@@ -186,13 +189,16 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         body = await r.aread()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
                 finally:
                     try:
                         await r.aclose()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
             except Exception:
+                _log.debug("_probe_latency failed", exc_info=True)
                 return None
             if status >= 400:
                 return None
@@ -249,6 +255,7 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         head = await sr.aread()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
                     # 源站对失效分片常回 200/404 + XML/HTML 错误页（非媒体）
                     if not head or head[:1] in (b"<", b"{", b"["):
@@ -257,11 +264,14 @@ async def _probe_latency(cand: dict, request: Request,
                     try:
                         await sr.aclose()
                     except Exception:
+                        _log.debug("_probe_latency failed", exc_info=True)
                         pass
         except Exception:
+            _log.debug("_probe_latency failed", exc_info=True)
             return None
         return time.time() - t0
     except Exception:
+        _log.debug("_probe_latency failed", exc_info=True)
         return None
 
 
@@ -316,6 +326,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
                 headers["Cookie"] = _panu.auth_cookie_or_raise()
                 headers.setdefault("Referer", "https://drive.uc.cn/")
         except Exception:
+            _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
             pass
         # <<< PRIVATE:GUARD
         headers["Range"] = _PROBE_RANGE
@@ -329,6 +340,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
             try:
                 b = await r.aread()
             except Exception:
+                _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
                 return True  # 读体失败不判死
             if not b or b[:1] in (b"<", b"{", b"["):
                 return False
@@ -336,6 +348,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
             try:
                 await r.aclose()
             except Exception:
+                _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
                 pass
         _SEG_OK_CACHE[real] = now
         if len(_SEG_OK_CACHE) > 1500:
@@ -343,6 +356,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
                 _SEG_OK_CACHE.pop(old, None)
         return True
     except Exception:
+        _log.debug("_verify_rewritten_first_seg failed", exc_info=True)
         return True  # 探测本身异常：保守放行，避免误伤好线
 
 
@@ -390,14 +404,17 @@ async def _http_head_ok(url: str, headers: dict) -> bool:
             try:
                 b = await r.aread()
             except Exception:
+                _log.debug("_http_head_ok failed", exc_info=True)
                 pass
             return bool(b) and b[:1] not in (b"<", b"{", b"[")
         finally:
             try:
                 await r.aclose()
             except Exception:
+                _log.debug("_http_head_ok failed", exc_info=True)
                 pass
     except Exception:
+        _log.debug("_http_head_ok failed", exc_info=True)
         return False
 
 
@@ -482,6 +499,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
                     if not await _http_head_ok(seg_url, hdrs):
                         continue
                 except Exception:
+                    _log.debug("evaluate failed", exc_info=True)
                     continue
                 # 命中：记录可播 og，并补一条可解析线路到该 og（_pick_episode 用）
                 if mg:
@@ -496,6 +514,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
         if await evaluate(briefs, True):
             return True
     except Exception:
+        _log.debug("_resurrect_worker failed", exc_info=True)
         pass
     try:
         briefs = await asyncio.wait_for(
@@ -503,6 +522,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
         if await evaluate(briefs, False):
             return True
     except Exception:
+        _log.debug("_resurrect_worker failed", exc_info=True)
         pass
     _RESURRECT_FAIL[nkey] = time.time()
     return False
@@ -537,6 +557,7 @@ def _remember_fast(picked: dict, line: str, latency: float | None = None) -> Non
             _episode_key(picked), line,
             float(latency) if latency is not None else 0.0)
     except Exception:
+        _log.debug("_remember_fast failed: line=%s", line, exc_info=True)
         pass
 
 
@@ -566,6 +587,7 @@ def _fastest_on() -> bool:
     try:
         return bool(config.get().get("line_fastest", True))
     except Exception:
+        _log.debug("_fastest_on failed", exc_info=True)
         return True
 
 
@@ -625,11 +647,13 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
         if bool(config.get().get("linepredict_enabled", True)):
             pred = linepredict.fastest(_episode_key(picked))
     except Exception:
+        _log.debug("_race_candidates failed", exc_info=True)
         pred = None
     cands = [c for c in cands if not _line_is_bad(c)] or cands
     try:
         n = int(config.get().get("line_fastest_max", 6))
     except Exception:
+        _log.debug("_race_candidates failed", exc_info=True)
         n = 6
     cands = cands[:max(2, n)]
 
@@ -643,6 +667,7 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
             sk = sourcehealth.source_key_of(c.get("line"), c)
             return bool(sk) and sourcehealth.is_dead(sk, level="stream")
         except Exception:
+            _log.debug("_src_dead failed", exc_info=True)
             return False
 
     def rank(c: dict) -> tuple:
@@ -1008,6 +1033,7 @@ def _cached_playlist_seconds(picked: dict) -> int:
     try:
         hit = _PLAYLIST_CACHE.get(_playlist_cache_key(picked))
     except Exception:
+        _log.debug("_cached_playlist_seconds failed", exc_info=True)
         return 0
     if not hit:
         return 0
@@ -1052,6 +1078,7 @@ def _remember_episode_duration(og: str, index: int, seconds: int) -> bool:
                 brief["duration"] = seconds
             store._schedule_flush()
     except Exception:
+        _log.debug("_remember_episode_duration failed", exc_info=True)
         return False
     return True
 
@@ -1068,6 +1095,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             rec = history.get(ep["ep_guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             rec = None
         if rec:
             dur = int(rec.get("duration", 0) or 0)
@@ -1076,6 +1104,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             target = store.get_episode_target(ep["ep_guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             target = None
         if target:
             dur = _cached_playlist_seconds(target)
@@ -1091,6 +1120,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             rec = history.get(brief["guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             rec = None
         if rec:
             dur = int(rec.get("duration", 0) or 0)
@@ -1099,6 +1129,7 @@ def _play_duration_for(ep: dict | None = None,
         try:
             line = store.best_line(brief["guid"])
         except Exception:
+            _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
             line = None
         if line:
             dur = _cached_playlist_seconds(
@@ -1117,6 +1148,7 @@ def _attach_play_duration(info: dict, *, ep: dict | None = None,
     try:
         dur = _play_duration_for(ep, brief)
     except Exception:
+        _log.debug("_attach_play_duration failed: ep=%s", ep, exc_info=True)
         return info
     if dur:
         info["duration"] = dur
@@ -1166,6 +1198,7 @@ def _main_slow_budget() -> float:
     try:
         return config.main_ready_budget()
     except Exception:
+        _log.debug("_main_slow_budget failed", exc_info=True)
         return 2.4
 
 
@@ -1597,6 +1630,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     except StopAsyncIteration:
         first = b""
     except Exception:  # noqa: BLE001
+        _log.debug("_try_stream_segment failed", exc_info=True)
         await rs.aclose()
         return None
     if first[:8] == b"\x89PNG\r\n\x1a\n":
@@ -1626,6 +1660,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
                 if nbytes and dt > 0.05:
                     _remember_speed(picked, nbytes / 1024.0 / dt)
             except Exception:
+                _log.debug("pump failed", exc_info=True)
                 pass
             await rs.aclose()
 
@@ -1709,6 +1744,7 @@ async def hls_seg(mg: str, request: Request):
     try:
         src_url = b64d(u)
     except Exception:
+        _log.debug("hls_seg failed", exc_info=True)
         return Response("bad u", status_code=400)
     await _await_pending_chart(mg)
     picked = _pick_episode(mg, request)
@@ -1739,6 +1775,7 @@ async def hls_seg(mg: str, request: Request):
             fwd["Cookie"] = _panu.auth_cookie_or_raise()
             fwd.setdefault("Referer", "https://drive.uc.cn/")
     except Exception:
+        _log.debug("hls_seg failed", exc_info=True)
         pass
     # <<< PRIVATE:GUARD
     # 加密 HLS 由本服务解密：不能按密文转发任意字节 Range，需完整拉取后回传纯 TS。
@@ -1794,6 +1831,7 @@ async def hls_seg(mg: str, request: Request):
                 ctype = "video/mp2t"
                 unwrapped = True
         except Exception:
+            _log.debug("hls_seg failed", exc_info=True)
             pass
     drop = {"content-security-policy"}
     if request.query_params.get("dec") == "1":
@@ -1840,6 +1878,7 @@ async def hls_compact(mg: str, request: Request):
             fwd["Cookie"] = _panu.auth_cookie_or_raise()
             fwd["Referer"] = "https://drive.uc.cn/"
     except Exception:
+        _log.debug("hls_compact failed", exc_info=True)
         pass
     # <<< PRIVATE:GUARD
     if request.headers.get("range"):
@@ -1858,6 +1897,7 @@ async def hls_compact(mg: str, request: Request):
             if payload is not body:
                 body, ctype = payload, "video/mp2t"
         except Exception:
+            _log.debug("hls_compact failed", exc_info=True)
             pass
     h = _safe_response_headers(r.headers, {"content-security-policy"})
     h["Access-Control-Allow-Origin"] = "*"

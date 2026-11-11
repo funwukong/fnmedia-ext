@@ -237,6 +237,7 @@ class MediaProbe:
             return {}
         except Exception:
             # The client can inspect original bytes; optional metadata cannot fail handoff.
+            _log.debug("for_playback failed", exc_info=True)
             return {}
 
     async def close(self):

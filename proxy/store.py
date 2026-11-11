@@ -19,6 +19,16 @@ from typing import Optional
 import providers
 import t4
 
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("store")
+
 _GUID_PREFIX = "on"
 _TTL = 24 * 3600
 _MAX_TITLES = 4000
@@ -35,6 +45,7 @@ def _cache_cfg() -> tuple[int, int, float]:
         max_mb = float(c.get("titles_cache_max_mb", 4))
         debounce = float(c.get("titles_flush_debounce", 5))
     except Exception:
+        _log.debug("_cache_cfg failed", exc_info=True)
         max_n, max_mb, debounce = _MAX_TITLES, 4.0, 5.0
     return (max(100, max_n),
             max(0.0, max_mb) * 1024 * 1024,
@@ -124,6 +135,7 @@ class Store:
                     continue
                 self._flush_now()
             except Exception:
+                _log.debug("_flush_loop failed", exc_info=True)
                 pass
 
     def _schedule_flush(self):
@@ -146,6 +158,7 @@ class Store:
             self._titles = j.get("titles", {})
             self._orig = j.get("orig", {})
         except Exception:
+            _log.debug("_load failed", exc_info=True)
             self._titles, self._orig = {}, {}
         self._rebuild_index()
 
@@ -313,7 +326,8 @@ class Store:
         kind, payload = ref[:1], ref[2:]
         try:
             meta = json.loads(payload)
-        except Exception:
+        except ValueError:
+            _log.debug("resolve_media_guid failed", exc_info=True)
             return None
         if kind == "e":
             return self._ep_resolve(meta["ep"], meta.get("line"))
@@ -527,6 +541,7 @@ class Store:
                     self._dirty = False
             return True
         except Exception:
+            _log.debug("_flush_now failed", exc_info=True)
             return False
 
     def flush(self, wait: bool = True) -> bool:
@@ -558,6 +573,7 @@ class Store:
                     break
                 self._flush_now()
         except Exception:
+            _log.debug("close failed", exc_info=True)
             pass
 
     def remember_titles(self, titles: list[providers.OnlineTitle]) -> list[dict]:
