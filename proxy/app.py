@@ -2882,9 +2882,7 @@ async def mediadb_sum(request: Request):
     return JSONResponse(payload)
 
 
-# >>> PRIVATE:GUARD
 # P2 拆分：本段亦已移入 proxy/lib_inject.py（重导出见上）。
-# <<< PRIVATE:CATVOD
 
 
 # ------------------------------------------------- 二级线路海报墙（移植上游 v1.0.0）
@@ -6634,7 +6632,6 @@ from admin_api import _ADMIN_LOGIN_LIMITER, _admin_client_key, _admin_limiter_fr
 app.router.routes.extend(admin_router.routes)
 if features.GUARD:
     from admin_api import _PAN_MODS
-# <<< PRIVATE:GUARD
 
 
 # ------------------------------------------------------------- 兜底透传
