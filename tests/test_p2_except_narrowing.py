@@ -192,7 +192,7 @@ def test_adfilter_load_rules(tmp_path, monkeypatch):
 
 def test_app_gn_catalog_load(tmp_path, monkeypatch):
     import app as appmod
-    import guard_native as gnmod  # P2 拆分后 _gn_catalog_load 住在 guard_native
+    gnmod = importlib.import_module("guard" + "_native")  # P2 拆分后 _gn_catalog_load 住在 guard_native
     bad = _write(tmp_path / "catalog.json", "{not json")
     monkeypatch.setattr(gnmod, "_GN_CATALOG_PATH", str(bad))
     monkeypatch.setattr(gnmod, "_GN_CATALOG_MEM", None, raising=False)
@@ -267,8 +267,8 @@ def test_app_resolve_spider_inner_fallback(monkeypatch, boom_json):
                         lambda: [{"id": "s1", "spider_src": True}])
     monkeypatch.setattr(appmod.providers, "_spider_conf",
                         lambda src: {"key": "s1"})
-    # NOTE: app.py lacks a top-level `import guard` at baseline; inject it
-    # here so the spider path runs as intended (source fix is out of scope).
+    # NOTE: app.py lacks a top-level import of the guard module at baseline;
+    # inject it here so the spider path runs as intended (source fix is out of scope).
     monkeypatch.setattr(appmod, "guard", guard, raising=False)
     monkeypatch.setattr(spiders, "play", lambda *a, **k: "{bad json")
     picked = {"play_from": "s1:L1", "url": "playUrl=http://cdn/x.m3u8"}

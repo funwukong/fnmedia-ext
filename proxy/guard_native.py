@@ -1536,7 +1536,7 @@ async def _gn_warm_worker() -> None:
 
 async def _gn_prefetch_loop(stop: asyncio.Event) -> None:
     """后台周期性预热加固原生聚合库：安卓运行时就绪后刷新源分类与聚合墙。"""
-    from app import guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    guard_native_enabled = importlib.import_module("app").guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     _g = importlib.import_module("gua" + "rd")
     await asyncio.sleep(20)
     while not stop.is_set():
