@@ -415,9 +415,13 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(digest, RACE_FASTEST_SHA256)
 
     def test_turbo_freeze_fast_memory_only_written_by_race_winner(self):
-        mod_src = inspect.getsource(appmod)
+        # P2 拆分：竞速代码已移入 proxy/hls_race.py（_race_fastest 本体仍在
+        # app.py，哈希断言见上）；冻结本意不变，改查 hls_race 模块源码。
+        import hls_race as racemod
+        mod_src = inspect.getsource(racemod)
         # _remember_fast 全模块只有定义 + _race_fastest.finish 内一次调用
-        self.assertEqual(mod_src.count("_remember_fast("), 2)
+        #（finish 在 app.py 的 _race_fastest 内，故本模块内只有定义 1 次）
+        self.assertEqual(mod_src.count("_remember_fast("), 1)
         self.assertIn("_remember_fast(",
                       inspect.getsource(appmod._race_fastest))
         # _LINE_FAST 唯一写点在 _remember_fast 内
