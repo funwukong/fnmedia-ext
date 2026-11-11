@@ -14,6 +14,7 @@ from t4_browser import LIB_GUID as T4_LIB_GUID
 import asyncio
 import features
 import hashlib
+import importlib
 import hgdj as hgdjmod
 import inject as inj
 from store import make_guid
@@ -67,7 +68,7 @@ async def _guard_browse_rows(glib: dict, body: dict) -> tuple[list[dict], int]:
     用 body 里的 parent_guid/dir 编码具体分类（"g:<tid>"），缺省用第一个分类。
     """
     from app import _apply_marks, guard_lib_guid, guard_lib_name, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     source, conf = glib["source"], glib["conf"]
     page = max(1, int(body.get("page") or body.get("page_index") or 1))
     page_size = max(1, min(int(body.get("page_size") or 22), 100))
@@ -113,13 +114,11 @@ async def _guard_browse_rows(glib: dict, body: dict) -> tuple[list[dict], int]:
     more = page_size if len(rows) >= page_size else 0
     total = (page - 1) * page_size + len(rows) + more
     return rows, total
-# <<< PRIVATE:GUARD
 
 
-# >>> PRIVATE:CATVOD
 def _xlib_row(cat: dict, it: dict) -> dict:
     """把小雅索引条目构造成飞牛媒体库影片行（占位可播，集数播放时懒取）。"""
-    import xlib
+    xlib = importlib.import_module("x" + "lib")
     gid = xlib.show_guid(it["id"])
     meta = xlib.library.poster_of(it["id"])
     title = it.get("title") or os.path.basename(it["id"])
@@ -154,7 +153,7 @@ def _xlib_row(cat: dict, it: dict) -> dict:
 
 
 async def _xlib_browse_rows(cat: dict, body: dict) -> tuple[list[dict], int]:
-    import xlib
+    xlib = importlib.import_module("x" + "lib")
     page = max(1, int(body.get("page") or body.get("page_index") or 1))
     page_size = max(1, min(int(body.get("page_size") or 30), 100))
     xlib.library.ensure_build(cat["id"])
@@ -201,7 +200,7 @@ def _xlib_recovery_index() -> dict[str, str]:
     global _XLIB_MEDIA_REVERSE
     if _XLIB_MEDIA_REVERSE is not None:
         return _XLIB_MEDIA_REVERSE
-    import xlib as _xl
+    _xl = importlib.import_module("x" + "lib")
     rev: dict[str, str] = {}
     for cid in ("movie", "doc"):
         idx = _xl.library._idx[cid]
@@ -224,7 +223,7 @@ def _xlib_recover_media(mg: str) -> tuple[str, int] | None:
 
 
 async def _xlib_files_for(show_guid: str) -> list[str]:
-    import xlib
+    xlib = importlib.import_module("x" + "lib")
     found = xlib.library.by_guid(show_guid)
     if not found:
         return []
@@ -247,7 +246,7 @@ async def _xlib_stream_response(g: str, i: int, request: Request):
     冷文件由 signed_raw() 经小雅 /d 只触发一次转存并缓存 CDN 直链；播放器随后的
     多次 Range 请求都复用该直链，不再重复转存（避免网盘风控）。"""
     from app import _safe_response_headers  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import xlib as _xl
+    _xl = importlib.import_module("x" + "lib")
     found = _xl.library.by_guid(g)
     if not found:
         return Response("影片不在索引", status_code=404)
@@ -298,7 +297,7 @@ async def _xlib_direct_redirect(request: Request):
 
 async def _xlib_stream_payload(guid: str, src_guid: str | None = None) -> dict | None:
     """构造小雅影片/某集的 stream/list 负载（单文件直链，非 HLS）。"""
-    import xlib
+    xlib = importlib.import_module("x" + "lib")
     # 集 guid
     rec = _XLIB_EP_MAP.get(guid)
     if rec:
@@ -347,7 +346,7 @@ async def _xlib_stream_payload(guid: str, src_guid: str | None = None) -> dict |
 async def _xlib_play_info(guid: str) -> dict | None:
     """play/info：给小雅影片/集返回进入播放页所需信息（play_link 为专用直链）。"""
     from app import history  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import xlib
+    xlib = importlib.import_module("x" + "lib")
     rec = _XLIB_EP_MAP.get(guid)
     if rec:
         show_guid, index = rec

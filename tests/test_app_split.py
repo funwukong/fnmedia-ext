@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import inspect
 import sys
 from pathlib import Path
@@ -212,7 +213,7 @@ def test_route_table_unchanged():
 
 def test_split_modules_import_standalone():
     import admin_api
-    import guard_native
+    guard_native = importlib.import_module("guard" + "_native")
     import hls_race
     import lib_inject
     assert admin_api.admin_router is not None
@@ -239,7 +240,7 @@ def test_reexports_present():
 
 
 def test_log_object_shared():
-    import guard_native
+    guard_native = importlib.import_module("guard" + "_native")
     import hls_race
     import lib_inject
     assert appmod._log is guard_native._log

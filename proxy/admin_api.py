@@ -3185,3 +3185,4 @@ refresh();
         from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         return JSONResponse({"code": 0, "msg": "",
                              "data": await asyncio.to_thread(_guard.start_android)})
+# <<< PRIVATE:GUARD

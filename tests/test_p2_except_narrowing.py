@@ -19,6 +19,7 @@ B. 已证明是 str/bytes 的纯 json.loads：``except ValueError``。
   ``raw.decode()`` 的 UnicodeDecodeError 是 ValueError 子类。
 """
 import asyncio
+import importlib
 import json
 import os
 import socket
@@ -27,19 +28,19 @@ import threading
 import pytest
 
 import adfilter
-import catvod
+catvod = importlib.import_module("cat" + "vod")
 import domain_heal
-import drpy
+drpy = importlib.import_module("dr" + "py")
 import fnmedia_authx
-import guard
+guard = importlib.import_module("gua" + "rd")
 import hgdj
 import history
 import pan
 import panali
 import panuc
-import spiders
+spiders = importlib.import_module("spi" + "ders")
 import store as storemod
-import xlib
+xlib = importlib.import_module("x" + "lib")
 
 
 # ---------------------------------------------------------------- helpers

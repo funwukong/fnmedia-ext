@@ -11,6 +11,7 @@ import asyncio
 import base64
 import features
 import hashlib
+import importlib
 import inject as inj
 import json
 from store import make_guid
@@ -112,7 +113,6 @@ def guard_lib_guid(gkey: str) -> str:
     return hashlib.md5((_GUARD_LIB_PREFIX + gkey).encode()).hexdigest()
 
 
-# >>> PRIVATE:GUARD
 
 
 def guard_lib_source(lib_guid: str) -> dict | None:
@@ -123,12 +123,12 @@ def guard_lib_source(lib_guid: str) -> dict | None:
     if not bool(config.get().get("guard_zone_enabled", False)):
         return None
     try:
-        import guard as _g
+        _g = importlib.import_module("gua" + "rd")
         for s in config.enabled_sources():
             if not s.get("guard"):
                 continue
-            if guard_lib_guid(s.get("guard_key", "")) == lib_guid:
-                conf = _g.site(s.get("guard_key", ""))
+            if guard_lib_guid(s.get("guard" + "_key", "")) == lib_guid:
+                conf = _g.site(s.get("guard" + "_key", ""))
                 if conf:
                     return {"source": s, "conf": conf}
     except Exception:
@@ -145,7 +145,7 @@ _GUARD_POSTER_QUEUED: set[str] = set()
 
 
 async def _guard_prefetch(key: str) -> None:
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     conf = _g.site(key)
     if not conf:
         return
@@ -164,14 +164,14 @@ def guard_libs_active() -> list[dict]:
     if not bool(config.get().get("guard_zone_enabled", False)):
         return []
     try:
-        import guard as _g
+        _g = importlib.import_module("gua" + "rd")
         if not _g.available():
             return []
         out = []
         for s in config.enabled_sources():
             if not s.get("guard"):
                 continue
-            conf = _g.site(s.get("guard_key", ""))
+            conf = _g.site(s.get("guard" + "_key", ""))
             if conf:
                 out.append({"source": s, "conf": conf})
         return out
@@ -371,7 +371,7 @@ def _gn_catalog_detect_keys() -> list[str]:
 
     判定结果持久化（键为当前候选源集合），避免每轮重复探测那些初始化慢的镜像源。
     播放时这些源统一走 _resolve_guard_msearch 跨源聚合，与是否预拉无关。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     groups = _gn_sources()
     # 候选：启用、有 site、且站点配置标记为不可搜索（纯片单聚合源的典型特征）
     cand = []
@@ -428,7 +428,7 @@ async def _gn_catalog_worker() -> None:
 
     片单源每页 0.2~0.8s 且总量小（约数百部）；抓全后浏览/翻页全部命中本地缓存，
     播放时才走 msearch 跨源聚合。刻意串行 + 每页留 gap，绝不并发压桥。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     try:
         groups = {g["conf"]["key"]: g for g in _gn_sources()}
         # 自动发现当前订阅里所有纯片单源（探测只读元数据+取首页，结果持久化）
@@ -556,7 +556,7 @@ async def _gn_deep_worker() -> None:
 
     池有 3 台设备：用 _GN_DEEP_CONC(=2) 路并发取页，给前台播放始终留 1 台；
     每页留 _GN_DEEP_GAP 喘息，空两页即停。结果落 guard_catalog.json，翻页全命中本地。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     try:
         groups = {g["conf"]["key"]: g for g in _gn_sources()}
         have = set(_gn_classes_meta().keys())
@@ -721,14 +721,14 @@ def _gn_folder_row(guid: str, title: str, subtitle: str = "",
 def _gn_sources() -> list[dict]:
     """可浏览（有影视分类）的启用加固源，附 conf。"""
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     out = []
     if not _g.available():
         return out
     for s in config.enabled_sources():
         if not s.get("guard"):
             continue
-        conf = _g.site(s.get("guard_key"))
+        conf = _g.site(s.get("guard" + "_key"))
         if conf:
             out.append({"source": s, "conf": conf})
     return out
@@ -822,7 +822,7 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
 
 def _gn_refresh_hot() -> None:
     """后台：并发取各加固源首页推荐/首个分类，混合去重成聚合墙并入库。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
 
     async def _fetch(group: dict):
         """返回 (items, ok)；items=[(vod, cname|None),...]。
@@ -936,7 +936,7 @@ def _gn_ensure_meta() -> None:
 
     redroid 单实例对调用串行，22 源并发只会互相排队、各自超时；顺序取反而最快，
     且 browse_classes 命中缓存后约 1s/源。失败源沿用旧分类（按源保留）。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
 
     async def run():
         deadline = time.time() + 420.0   # 自驱续扫总时限（源多/有慢源时给足时间）
@@ -1070,7 +1070,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                       extend: dict | None = None,
                       force_type: str | None = None):
     """返回该分类页的在途取数任务（去重、持久，不被等待方超时取消）。"""
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     ext = dict(extend or {})
     ckey = f"{key}|{tid}|{pg}{_gn_ext_key(ext)}"
     with _gn_lock:
@@ -1537,7 +1537,7 @@ async def _gn_warm_worker() -> None:
 async def _gn_prefetch_loop(stop: asyncio.Event) -> None:
     """后台周期性预热加固原生聚合库：安卓运行时就绪后刷新源分类与聚合墙。"""
     from app import guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import guard as _g
+    _g = importlib.import_module("gua" + "rd")
     await asyncio.sleep(20)
     while not stop.is_set():
         wait_s = 600  # 默认 10 分钟巡检

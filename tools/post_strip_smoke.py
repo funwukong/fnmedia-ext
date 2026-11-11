@@ -104,6 +104,10 @@ _PYTEST_CMD = [
     "--ignore=tests/test_verify_tls.py",
     "--ignore=tests/test_p1_pan_cleanup.py",
     "--ignore=tests/test_pan_shared.py",
+    # P2 新增：narrowing 测试需私有模块（公开构建已删），split 测试断言
+    # 完整构建的路由数；剥离树上跳过。
+    "--ignore=tests/test_p2_except_narrowing.py",
+    "--ignore=tests/test_app_split.py",
     "-k", "not dduo_probe_source",
 ]
 
