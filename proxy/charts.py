@@ -386,7 +386,9 @@ class ChartCache:
         tmp.replace(STATE)
 
     async def refresh(self, force: bool = False) -> dict[str, Any]:
-        if self._refreshing and not force and self._task and not self._task.done():
+        # single-flight：已有在途刷新时直接复用其 future，不再重复拉取。
+        # force=True 只表示“无在途刷新时立即拉取”，不绕过合并。
+        if self._refreshing and self._task and not self._task.done():
             return await self._task
         loop = asyncio.get_running_loop()
         self._refreshing = True

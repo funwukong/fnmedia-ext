@@ -116,6 +116,24 @@ def _backup_dir() -> Path:
     return _STATE.parent / "backups"
 
 
+def _backup_order_key(b: Path) -> tuple[float, str, int]:
+    """备份新旧排序键：mtime → 文件名时间戳 → 同秒序号。
+
+    同一秒内多次保存产生 config-TS.json、config-TS-1.json、…；
+    只按名字排序会把 -1 排在 plain 之前（'-' < '.'），误删较新的备份；
+    只按 mtime 排序则在 mtime 打平时（同秒/粗粒度文件系统）同样排错。
+    后缀数字就是生成顺序：plain=0，-N=N。
+    """
+    try:
+        mtime = b.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    m = re.match(r"^config-(\d{8}-\d{6})(?:-(\d+))?\.json$", b.name)
+    if m:
+        return (mtime, m.group(1), int(m.group(2) or 0))
+    return (mtime, "", 0)
+
+
 def _backup_config() -> Path | None:
     """把当前 config.json 复制一份带时间戳的备份，只留最近 N 份。
 
@@ -135,9 +153,9 @@ def _backup_config() -> Path | None:
             dst = d / f"config-{ts}-{i}.json"
             i += 1
         dst.write_bytes(_STATE.read_bytes())
-        # 按修改时间删最旧：同秒多次备份会带 -1 后缀，按文件名排序会误删新备份。
+        # 按新旧删最旧：见 _backup_order_key，同秒备份只按名字会误删新备份。
         for old in sorted(d.glob("config-*.json"),
-                          key=lambda b: (b.stat().st_mtime, b.name))[: -BACKUP_KEEP]:
+                          key=_backup_order_key)[: -BACKUP_KEEP]:
             try:
                 old.unlink()
             except OSError:
@@ -151,9 +169,9 @@ def _backup_config() -> Path | None:
 def _restore_from_backup() -> dict | None:
     """主配置损坏时按时间倒序尝试备份，返回第一个能解析的备份内容。"""
     try:
-        # 按修改时间倒序：同秒多次备份会带 -1 后缀，按文件名倒序会把新备份排在旧备份之后。
+        # 按新旧倒序：见 _backup_order_key，同秒备份只按名字会把旧备份排在前面。
         backups = sorted(_backup_dir().glob("config-*.json"),
-                         key=lambda b: (b.stat().st_mtime, b.name), reverse=True)
+                         key=_backup_order_key, reverse=True)
     except Exception:
         return None
     for b in backups:
