@@ -553,7 +553,7 @@ async def ext_source_priority(request: Request):
 
 def _virtual_lib_list() -> list[dict]:
     """供管理台展示的虚拟媒体库清单（全部注入库），含显隐与排序。"""
-    from app import CATALOG_LIB_GUIDS, CHART_LIB_GUIDS, GUARD_NATIVE_GUID, GUARD_NATIVE_TITLE, _gn_hot_rows, _xlib_active_cats, catalog_enabled, chart_cache, charts_enabled, config, guard_lib_guid, guard_lib_name, guard_libs_active, guard_native_enabled, hgdj_enabled, standalone_lib_guid, standalone_lib_name, standalone_sources_active, t4_browser  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import CATALOG_LIB_GUIDS, CHART_LIB_GUIDS, GUARD_NATIVE_GUID, GUARD_NATIVE_TITLE, _gn_hot_rows, catalog_enabled, chart_cache, charts_enabled, config, guard_lib_guid, guard_lib_name, guard_libs_active, guard_native_enabled, hgdj_enabled, standalone_lib_guid, standalone_lib_name, standalone_sources_active, t4_browser  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     out = []
     out.append({"guid": T4_LIB_GUID, "key": vlibsmod.K_T4, "title": T4_LIB_TITLE,
                 "kind": "t4", "group": "t4", "enabled": bool(t4_browser.sources()),
@@ -600,6 +600,7 @@ def _virtual_lib_list() -> list[dict]:
     # >>> PRIVATE:CATVOD
     try:
         import xlib
+        from app import _xlib_active_cats  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         for cat in _xlib_active_cats():
             out.append({"guid": xlib.lib_guid(cat["id"]),
                         "key": vlibsmod.make_key(vlibsmod.K_XLIB, cat["id"]),
