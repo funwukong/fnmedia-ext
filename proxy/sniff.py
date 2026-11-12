@@ -69,6 +69,18 @@ _UNICODE_ESC = re.compile(r"(?:\\u[0-9a-fA-F]{4}){3,}")
 
 _cache: dict[str, tuple[float, str]] = {}
 _CACHE_TTL = 30 * 60
+_CACHE_MAX = 2000  # 嗅探结果缓存上限：存 URL 字符串，超限删最旧（可重新嗅探）
+
+
+def _bounded_put(d: dict, key, value, cap: int) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap（分摊 O(1)，见 hls_race 同名函数）。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
+
+
+def _sniff_cache_put(page_url: str, found: str) -> None:
+    _bounded_put(_cache, page_url, (time.time(), found), _CACHE_MAX)
 
 
 def _is_media(u: str) -> bool:
@@ -204,8 +216,10 @@ async def sniff(client, page_url: str, referer: str = "",
     if not page_url:
         return None
     hit = _cache.get(page_url)
-    if hit and time.time() - hit[0] < _CACHE_TTL:
-        return hit[1]
+    if hit:
+        if time.time() - hit[0] < _CACHE_TTL:
+            return hit[1]
+        _cache.pop(page_url, None)  # 过期命中立即删
 
     url = page_url
     ref = referer
@@ -225,7 +239,7 @@ async def sniff(client, page_url: str, referer: str = "",
         # 直接命中媒体（部分播放接口 200 直接回流）
         if "mpegurl" in ctype or "video/" in ctype or _MEDIA_EXT.search(str(r.url)):
             found = str(r.url)
-            _cache[page_url] = (time.time(), found)
+            _sniff_cache_put(page_url, found)
             return found
         body = r.text if "text" in ctype or "javascript" in ctype or \
             "json" in ctype or not ctype else ""
@@ -243,7 +257,7 @@ async def sniff(client, page_url: str, referer: str = "",
                     cand = v.strip()
                     if _is_media(cand):
                         found = urllib.parse.urljoin(base, cand)
-                        _cache[page_url] = (time.time(), found)
+                        _sniff_cache_put(page_url, found)
                         return found
                     # url 可能本身还是下一层播放页（相对/域名）
                     if cand.startswith(("http://", "https://", "/")) and k == "url":
@@ -259,13 +273,13 @@ async def sniff(client, page_url: str, referer: str = "",
         cand = _extract_inline(text)
         if cand:
             found = urllib.parse.urljoin(base, cand)
-            _cache[page_url] = (time.time(), found)
+            _sniff_cache_put(page_url, found)
             return found
 
         # 3) base64 混淆
         cand = _try_b64_media(text)
         if cand:
-            _cache[page_url] = (time.time(), cand)
+            _sniff_cache_put(page_url, cand)
             return cand
 
         # 4) iframe 嵌套：挑最像播放器的一个继续

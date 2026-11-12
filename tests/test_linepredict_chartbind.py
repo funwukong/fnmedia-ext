@@ -121,8 +121,11 @@ def test_chartbind_stale_after_ttl(tmp_path, monkeypatch):
     with st._lock:
         st._data["abc123"]["ts"] = time.time() - chartbind.BIND_TTL - 1
     assert st.is_fresh("abc123") is False
-    assert st.get("abc123") == {"title": "测试片"}  # 过期仍恢复，由播放链懒校验
-    assert st.status()["stale"] == 1
+    # memory-caches 批：过期绑定 get() 返回 None 并从内存删掉，不再当作
+    # 起播种子恢复；失效片由后台预热重搜
+    assert st.get("abc123") is None
+    assert st.count() == 0
+    assert st.status()["stale"] == 0
 
 
 # ---------------- 配置默认值 ----------------

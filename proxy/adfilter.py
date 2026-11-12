@@ -563,7 +563,9 @@ def _sps_cache_put(url: str, prof: dict) -> None:
         return
     with _sps_cache_lock:
         if len(_sps_cache) >= _SPS_CACHE_LIMIT:
-            _sps_cache.clear()
+            # 满了删最旧一半而非全清：避免全清后所有分片指纹同时重探抖动
+            for _old in list(_sps_cache)[:len(_sps_cache) // 2]:
+                _sps_cache.pop(_old, None)
         _sps_cache[url] = (prof, time.time())
 
 

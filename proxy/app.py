@@ -125,12 +125,16 @@ def _cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     now = time.time()
     with _dns_lock:
         hit = _dns_cache.get(key)
-        if hit is not None and now - hit[0] < _DNS_TTL:
-            return hit[1]
+        if hit is not None:
+            if now - hit[0] < _DNS_TTL:
+                return hit[1]
+            _dns_cache.pop(key, None)  # 过期命中立即删
     res = _real_getaddrinfo(host, port, family, type, proto, flags)
     with _dns_lock:
         if len(_dns_cache) >= _DNS_MAX:
-            _dns_cache.clear()
+            # 满了删最旧一半而非全清：避免全清后所有域名同时冷解析抖动
+            for _old in list(_dns_cache)[:len(_dns_cache) // 2]:
+                _dns_cache.pop(_old, None)
         _dns_cache[key] = (now, res)
     return res
 
@@ -157,6 +161,71 @@ _AGG_CACHE: dict[str, tuple[float, list]] = {}
 _AGG_INFLIGHT: dict[str, asyncio.Future] = {}
 AGG_CACHE_TTL = 180
 _AGG_CACHE_MAX = 800
+_AGG_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB：800 条 × 10 剧集重 brief
+# 最坏 897MB；字节上限兜底。128MB 可容数百次典型搜索（重 brief 约 112KB/条
+# 为最坏估算，常规 brief 远小于此）；TTL 仅 180 秒，条目可重新聚合生成。
+_AGG_BYTES: dict[str, int] = {}  # cache_key -> 该条字节估算
+_AGG_BYTES_TOTAL = 0             # 当前总量（运行值）
+
+
+def _agg_entry_bytes(result) -> int:
+    """聚合结果的字节估算：字符串按长度、dict 固定 64B、list/tuple 固定 16B、
+    其余标量 16B，迭代遍历不递归。估算只用于淘汰决策，不要求精确。"""
+    total = 0
+    stack = [result]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, str):
+            total += len(o)
+        elif isinstance(o, dict):
+            total += 64
+            stack.extend(o.keys())
+            stack.extend(o.values())
+        elif isinstance(o, (list, tuple)):
+            total += 16
+            stack.extend(o)
+        else:
+            total += 16
+    return total
+
+
+def _agg_cache_drop(cache_key: str) -> None:
+    """删一条聚合缓存，并同步扣减字节记账。"""
+    global _AGG_BYTES_TOTAL
+    if _AGG_CACHE.pop(cache_key, None) is not None:
+        _AGG_BYTES_TOTAL = max(0, _AGG_BYTES_TOTAL - _AGG_BYTES.pop(cache_key, 0))
+
+
+def _rebuild_agg_bytes() -> None:
+    """外部直接改动 _AGG_CACHE（如管理端 clear）后重建字节记账。"""
+    global _AGG_BYTES_TOTAL
+    _AGG_BYTES.clear()
+    total = 0
+    for k, (_ts, val) in _AGG_CACHE.items():
+        s = _agg_entry_bytes(val)
+        _AGG_BYTES[k] = s
+        total += s
+    _AGG_BYTES_TOTAL = total
+
+
+def _agg_cache_put(cache_key: str, result: list) -> None:
+    """有界写聚合缓存：条数 800 + 字节 128MB 双上限，真 LRU。
+
+    dict 按插入序：新条天然在队尾；超限从队首删最旧。单条超限时保留该条。
+    淘汰是分摊 O(1)：每条目最多被 pop 一次，写路径不做全表排序/扫描。"""
+    global _AGG_BYTES_TOTAL
+    _AGG_CACHE[cache_key] = (time.time(), result)
+    if cache_key in _AGG_BYTES:
+        _AGG_BYTES_TOTAL -= _AGG_BYTES[cache_key]
+    s = _agg_entry_bytes(result)
+    _AGG_BYTES[cache_key] = s
+    _AGG_BYTES_TOTAL += s
+    if len(_AGG_BYTES) != len(_AGG_CACHE):
+        _rebuild_agg_bytes()  # 外部直接改过缓存：重建记账（含本条）
+    while (len(_AGG_CACHE) > _AGG_CACHE_MAX
+           or _AGG_BYTES_TOTAL > _AGG_CACHE_MAX_BYTES) \
+            and len(_AGG_CACHE) > 1:
+        _agg_cache_drop(next(iter(_AGG_CACHE)))
 # 旧名字保留为同一对象的别名（不产生第二层存储）：既有测试、管理端点
 # （缓存计数/清空）仍引用 _search_cache / _search_inflight。
 _search_cache = _AGG_CACHE
@@ -427,8 +496,8 @@ def _persist_chart_binding(guid: str, bound: dict) -> None:
 def _restore_chart_bindings() -> int:
     """方案B：启动时从磁盘恢复榜单绑定到 store（返回恢复条数）。
 
-    过期绑定也恢复进内存（避免冷点），但播放链若发现死链仍会重新 resolve；
-    同时后台预热会对失效片刷新。
+    只恢复新鲜绑定（chartbind.get() 对过期返回 None）；失效片由后台预热
+    重新 resolve 刷新，不再把过期绑定当作起播种子恢复进内存。
     """
     try:
         if not prewarm_persist_mode():
@@ -1265,8 +1334,12 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         cache_key += f"\x00{viewer_key}"
     loop = asyncio.get_event_loop()
     _hit = None if refresh else _AGG_CACHE.get(cache_key)
-    if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
-        return [dict(b) for b in _hit[1]]
+    if _hit:
+        if (time.time() - _hit[0]) < AGG_CACHE_TTL:
+            # 真 LRU：命中即移到队尾（pop 后重插，O(1)），下次超限先淘汰别人
+            _AGG_CACHE[cache_key] = _AGG_CACHE.pop(cache_key)
+            return [dict(b) for b in _hit[1]]
+        _agg_cache_drop(cache_key)  # 过期命中立即删，不再占名额/字节
     _fut = None if refresh else _AGG_INFLIGHT.get(cache_key)
     if _fut is not None and not _fut.done():
         try:
@@ -1286,10 +1359,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         except Exception:
             _log.debug("_aggregate_briefs failed", exc_info=True)
             pass
-        _AGG_CACHE[cache_key] = (time.time(), result)
-        if len(_AGG_CACHE) > _AGG_CACHE_MAX:
-            for _old in list(_AGG_CACHE)[:_AGG_CACHE_MAX // 2]:
-                _AGG_CACHE.pop(_old, None)
+        _agg_cache_put(cache_key, result)
         if not fut.done():
             fut.set_result(result)
         return [dict(b) for b in result]
