@@ -231,6 +231,9 @@ DEFAULTS = {
     "linepredict_max_lines": 3,
     # 预热结果记忆时长（分钟）
     "linepredict_ttl_min": 30,
+    # 浏览时探活：分类/搜索/榜单列表返回后，后台对首屏前几部影片的少数候选线
+    # 做轻量探活，结果只写 linepredict 记忆（不写最快线记忆）；关掉恢复旧行为。
+    "browse_probe": True,
     # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
     # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
     "prewarm_mode": "realtime",

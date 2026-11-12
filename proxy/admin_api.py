@@ -778,6 +778,7 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
+        "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
@@ -821,6 +822,8 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "browse_probe" in patch:
+        patch["browse_probe"] = bool(patch["browse_probe"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}
@@ -2036,6 +2039,7 @@ async def linepredict_status():
             "enabled": bool(config.get().get("linepredict_enabled", True)),
             "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
             "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
+            "browse_probe": bool(config.get().get("browse_probe", True)),
             "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
             "chart_bindings": chartbind.bind_store.status()}}})
 
@@ -2058,6 +2062,8 @@ async def linepredict_config(request: Request):
             patch["linepredict_ttl_min"] = min(120, max(5, int(body["ttl_min"])))
         except (TypeError, ValueError):
             pass
+    if "browse_probe" in body:
+        patch["browse_probe"] = bool(body["browse_probe"])
     if patch:
         config.save(patch)
     return JSONResponse({"code": 0, "data": patch})
