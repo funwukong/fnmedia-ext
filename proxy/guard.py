@@ -19,6 +19,8 @@ from pathlib import Path
 
 import features
 import httpx
+import runner_errors
+from runner_errors import RunnerTransportError, from_envelope, kind_of
 
 _log = logging.getLogger("fnmedia")
 
@@ -1045,11 +1047,20 @@ def site(key: str) -> dict | None:
 
 
 def _runner_post(path: str, payload: dict, timeout: float | None = None):
-    r = httpx.post(RUNNER_URL + path, json=payload, timeout=timeout or TIMEOUT,
-                   trust_env=False)
-    j = r.json()
+    try:
+        r = httpx.post(RUNNER_URL + path, json=payload, timeout=timeout or TIMEOUT,
+                       trust_env=False)
+    except httpx.HTTPError as exc:
+        raise RunnerTransportError(
+            f"spider-runner 调用失败: {exc}", orig=type(exc).__name__) from exc
+    try:
+        j = r.json()
+    except ValueError:
+        # runner 返回非 JSON（如 502/空体）：按 HTTP 状态码合成传输层错误。
+        raise RunnerTransportError(f"runner HTTP {r.status_code}") from None
     if not j.get("ok"):
-        raise RuntimeError(str(j.get("error") or j)[:400])
+        # 信封透传 kind/原始类名/全文，不截断。
+        raise from_envelope(j)
     return j.get("result")
 
 
@@ -1084,8 +1095,11 @@ def _is_transport_error(exc: BaseException) -> bool:
     """传输层失败（超时/连不上）：才可能说明桥/后端本身坏了。
 
     `_runner_post` 对业务失败（runner 返回 ok:false）抛 RuntimeError，
-    那是源/参数问题，不计入看门狗。"""
-    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
+    那是源/参数问题，不计入看门狗。
+    注意：`_runner_post` 会把 httpx 异常包成 RunnerTransportError，
+    所以这里也要认它，否则合入 E 的信封透传后看门狗永远数不到传输失败。"""
+    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError,
+                            RunnerTransportError))
 
 
 def _invoke_once(payload: dict):
@@ -1110,44 +1124,67 @@ def _call(site_conf: dict, method: str, **params):
         **params,
     }
     # 多 redroid 实例池：有界并发，runner 负责把调用分到不同设备并各自串行。
+    # 合并语义（guardfix-a × guardfix-e）：
+    #   timeout（信封 kind=timeout / RunnerTimeoutError）→ 超时不计 _bridge_fail，不重启；
+    #   jar → 补推用户 jar 后经 _invoke_once 重试一次（同样 22s 有界超时）；
+    #   fatal（传输层：_runner_post 把 httpx 异常包成 RunnerTransportError）
+    #     → 仅在探活也失败时计数，满阈值且过冷却才重启桥并重试一次；
+    #   其余业务失败（ok:false 等）→ 不计数、不重启。
+    # 注意：httpx 层面的超时到这里已是 RunnerTransportError（kind=fatal），
+    # 走看门狗分支；E 的 timeout 分支只针对 runner 服务端上报的超时。
     try:
         res = _invoke_once(payload)
     except Exception as exc:  # noqa: BLE001
-        if not _is_transport_error(exc):
-            # 业务失败（ok:false 等）：不计数、不重启，保持 debug。
-            _log.debug("_call failed", exc_info=True)
+        kind = kind_of(exc)
+        if kind == "timeout":
+            _log.debug("_call timeout, no bridge-fail count", exc_info=True)
             raise
-        # 传输失败才进看门狗，且只在探活也失败时计数：runner 还活着说明
-        # 只是单次调用抖动/超时，重启整桥是误伤。
-        _last_failed_runner_url = RUNNER_URL
-        _log.warning("_call transport failed: %s: %s",
-                     type(exc).__name__, str(exc)[:160])
-        try:
-            runner_down = not available()
-        except Exception:  # noqa: BLE001
-            _log.debug("_call available probe failed", exc_info=True)
-            runner_down = False
-        if not runner_down:
-            raise
-        with _lock:
-            _bridge_fail += 1
-            fail = _bridge_fail
-        now = time.time()
-        if fail >= _BRIDGE_FAIL_RESTART and now >= _bridge_restart_cooldown:
-            # 信号量已在 _invoke_once 内释放：重启只在 _bridge_restart_lock
-            # 内串行，不占 bridge 许可；重启本身会写冷却（失败 120s）。
-            with _bridge_restart_lock:
-                try:
-                    _restart_bridge_app()
-                except Exception:  # noqa: BLE001
-                    _log.debug("_call restart failed", exc_info=True)
-                    pass
-            # 只重试一次本次调用（重新排队拿许可，同样显式超时）。
-            # 再失败也不清零 _bridge_fail，但重启写下的冷却会阻止立即再触发。
+        if kind == "jar":
+            _log.debug("_call jar error, repushing user jar", exc_info=True)
+            try:
+                _push_user_jar()
+            except Exception:  # noqa: BLE001
+                _log.debug("_call jar repush failed", exc_info=True)
+                pass
             res = _invoke_once(payload)
             with _lock:
                 _bridge_fail = 0
+        elif kind == "fatal" and _is_transport_error(exc):
+            # 传输失败才进看门狗，且只在探活也失败时计数：runner 还活着说明
+            # 只是单次调用抖动/超时，重启整桥是误伤。
+            _last_failed_runner_url = RUNNER_URL
+            _log.warning("_call transport failed: %s: %s",
+                         type(exc).__name__, str(exc)[:160])
+            try:
+                runner_down = not available()
+            except Exception:  # noqa: BLE001
+                _log.debug("_call available probe failed", exc_info=True)
+                runner_down = False
+            if not runner_down:
+                raise
+            with _lock:
+                _bridge_fail += 1
+                fail = _bridge_fail
+            now = time.time()
+            if fail >= _BRIDGE_FAIL_RESTART and now >= _bridge_restart_cooldown:
+                # 信号量已在 _invoke_once 内释放：重启只在 _bridge_restart_lock
+                # 内串行，不占 bridge 许可；重启本身会写冷却（失败 120s）。
+                with _bridge_restart_lock:
+                    try:
+                        _restart_bridge_app()
+                    except Exception:  # noqa: BLE001
+                        _log.debug("_call restart failed", exc_info=True)
+                        pass
+                # 只重试一次本次调用（重新排队拿许可，同样显式超时）。
+                # 再失败也不清零 _bridge_fail，但重启写下的冷却会阻止立即再触发。
+                res = _invoke_once(payload)
+                with _lock:
+                    _bridge_fail = 0
+            else:
+                raise
         else:
+            # 业务失败（ok:false 等）：不计数、不重启，保持 debug。
+            _log.debug("_call failed", exc_info=True)
             raise
     else:
         with _lock:

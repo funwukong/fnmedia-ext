@@ -23,9 +23,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pool
+import runner_errors
 import android_bridge
 import android_pool
 
@@ -45,6 +48,11 @@ def _runtime_for(payload: dict) -> str:
     rt = payload.get("runtime") or "auto"
     if rt != "auto":
         return rt
+    if payload.get("class") and payload.get("site"):
+        raise runner_errors.RunnerError(
+            "同时指定 class 与 site，无法推断 runtime："
+            "请显式指定 runtime=java/android（class）或 node（site）",
+            kind="fatal")
     if payload.get("class"):
         return "java"
     if payload.get("site"):
@@ -53,8 +61,16 @@ def _runtime_for(payload: dict) -> str:
 
 
 def invoke(payload: dict):
+    t0 = time.time()
     rt = _runtime_for(payload)
     timeout = float(payload.pop("_timeout", 120))
+    # 进池/进 sidecar 前扣减已耗时间：上游透传的 _timeout 是总预算，
+    # 不是进池后重新起算的预算。
+    remain = timeout - (time.time() - t0)
+    if remain <= 0:
+        raise runner_errors.RunnerTimeoutError(
+            f"调用已超时（总预算 {timeout:g}s 在进池前已耗尽）")
+    timeout = remain
     if rt == "android":
         if android_pool.backends():
             if not android_pool.available():
@@ -68,6 +84,21 @@ def invoke(payload: dict):
         raise RuntimeError(f"后端 {rt} 不可用（未随服务提供/依赖缺失）")
     payload.pop("runtime", None)
     return sc.call(payload, timeout=timeout)
+
+
+def health_status(strict: bool = False) -> dict:
+    """健康快照。ok = 三者（java/node/android）至少其一可用；
+    strict=1 时要求三者全部可用。"""
+    android_ok = android_pool.available() if android_pool.backends() \
+        else android_bridge.available()
+    runtimes = {
+        "java": "java" in SIDECARS,
+        "node": "node" in SIDECARS,
+        "android": android_ok,
+    }
+    ok = all(runtimes.values()) if strict else any(runtimes.values())
+    return {"ok": ok, "runtimes": runtimes,
+            "android_pool": android_pool.health()}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -94,15 +125,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path0 = self.path.split("?", 1)[0]
+        query = urllib.parse.parse_qs(
+            urllib.parse.urlparse(self.path).query)
+        strict = query.get("strict", ["0"])[0] == "1"
+        if path0 == "/health":
+            self._json(200, health_status(strict=strict))
+            return
         _android_ok = android_pool.available() if android_pool.backends() \
             else android_bridge.available()
-        if path0 == "/health":
-            self._json(200, {"ok": True, "runtimes": {
-                "java": "java" in SIDECARS,
-                "node": "node" in SIDECARS,
-                "android": _android_ok,
-            }, "android_pool": android_pool.health()})
-            return
         if path0 == "/status":
             # 实际进程状态：registered=已提供，running=当前在跑（空闲会被回收）
             procs = {}
@@ -141,16 +171,19 @@ class Handler(BaseHTTPRequestHandler):
                 req = {"runtime": "node",
                        "site": payload.get("site") or {"_id": site_id},
                        "method": method}
-                # FongMi 参数风格透传
+                # FongMi 参数风格透传；_timeout/jar/class 也透传，
+                # 否则 /node 路由恒以 120s 且丢掉调用方指定的 jar/class。
                 for k in ("ext", "tid", "pg", "filter", "extend", "ids",
-                          "key", "quick", "flag", "id", "token", "args"):
+                          "key", "quick", "flag", "id", "token", "args",
+                          "_timeout", "jar", "class"):
                     if k in payload:
                         req[k] = payload[k]
                 return self._json(200, {"ok": True, "result": invoke(req)})
             self._json(404, {"error": "not found"})
         except Exception as exc:  # noqa: BLE001
-            log.warning("invoke fail: %s", exc)
-            self._json(500, {"ok": False, "error": str(exc)[:600]})
+            # 信封透传 kind/原始类名/全文；截断只发生在日志处。
+            log.warning("invoke fail: %s", str(exc)[:600])
+            self._json(500, runner_errors.to_envelope(exc))
 
 
 def main():

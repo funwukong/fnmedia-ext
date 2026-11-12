@@ -23,6 +23,8 @@ import time
 import httpx
 
 import features
+import sidecar_io
+from runner_errors import from_envelope
 
 _log = logging.getLogger("fnmedia")
 
@@ -153,6 +155,7 @@ class Sidecar:
         self._lock = threading.Lock()
         self._proc = None
         self._seq = 0
+        self._stderr_tail = None
 
     def _classpath(self) -> str:
         libs = sorted(
@@ -173,7 +176,9 @@ class Sidecar:
         ]
         self._proc = subprocess.Popen(
             cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            stderr=subprocess.PIPE, text=True, bufsize=1)
+        # stderr 不再 DEVNULL：排空线程只留最后 20 行，崩溃时可查，写满也不阻塞。
+        self._stderr_tail = sidecar_io.StderrTail(self._proc.stderr).start()
 
     def call(self, payload: dict, timeout: float = 90.0):
         with self._lock:
@@ -184,27 +189,28 @@ class Sidecar:
             try:
                 self._proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 self._proc.stdin.flush()
-                line = self._proc.stdout.readline()
+                # 读线程 + queue.get(timeout)：卡死的爬虫不再永久 wedge。
+                line = sidecar_io.readline_timeout(self._proc, timeout, "catvod")
                 if not line:
-                    raise RuntimeError("catvod sidecar 无响应")
+                    rc = self._proc.poll()
+                    tail = self._stderr_tail.text() if self._stderr_tail else ""
+                    raise RuntimeError(
+                        "catvod sidecar 无响应（已退出，exit=%s%s)" % (
+                            rc, f"，stderr: {tail}" if tail else ""))
                 resp = json.loads(line)
             except Exception:
                 _log.debug("call failed", exc_info=True)
                 self.stop()
                 raise
             if "error" in resp:
-                raise RuntimeError(str(resp["error"])[:500])
+                raise from_envelope(resp)
             return resp.get("result")
 
     def stop(self):
-        try:
-            if self._proc:
-                self._proc.stdin.close()
-                self._proc.terminate()
-        except Exception:
-            _log.debug("stop failed", exc_info=True)
-            pass
-        self._proc = None
+        # terminate → wait(5s) → kill，顽固进程也能收回来。
+        proc, self._proc = self._proc, None
+        sidecar_io.stop_proc(proc)
+        self._stderr_tail = None
 
 
 _sidecar = Sidecar()
