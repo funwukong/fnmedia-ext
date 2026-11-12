@@ -780,6 +780,7 @@ async def ext_set_config(request: Request):
         "line_fastest_prefer", "line_autofail", "fixed_line_direct",
         "linepredict_zero_race",  # 可信预测零竞速直出开关（默认开）
         "mid_playback_switch",  # 播放中静默换线开关（默认开）
+        "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
@@ -827,6 +828,8 @@ async def ext_set_config(request: Request):
         patch["mid_playback_switch"] = bool(patch["mid_playback_switch"])
     if "linepredict_zero_race" in patch:
         patch["linepredict_zero_race"] = bool(patch["linepredict_zero_race"])
+    if "browse_probe" in patch:
+        patch["browse_probe"] = bool(patch["browse_probe"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}
@@ -2043,7 +2046,7 @@ async def linepredict_status():
             "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
             "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
             "zero_race": bool(config.get().get("linepredict_zero_race", True)),
-            "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
+            "browse_probe": bool(config.get().get("browse_probe", True)),            "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
             "chart_bindings": chartbind.bind_store.status()}}})
 
 
@@ -2068,6 +2071,8 @@ async def linepredict_config(request: Request):
     if "zero_race" in body:
         # 零竞速直出开关：关时恢复旧行为（预测线只作竞速候选排序种子）。
         patch["linepredict_zero_race"] = bool(body["zero_race"])
+    if "browse_probe" in body:
+        patch["browse_probe"] = bool(body["browse_probe"])
     if patch:
         config.save(patch)
     return JSONResponse({"code": 0, "data": patch})

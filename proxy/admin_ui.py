@@ -794,6 +794,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span>播放中静默换线<span class="sub">自动起播的线路在播放中变慢时，按已实测的分片耗时/吞吐静默切到同集更快的线，不打断播放；手动选线不受影响，30 秒内最多换一次</span></span></label>
         <label class="switch-row"><input type="checkbox" id="linePredict"/>
           <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，记下本片最快线；可信时起播直接用该线、跳过竞速</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="browseProbe"/>
+          <span>浏览时探活<span class="sub">列表返回后，后台对首屏前几部影片做轻量探活（不拖慢列表；关闭则浏览不探活）</span></span></label>
         <label class="switch-row"><input type="checkbox" id="linePredictZeroRace"/>
           <span>可信预测零竞速直出<span class="sub">记忆新鲜且够快时点播放直接用预测线、跳过竞速；关时恢复全量竞速（预测线只作排序种子）</span></span></label>
         <label class="field" style="max-width:260px"><span>预测线路数（1-3）</span>
@@ -2345,11 +2347,12 @@ async function saveLines(){
 /* ---------- 本片线路预测开关（后端 /v/api/ext/linepredict/config 已在；上游 admin_ui 无此开关，按 fork 既有写法补） ---------- */
 async function saveLinePredict(){
   const body={enabled:$("linePredict").checked,
+    browse_probe:$("browseProbe").checked,
     max_lines:Math.max(1,Math.min(3,parseInt($("linePredictMax").value)||3)),
     ttl_min:Math.max(5,Math.min(120,parseInt($("linePredictTtl").value)||30)),
     zero_race:$("linePredictZeroRace").checked};
   const r=await jpost("/v/api/ext/linepredict/config",body);
-  if(r.code===0){toast("预测设置已保存");Object.assign(CFG,{linepredict_enabled:body.enabled,linepredict_max_lines:body.max_lines,linepredict_ttl_min:body.ttl_min,linepredict_zero_race:body.zero_race});}
+  if(r.code===0){toast("预测设置已保存");Object.assign(CFG,{linepredict_enabled:body.enabled,browse_probe:body.browse_probe,linepredict_max_lines:body.max_lines,linepredict_ttl_min:body.ttl_min,linepredict_zero_race:body.zero_race});}
   else toast("保存失败 "+(r.msg||""),"fail");
 }
 async function resetLinePredict(){
@@ -2701,7 +2704,7 @@ async function init(){
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
   $("linePredict").checked=CFG.linepredict_enabled!==false;
   $("linePredictZeroRace").checked=CFG.linepredict_zero_race!==false;
-  $("linePredictMax").value=CFG.linepredict_max_lines||3;
+  $("browseProbe").checked=CFG.browse_probe!==false;  $("linePredictMax").value=CFG.linepredict_max_lines||3;
   $("linePredictTtl").value=CFG.linepredict_ttl_min||30;
   renderKw();renderSources();initSrcProxy();loadCacheStatus();
   const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";

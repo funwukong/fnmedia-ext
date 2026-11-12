@@ -3370,6 +3370,7 @@ async def item_list(request: Request):
                 rows, total = await asyncio.wait_for(
                     _guard_browse_rows(glib, body), timeout=_browse_deadline)
                 rows = clientmod.normalize_cards(rows, client)
+                _schedule_browse_probe(rows, request)
                 return JSONResponse({"code": 0, "msg": "", "data": {
                     "mdb_name": lib_name, "mdb_category": "Mix", "top_dir": "",
                     "dir": "", "total": total, "list": rows, "jump_list": None}})
@@ -3402,6 +3403,7 @@ async def item_list(request: Request):
         if folder is not None:
             frows, total, _more = folder
             out_rows = clientmod.normalize_cards(frows, client)
+            _schedule_browse_probe(out_rows, request)
             return JSONResponse({"code": 0, "msg": "", "data": {
                 "mdb_name": GUARD_NATIVE_TITLE, "mdb_category": "Mix",
                 "top_dir": "", "dir": _gn_parent or "", "total": total,
@@ -3417,6 +3419,7 @@ async def item_list(request: Request):
             total = pg * page_size + 1 if more and page_rows else \
                 max(1, (pg - 1) * page_size + len(page_rows))
             out_rows = clientmod.normalize_cards(page_rows, client)
+            _schedule_browse_probe(out_rows, request)
             return JSONResponse({"code": 0, "msg": "", "data": {
                 "mdb_name": GUARD_NATIVE_TITLE, "mdb_category": "Mix",
                 "top_dir": "", "dir": "", "total": total,
@@ -3424,6 +3427,7 @@ async def item_list(request: Request):
         # 根目录默认：热门聚合 + 各源文件夹（OK影视 首页形态）
         root_rows = _gn_root_folder_rows()
         out_rows = clientmod.normalize_cards(root_rows, client)
+        _schedule_browse_probe(out_rows, request)
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": GUARD_NATIVE_TITLE, "mdb_category": "Mix",
             "top_dir": "", "dir": "", "total": len(root_rows),
@@ -3439,6 +3443,7 @@ async def item_list(request: Request):
                 rows, total = await asyncio.wait_for(
                     _xlib_browse_rows(xcat, body), timeout=14.0)
                 rows = clientmod.normalize_cards(rows, client)
+                _schedule_browse_probe(rows, request)
                 return JSONResponse({"code": 0, "msg": "", "data": {
                     "mdb_name": xcat["title"], "mdb_category": xcat["mdb"],
                     "top_dir": "", "dir": "", "total": total, "list": rows,
@@ -3466,6 +3471,7 @@ async def item_list(request: Request):
         for g in order:
             rows.append(hgdjmod.series_card(g))
         rows = clientmod.normalize_cards(rows, client)
+        _schedule_browse_probe(rows, request)
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": hgdjmod.HGDJ_LIB_NAME, "mdb_category": "TV",
             "top_dir": "", "dir": "", "total": total_n, "list": rows,
@@ -3509,6 +3515,7 @@ async def item_list(request: Request):
             _apply_marks(row)
             rows.append(_vod_directory_card(row))
         rows = clientmod.normalize_cards(rows, client)
+        _schedule_browse_probe(rows, request)
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": lib_name, "mdb_category": "Mix", "top_dir": "",
             "dir": "", "total": total, "list": rows, "jump_list": None}})
@@ -3545,6 +3552,7 @@ async def item_list(request: Request):
         total = catalog.total(ccat)
         rows = _catalog_filter([_catalog_card(b, ccat) for b in briefs], body)
         rows = clientmod.normalize_cards(rows, client)
+        _schedule_browse_probe(rows, request)
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": mdb_name, "mdb_category": mdb_cat, "top_dir": "",
             "dir": "", "total": total, "list": rows,
@@ -3576,6 +3584,7 @@ async def item_list(request: Request):
     page_size, start, end = _page_args(body, len(all_rows))
     out_rows = all_rows[start:end]
     out_rows = clientmod.normalize_cards(out_rows, client)
+    _schedule_browse_probe(out_rows, request)
     _payload = {"code": 0, "msg": "", "data": {
         "mdb_name": mdb_name,
         "mdb_category": mdb_cat,
@@ -3637,6 +3646,7 @@ async def search_list(request: Request):
         data["data"] = hgdj_online + online + items
     else:
         data["data"] = items + online + hgdj_online
+    _schedule_browse_probe(data["data"], request)
     return JSONResponse(data, status_code=200,
                         headers={"Content-Type": "application/json; charset=utf-8"})
 
@@ -6328,6 +6338,172 @@ async def _resolve_spider(picked: dict) -> bool:
 # P2 拆分：HLS 播放链路与线路竞速：探活、复活、竞速、播放列表、HLS 路由。已移入 proxy/hls_race.py；以下重导出（对外 import 名称不变）。
 from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _source_health_enabled, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
 app.router.routes.extend(hls_router.routes)
+
+
+# ===== 浏览时探活（解冻第 4 项）=====
+# linepredict 模块 docstring 早就承诺“浏览海报 / 搜索结果时，对首屏可见影片的
+# 少数候选线做一次轻量探测”，但浏览路径上一直没有调用点：唯一的预热在播放信息
+# 路径（_prewarm_from_info → _warm_playlist，只预热默认线播放列表，不探线路）。
+# 这里补上浏览这一级：列表 handler 返回前只调度后台任务、不等待；探活跑完把
+# 每部片延迟最低的线写进 linepredict 记忆，供后续排序与起播作种子。
+# 写向冻结：只写 linepredict.remember；绝不写 _LINE_FAST（只有竞速胜者能写），
+# 也不写 _LINE_SPEED（那是真实播放吞吐，2KB 探活量不出吞吐）；失败只记日志，
+# 不标坏线（一次轻量探测失败不等于线路已死，坏线标记仍只走 _mark_line_bad）。
+_BROWSE_PROBE_MAX_TITLES = 6        # 单次浏览最多探活的影片数（首屏前几部）
+_BROWSE_PROBE_CONCURRENCY = 3       # 探活并发上限（与故障切换分批探测同口径）
+_BROWSE_PROBE_PER_LINE_TIMEOUT = 8.0  # 单线探测超时（秒，与 _PROBE_TIMEOUT 同口径）
+_BROWSE_PROBE_BUDGET = 20.0         # 单次浏览触发的探活总耗时上限（秒），超时即停
+_BROWSE_PROBE_TASKS: set[asyncio.Task] = set()  # 在途浏览探活任务（仅跟踪，不作他用）
+
+
+def _browse_probe_enabled() -> bool:
+    """浏览探活总开关：browse_probe（默认开）与 linepredict_enabled 均开才探。"""
+    try:
+        cfg = config.get()
+        return bool(cfg.get("browse_probe", True)) and \
+            bool(cfg.get("linepredict_enabled", True))
+    except Exception:
+        _log.debug("_browse_probe_enabled failed", exc_info=True)
+        return True
+
+
+def _browse_probe_guids(rows) -> list[str]:
+    """从已返回的列表行里取前 N 部可探活影片的标题 og。
+
+    目录卡 guid 先还原回标题 og；不在 store 里的行（榜单未绑定片、本地库行、
+    文件夹）直接跳过——没有线路索引可探。"""
+    ogs: list[str] = []
+    seen: set[str] = set()
+    try:
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            g = row.get("guid") or ""
+            og = _parse_line_folder_guid(g) or g
+            if not og or og in seen:
+                continue
+            if store.get_title_by_guid(og) is None:
+                continue
+            seen.add(og)
+            ogs.append(og)
+            if len(ogs) >= _BROWSE_PROBE_MAX_TITLES:
+                break
+    except Exception:
+        _log.debug("_browse_probe_guids failed", exc_info=True)
+    return ogs
+
+
+async def _browse_probe_worker(ogs: list[str], request: Request) -> None:
+    """后台探活：对每部片第 0 集的前若干候选线做轻量探测，记最快线。
+
+    只抓播放清单 / Range 首字节（_probe_latency，build_hls=False，不转码不转存）。
+    总预算内完成多少记多少，超时即停；在途标记无论成败/超时/取消都清理。"""
+    try:
+        max_lines = int(config.get().get("linepredict_max_lines", 3) or 3)
+    except Exception:
+        max_lines = 3
+    max_lines = max(1, min(8, max_lines))
+    jobs: list[tuple[str, list[dict]]] = []
+    for og in ogs:
+        key = linepredict.ep_key(og, 0)
+        if linepredict.ready_or_reprobe(key):
+            continue  # 已有够快预测，不重复探
+        if not linepredict.try_mark_inflight(key):
+            continue  # 同片已有在途探活，跳过
+        try:
+            picked = {"online_guid": og, "index": 0, "line": None,
+                      "kind": "title"}
+            cands = [c for c in _episode_candidates(picked)
+                     if not _line_is_bad(c)]
+            cands = cands[:max_lines]
+        except Exception:
+            linepredict.clear_inflight(key)
+            _log.debug("_browse_probe_worker failed", exc_info=True)
+            continue
+        if not cands:
+            linepredict.clear_inflight(key)
+            continue
+        jobs.append((key, cands))
+    if not jobs:
+        return
+    sem = asyncio.Semaphore(_BROWSE_PROBE_CONCURRENCY)
+
+    async def _probe_one(key: str, cand: dict):
+        async with sem:
+            try:
+                lat = await asyncio.wait_for(
+                    _probe_latency(cand, request, build_hls=False),
+                    timeout=_BROWSE_PROBE_PER_LINE_TIMEOUT)
+            except Exception:
+                _log.debug("_browse_probe_worker failed", exc_info=True)
+                return key, None, None
+            return key, cand.get("line"), lat
+
+    tasks = [asyncio.ensure_future(_probe_one(key, cand))
+             for key, cands in jobs for cand in cands]
+    try:
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=_BROWSE_PROBE_BUDGET)
+        except asyncio.CancelledError:
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        if pending:
+            _log.info("browse probe budget exceeded: %d/%d probes cut off",
+                      len(pending), len(tasks))
+            for t in pending:
+                t.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        best: dict[str, tuple[str, float]] = {}
+        for t in done:
+            try:
+                if t.cancelled() or t.exception() is not None:
+                    continue
+                key, line, lat = t.result()
+            except Exception:
+                _log.debug("_browse_probe_worker failed", exc_info=True)
+                continue
+            if line and lat is not None:
+                cur = best.get(key)
+                if cur is None or lat < cur[1]:
+                    best[key] = (line, lat)
+        for key, (line, lat) in best.items():
+            linepredict.remember(key, line, lat)
+    finally:
+        for key, _cands in jobs:
+            linepredict.clear_inflight(key)
+
+
+def _browse_probe_task_done(task: asyncio.Task) -> None:
+    """后台探活任务结束回调：从跟踪集合摘掉，并取回异常记日志（不留悬空 future）。"""
+    _BROWSE_PROBE_TASKS.discard(task)
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        return
+    if exc is not None:
+        _log.warning("browse probe failed: %s", type(exc).__name__)
+
+
+def _schedule_browse_probe(rows, request) -> None:
+    """浏览列表返回前调度后台探活：只创建任务、不等待，列表立即返回。
+
+    调用点在各列表 handler 的 return 之前；开关关闭或无可探行时什么都不做。"""
+    try:
+        if not _browse_probe_enabled():
+            return
+        ogs = _browse_probe_guids(rows)
+        if not ogs:
+            return
+        task = asyncio.create_task(_browse_probe_worker(ogs, request))
+        _BROWSE_PROBE_TASKS.add(task)
+        task.add_done_callback(_browse_probe_task_done)
+    except Exception:
+        _log.debug("browse probe schedule failed", exc_info=True)
 
 
 async def _race_fastest(picked: dict, request: Request) -> dict | None:
