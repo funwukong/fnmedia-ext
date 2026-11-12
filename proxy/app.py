@@ -6039,10 +6039,12 @@ async def _msearch_resolve_one(key: str, vid: str, want_idx: int,
         det = await asyncio.wait_for(
             asyncio.to_thread(guard.detail, conf, vid),
             timeout=_MSEARCH_SEARCH_TIMEOUT)
+        # 畸形详情（parse_episodes 抛错）也在 try 内：一个源坏了只丢该分支，
+        # 不毒死整个多源竞速。
+        eps = guard.parse_episodes(det) if det else []
     except Exception:  # noqa: BLE001
         _log.debug("_msearch_resolve_one failed: vid=%s", vid, exc_info=True)
         return None
-    eps = guard.parse_episodes(det) if det else []
     if not eps:
         return None
     groups: dict[str, list] = {}
@@ -6120,7 +6122,13 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         winner = None
         try:
             for fut in asyncio.as_completed(tasks):
-                r = await fut
+                try:
+                    r = await fut
+                except Exception:  # noqa: BLE001
+                    # 单个源分支异常只丢该分支，继续等其他源竞速。
+                    _log.debug("_resolve_guard_msearch branch failed",
+                               exc_info=True)
+                    continue
                 if r:
                     winner = r
                     break
@@ -6221,6 +6229,9 @@ class _GuardPanUnsupported(Exception):
 _GUARD_RES_INFLIGHT: dict[str, asyncio.Future] = {}
 _GUARD_RES_CACHE: dict[str, tuple[float, dict]] = {}
 _GUARD_RES_TTL = 120.0
+# 加固 detail/play 单步外层超时：guard._call 内部已是 22s 调用超时，
+# 这里再包一层 30s，避免裸 to_thread 在设备端异常时无限拖住播放链。
+_GUARD_RESOLVE_TIMEOUT = 30.0
 
 
 async def _resolve_guard(picked: dict) -> bool:
@@ -6308,9 +6319,12 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
         if direct_ep:
             chosen = {"line": want_line, "id": vod_id}
         else:
-            det = await asyncio.to_thread(guard.detail, conf, vod_id)
+            det = await asyncio.wait_for(
+                asyncio.to_thread(guard.detail, conf, vod_id),
+                timeout=_GUARD_RESOLVE_TIMEOUT)
             episodes = guard.parse_episodes(det)
             if not episodes:
+                picked["guard_error"] = "加固详情无选集"
                 return False
             idx = int(picked.get("index", 0) or 0)
             same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
@@ -6327,15 +6341,19 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
                         chosen = eps[idx]
                         break
                 chosen = chosen or episodes[0]
-        res = await asyncio.to_thread(guard.play, conf, chosen["line"], chosen["id"])
+        res = await asyncio.wait_for(
+            asyncio.to_thread(guard.play, conf, chosen["line"], chosen["id"]),
+            timeout=_GUARD_RESOLVE_TIMEOUT)
         url = (res or {}).get("url", "")
         if not url:
+            picked["guard_error"] = "加固播放未返回地址"
             return False
         picked["url"] = url
         picked["guard"] = False
         picked["headers"] = res.get("_headers") or {"User-Agent": "Mozilla/5.0"}
         picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
         picked["_guard_parse"] = int(res.get("parse", 0) or 0)
+        picked.pop("guard_error", None)
         if rkey:
             snap = {"ok": True, "url": url, "guard": False,
                     "headers": picked["headers"], "m3u8": picked["m3u8"],
@@ -6346,7 +6364,10 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
                                   key=lambda k: _GUARD_RES_CACHE[k][0])[:200]:
                     _GUARD_RES_CACHE.pop(old, None)
         return True
-    except Exception:
+    except Exception as exc:
+        # 加固运行时不可用（超时/传输失败等）：像网盘路径的 pan_error 一样，
+        # 把原因写进 picked，让播放链能透传给客户端，而不是静默 False。
+        picked["guard_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         _log.debug("_resolve_guard_once failed", exc_info=True)
         return False
 # <<< PRIVATE:GUARD

@@ -51,30 +51,86 @@ _bridge_fail = 0
 _bridge_restart_cooldown = 0.0
 _BRIDGE_FAIL_RESTART = 3
 _BRIDGE_RESTART_GAP = 30.0
+# 重启失败时的冷却（比成功更长）：失败不代表桥好了，立即再重启只会雪上加霜。
+_BRIDGE_RESTART_FAIL_GAP = 120.0
+# /invoke 单次调用超时（首调与重试一致；原重试落回 150s 默认极易拖垮调用方）。
+_GUARD_RETRY_TIMEOUT = float(os.environ.get("FNM_GUARD_RETRY_TIMEOUT", "22"))
+# 等 bridge 许可的最长排队时间：超时按调用失败处理，不无限等。
+_BRIDGE_SEM_TIMEOUT = float(os.environ.get("FNM_GUARD_SEM_TIMEOUT", "25"))
+# 最近一次传输层失败的后端 URL：重启时按它选目标容器。
+_last_failed_runner_url = ""
 
 
-def _restart_bridge_app() -> None:
+def _resolve_restart_container() -> str | None:
+    """按最近失败的后端 URL 选重启目标容器（防御式）。
+
+    映射 `_container_for(url)` 由 E 组维护；尚未提供时回退默认容器。
+    映射无效（无返回值/非字符串/抛异常）或容器不存在时返回 None，
+    调用方跳过重启并记 warning——绝不对不存在的容器 docker exec。
+    """
+    url = _last_failed_runner_url or RUNNER_URL
+    fn = globals().get("_container_for")
+    if callable(fn):
+        try:
+            name = fn(url)
+        except Exception:  # noqa: BLE001
+            _log.warning("_resolve_restart_container failed: url=%s", url,
+                         exc_info=True)
+            return None
+        if not name or not isinstance(name, str):
+            _log.warning("跳过桥重启：_container_for(%s) 未返回有效容器", url)
+            return None
+        if not _container_exists(name):
+            _log.warning("跳过桥重启：容器 %s 不存在（后端 %s）", name, url)
+            return None
+        return name
+    if not _container_exists(REDROID_CONTAINER):
+        _log.warning("跳过桥重启：默认容器 %s 不存在", REDROID_CONTAINER)
+        return None
+    return REDROID_CONTAINER
+
+
+def _restart_bridge_app(container: str | None = None) -> bool:
     """桥 app 卡死（do_epoll_wait 忙等、/invoke 超时）时 force-stop 后重新拉起。
 
-    本函数在 _bridge_lock 内被调用，绝不能长时间占锁（否则所有取数都被拖住）：
-    只尝试拉起一次、健康轮询封顶约 8s；桥启动通常很快，没起来也交给下一次失败重试。"""
+    只能在 `_bridge_restart_lock` 内调用，且绝不能在持有 `_bridge_sem` 时调用
+    （重启本身要等桥起，持许可会把并发调用全拖住）。只尝试拉起一次、健康轮询
+    封顶约 8s；桥启动通常很快，没起来也交给下一次失败重试。
+
+    无论成败，返回前一定写冷却：成功用 `_BRIDGE_RESTART_GAP`，失败用更长的
+    `_BRIDGE_RESTART_FAIL_GAP`（失败时不立即再触发重启）。返回桥是否起来。"""
     global _bridge_restart_cooldown
+    ok = False
     try:
-        _docker_exec(["am", "force-stop", "com.fnmedia.catvodbridge"], timeout=10)
-    except Exception:  # noqa: BLE001
-        _log.debug("_restart_bridge_app failed", exc_info=True)
-        pass
-    time.sleep(1.0)
-    try:
-        _docker_exec(["am", "start", "-n", _BRIDGE_COMPONENT], timeout=8)
-    except Exception:  # noqa: BLE001
-        _log.debug("_restart_bridge_app failed", exc_info=True)
-        pass
-    for _ in range(8):
-        if _redroid_bridge_up():
-            _bridge_restart_cooldown = time.time() + _BRIDGE_RESTART_GAP
-            return
-        time.sleep(0.5)
+        if container is None:
+            container = _resolve_restart_container()
+        elif not _container_exists(container):
+            _log.warning("跳过桥重启：容器 %s 不存在", container)
+            return False
+        if container is None:
+            return False
+        try:
+            _docker_exec(["am", "force-stop", "com.fnmedia.catvodbridge"],
+                         timeout=10, container=container)
+        except Exception:  # noqa: BLE001
+            _log.debug("_restart_bridge_app failed", exc_info=True)
+            pass
+        time.sleep(1.0)
+        try:
+            _docker_exec(["am", "start", "-n", _BRIDGE_COMPONENT],
+                         timeout=8, container=container)
+        except Exception:  # noqa: BLE001
+            _log.debug("_restart_bridge_app failed", exc_info=True)
+            pass
+        for _ in range(8):
+            if _redroid_bridge_up():
+                ok = True
+                break
+            time.sleep(0.5)
+        return ok
+    finally:
+        _bridge_restart_cooldown = time.time() + (
+            _BRIDGE_RESTART_GAP if ok else _BRIDGE_RESTART_FAIL_GAP)
 
 # ---- Android 加固运行时（redroid 轻量容器）生命周期：默认常驻 + 可手动停止 ----
 # 只支持 redroid（轻量容器化 Android）。是否启动完全由管理页按钮控制，
@@ -212,8 +268,9 @@ def android_backend() -> str:
     return "redroid"
 
 
-def _docker_exec(args: list, timeout: float = 15) -> subprocess.CompletedProcess:
-    return subprocess.run(["docker", "exec", REDROID_CONTAINER, *args],
+def _docker_exec(args: list, timeout: float = 15,
+                 container: str | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(["docker", "exec", container or REDROID_CONTAINER, *args],
                           capture_output=True, text=True, timeout=timeout)
 
 
@@ -975,7 +1032,27 @@ def available() -> bool:
     return feature_on() and bool(health().get("ok"))
 
 
+def _is_transport_error(exc: BaseException) -> bool:
+    """传输层失败（超时/连不上）：才可能说明桥/后端本身坏了。
+
+    `_runner_post` 对业务失败（runner 返回 ok:false）抛 RuntimeError，
+    那是源/参数问题，不计入看门狗。"""
+    return isinstance(exc, (httpx.TimeoutException, httpx.ConnectError))
+
+
+def _invoke_once(payload: dict):
+    """一次 /invoke 调用：有界拿信号量，显式重试超时；信号量一定释放。"""
+    if not _bridge_sem.acquire(timeout=_BRIDGE_SEM_TIMEOUT):
+        raise TimeoutError(
+            f"guard 调用排队超时（{_BRIDGE_SEM_TIMEOUT}s 内未拿到 bridge 许可）")
+    try:
+        return _runner_post("/invoke", payload, timeout=_GUARD_RETRY_TIMEOUT)
+    finally:
+        _bridge_sem.release()
+
+
 def _call(site_conf: dict, method: str, **params):
+    global _bridge_fail, _bridge_restart_cooldown, _last_failed_runner_url
     payload = {
         "runtime": "android",
         "jar": DEVICE_JAR,
@@ -985,29 +1062,48 @@ def _call(site_conf: dict, method: str, **params):
         **params,
     }
     # 多 redroid 实例池：有界并发，runner 负责把调用分到不同设备并各自串行。
-    with _bridge_sem:
-        global _bridge_fail, _bridge_restart_cooldown
-        try:
-            res = _runner_post("/invoke", payload, timeout=22.0)
-            _bridge_fail = 0
-        except Exception:
+    try:
+        res = _invoke_once(payload)
+    except Exception as exc:  # noqa: BLE001
+        if not _is_transport_error(exc):
+            # 业务失败（ok:false 等）：不计数、不重启，保持 debug。
             _log.debug("_call failed", exc_info=True)
+            raise
+        # 传输失败才进看门狗，且只在探活也失败时计数：runner 还活着说明
+        # 只是单次调用抖动/超时，重启整桥是误伤。
+        _last_failed_runner_url = RUNNER_URL
+        _log.warning("_call transport failed: %s: %s",
+                     type(exc).__name__, str(exc)[:160])
+        try:
+            runner_down = not available()
+        except Exception:  # noqa: BLE001
+            _log.debug("_call available probe failed", exc_info=True)
+            runner_down = False
+        if not runner_down:
+            raise
+        with _lock:
             _bridge_fail += 1
-            # 单实例时代的整机卡死在池里已罕见；连续失败且过冷却期才串行重启主桥，
-            # 然后只重试一次本次调用。重启动作本身用独立锁串行，避免并发重复拉起。
-            now = time.time()
-            if _bridge_fail >= _BRIDGE_FAIL_RESTART and \
-                    now >= _bridge_restart_cooldown:
-                with _bridge_restart_lock:
-                    try:
-                        _restart_bridge_app()
-                    except Exception:  # noqa: BLE001
-                        _log.debug("_call failed", exc_info=True)
-                        pass
-                res = _runner_post("/invoke", payload)
+            fail = _bridge_fail
+        now = time.time()
+        if fail >= _BRIDGE_FAIL_RESTART and now >= _bridge_restart_cooldown:
+            # 信号量已在 _invoke_once 内释放：重启只在 _bridge_restart_lock
+            # 内串行，不占 bridge 许可；重启本身会写冷却（失败 120s）。
+            with _bridge_restart_lock:
+                try:
+                    _restart_bridge_app()
+                except Exception:  # noqa: BLE001
+                    _log.debug("_call restart failed", exc_info=True)
+                    pass
+            # 只重试一次本次调用（重新排队拿许可，同样显式超时）。
+            # 再失败也不清零 _bridge_fail，但重启写下的冷却会阻止立即再触发。
+            res = _invoke_once(payload)
+            with _lock:
                 _bridge_fail = 0
-            else:
-                raise
+        else:
+            raise
+    else:
+        with _lock:
+            _bridge_fail = 0
     _mark_android_used()  # 真实加固调用成功，刷新空闲计时
     return res
 

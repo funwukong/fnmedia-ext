@@ -1356,8 +1356,12 @@ async def _gn_category_page(key: str, tid: str, cname: str, pg: int = 1,
     if hit_rows:
         return hit_rows, True, more
     try:
+        # shield：超时只取消等待方，不取消共享的 inflight 取数任务
+        # （docstring 承诺“调用方超时不取消真正取数”，旧代码直接 wait_for
+        # 任务本身，超时即取消它，承诺是假的）。
+        task = _gn_category_task(key, tid, pg, ext, force_type)
         cards, more = await asyncio.wait_for(
-            _gn_category_task(key, tid, pg, ext, force_type), timeout=9)
+            asyncio.shield(task), timeout=9)
         return cards or [], True, bool(more)
     except Exception:  # noqa: BLE001
         # 本次快速失败，但持久任务仍在后台取数（结果落缓存，下次秒回）
@@ -1520,8 +1524,10 @@ async def _gn_warm_worker() -> None:
                     continue
                 ftype = "TV" if _gn_class_is_tv(cname) else "Movie"
                 try:
+                    # 同上：shield 共享 inflight 任务，超时只放弃本次等待。
+                    task = _gn_category_task(key, tid, 1, None, ftype)
                     await asyncio.wait_for(
-                        _gn_category_task(key, tid, 1, None, ftype), timeout=24)
+                        asyncio.shield(task), timeout=24)
                 except Exception:  # noqa: BLE001
                     _log.debug("_gn_warm_worker failed", exc_info=True)
                     pass
