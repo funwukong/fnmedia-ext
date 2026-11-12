@@ -540,11 +540,12 @@ def _episode_key(picked: dict) -> str:
 
 
 def _remember_fast(picked: dict, line: str, latency: float | None = None) -> None:
-    """记下竞速实测最快线（_LINE_FAST，turbo 实测结果为准）。
+    """记下竞速实测最快线（竞速胜者记忆，turbo 实测结果为准）。
 
-    冻结：只有竞速胜者能写 _LINE_FAST；预测结果绝不写这里。
+    只有竞速胜者能写这里；预测结果绝不写这里，零竞速直出也不写——直出
+    只是复用预测记忆，不把它升级成竞速实测结果。
     另把实测胜者同步给本片预测缓存（单向：turbo 实测 → linepredict，供下次
-    竞速作优先种子；linepredict 绝不反向写 _LINE_FAST）。
+    起播作可信直出候选或竞速优先种子；linepredict 绝不反向写竞速记忆）。
     """
     if not line:
         return
@@ -564,9 +565,9 @@ def _remember_fast(picked: dict, line: str, latency: float | None = None) -> Non
 def remembered_fast_line(picked: dict) -> str | None:
     """该集上一次竞速选出的最快线（未过期、且当前未被标记为坏线）。
 
-    冻结：只读 turbo 竞速记忆 _LINE_FAST。刻意不搬上游的 linepredict.fastest
-    回落——预测线只能作竞速候选排序种子（见 _race_candidates），绝不能不经
-    竞速就被当作最快线复用。
+    只读 turbo 竞速记忆。预测线的可信直出不在这里回落——它走
+    trusted_predicted_target（_ensure_playable 在竞速前先试直出），
+    预测线在竞速内部仍只作候选排序种子（见 _race_candidates）。
     """
     from app import _line_is_bad  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     rec = _LINE_FAST.get(_episode_key(picked))
@@ -771,16 +772,78 @@ def _maybe_mid_switch(picked: dict, auto: bool) -> dict | None:
     return target
 
 
+def _zero_race_on() -> bool:
+    """零竞速直出开关（config.linepredict_zero_race，默认开）。
+
+    关时恢复旧行为：预测线只在竞速候选排序里作 tiebreak，起播仍全量竞速。
+    """
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        return bool(config.get().get("linepredict_zero_race", True))
+    except Exception:
+        _log.debug("_zero_race_on failed", exc_info=True)
+        return True
+
+
+def trusted_predicted_target(picked: dict) -> dict | None:
+    """可信预测线直出目标（零竞速秒播）；不可信/缺失时返回 None，回退竞速。
+
+    “可信” = 以下全部成立，缺一不可：
+    1. 开关开（linepredict_zero_race）且预测功能开（linepredict_enabled）；
+    2. 新鲜：linepredict.fastest 在 30 分钟 TTL 内（沿用 linepredict 现有
+       口径；过期由 fastest 自行丢弃）；
+    3. 该线是本集的真实候选（_episode_candidates 里有这一集），否则无从直出；
+    4. 未被标记坏线；一旦是坏线，失效该条预测记忆并回退竞速；
+    5. 够快（二者居其一）：
+       a. 探测延迟 < linepredict.SLOW_SEC（1.5s）——linepredict 自己的“不够
+          秒播”阈值，ready_or_reprobe 判定就绪也用它；不用 grade() 作门：
+          grade 只是海报角标档位（<0.8s 快 / <2.5s 中 / >=2.5s 慢），其中
+          2 档 0.8–2.5s 横跨了 1.5s 慢阈值，分不清“能直出”与“慢线”；
+       b. 或该线实测吞吐 >= _SPEED_GOOD（200 KB/s）——与竞速内已知快线
+          单发直探用同一条线；吞吐达标时即使某次探测延迟偏高（如探活时
+          抖动）也可直出。
+    只读记忆、不发任何网络请求；绝不写竞速最快线记忆（直出只是复用预测，
+    不把它升级成竞速实测结果）。
+    """
+    if not picked or not picked.get("online_guid"):
+        return None
+    if not _zero_race_on():
+        return None
+    from app import _episode_candidates, _line_is_bad, _line_speed, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        if not bool(config.get().get("linepredict_enabled", True)):
+            return None
+    except Exception:
+        _log.debug("trusted_predicted_target failed", exc_info=True)
+        return None
+    key = _episode_key(picked)
+    pred = linepredict.fastest(key)
+    if not pred:
+        return None
+    if _line_is_bad({**picked, "line": pred}):
+        linepredict.invalidate(key)
+        return None
+    lat = linepredict.latency(key)
+    fast_by_latency = lat is not None and lat < linepredict.SLOW_SEC
+    fast_by_throughput = _line_speed({"line": pred}) >= _SPEED_GOOD
+    if not (fast_by_latency or fast_by_throughput):
+        return None
+    for cand in _episode_candidates(picked):
+        if cand.get("line") == pred:
+            return cand
+    return None
+
 def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
     """竞速候选：默认线/上次最快线在前，坏线排除（除非全坏），限量。"""
     from app import _episode_candidates, _line_is_bad, _line_score, config, remembered_fast_line, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     cands = _episode_candidates(picked)
     default = store.best_line(picked.get("online_guid", ""))
     fast = remembered_fast_line(picked)
-    # 冻结适配（上游 linepredict 的降级形态）：预测线只作竞速优先种子——在吞吐
-    # 打分相同、且非上次竞速最快线时排前一位。竞速仍全量跑（first-success wins
-    # 不变），吞吐打分仍是第一排序键，预测线不进 _LINE_FAST、不替代竞速结果。
-    # 上游的 _predict_order_lines（预测线直接置顶）刻意不搬。
+    # 预测线在竞速内只作优先种子——在吞吐打分相同、且非上次竞速最快线时
+    # 排前一位。竞速仍全量跑（first-success wins 不变），吞吐打分仍是第一
+    # 排序键，预测线不进竞速最快线记忆、不替代竞速结果。
+    # 可信预测的零竞速直出不在竞速里发生：_ensure_playable 在调竞速前先试
+    # trusted_predicted_target，可信就直接起播、根本不进这里。
     pred = None
     try:
         if bool(config.get().get("linepredict_enabled", True)):
@@ -816,7 +879,9 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
                 c["line"] != fast if fast else True,
                 c["line"] != pred if pred else True,
                 c["line"] != default if default else True,
-                # 冻结：种子只作最后一级 tiebreak，绝不盖过吞吐打分/最快线/默认线。
+                # 种子只作最后一级 tiebreak，绝不盖过吞吐打分/最快线/默认线
+                # （竞速内的排序规则不变；零竞速直出在 _ensure_playable 里
+                # 先于竞速发生，不走这里）。
                 c["line"] != seed if seed else True)
 
     cands.sort(key=rank)
@@ -825,7 +890,9 @@ async def _ensure_playable(picked: dict, request: Request,
                            auto: bool = False) -> dict:
     """取流前确保目标可播。
 
-    - auto=True（播放器自动起播，非用户手动切线）且开启最快线：并行竞速选最快线。
+    - auto=True（播放器自动起播，非用户手动切线）且开启最快线：先试可信
+      预测线零竞速直出（trusted_predicted_target，记忆新鲜且够快时直接
+      用该线、跳过竞速）；不可信/缺失时并行竞速选最快线。
     - 否则（用户手动选了某条线）且固定线直出开（默认）：直接用该线，不先探活；
       已知坏线仍故障切换到首个可用线。开关关时恢复旧行为：先探当前线，
       失败才记忆坏线并故障切换到首个可用线。
@@ -834,6 +901,12 @@ async def _ensure_playable(picked: dict, request: Request,
     if not picked or not picked.get("online_guid"):
         return picked
     if auto and _autofail_on() and _fastest_on():
+        direct = trusted_predicted_target(picked)
+        if direct is not None:
+            _log.info("预测零竞速直出: 《%s》%s 选用 %s，跳过竞速",
+                      picked.get("title"), picked.get("ep_title") or "",
+                      direct.get("line"))
+            return direct
         winner = await _race_fastest(picked, request)
         if winner is not None:
             return winner
