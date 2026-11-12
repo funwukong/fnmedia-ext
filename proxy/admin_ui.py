@@ -786,6 +786,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
         <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
           <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
+        <label class="switch-row"><input type="checkbox" id="posterSpeedBadge"/>
+          <span>海报速度角标<span class="sub">列表卡标题后显示该片实测最快线路的速度（如 ⚡860KB/s）；只用竞速/播放中已测到的速度，没有实测值不显示</span></span></label>
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
           <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
         <label class="switch-row"><input type="checkbox" id="fixedLineDirect"/>
@@ -2340,7 +2342,8 @@ async function saveLines(){
     line_fastest_timeout:Math.max(1,Math.min(10,parseFloat($("fastestTimeout").value)||4)),
     line_autofail:$("lineAutofail").checked,
     fixed_line_direct:$("fixedLineDirect").checked,
-    mid_playback_switch:$("midPlaybackSwitch").checked};
+    mid_playback_switch:$("midPlaybackSwitch").checked,
+    poster_speed_badge:$("posterSpeedBadge").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
 }
@@ -2697,6 +2700,7 @@ async function init(){
   $("junk").checked=CFG.filter_junk;
   $("onlineFirst").checked=CFG.online_first!==false;
   $("lineFastest").checked=CFG.line_fastest!==false;
+  $("posterSpeedBadge").checked=CFG.poster_speed_badge!==false;
   $("lineAutofail").checked=CFG.line_autofail!==false;
   $("fixedLineDirect").checked=CFG.fixed_line_direct!==false;
   $("midPlaybackSwitch").checked=CFG.mid_playback_switch!==false;

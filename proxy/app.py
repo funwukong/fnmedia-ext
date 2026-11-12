@@ -1585,6 +1585,77 @@ except Exception:  # noqa: BLE001
     pass
 
 
+# ---- 海报速度角标（解冻第 5 项）----
+# 落点：拼进 remarks → 标题后缀，不新增卡片字段、不动图片水印。
+#   * 图片水印（posterbadge.badge）需要 Pillow，而 Pillow 不在项目依赖里，
+#     NAS 上 available() 恒为 False，烧进图里真机上看不到；
+#   * 新字段（如 speed_badge）会被 TV 严格端 normalize_card 按
+#     TV_CARD_KEEP 白名单剥掉；加进白名单等于把未知字段喂给 TV 的
+#     Flutter fromJson（正是白名单要防的整页失败）；且各端 UI 只渲染
+#     已知字段，未知字段即使透传也不会显示。
+#   * remarks 早已拼进 title（" ·{remarks}"），title 在白名单内、各端
+#     都渲染；remarks 本身在详情/info 对象里经 normalize_detail
+#     （不裁剪）直通 TV。故角标只追加在标题后缀里，TV 端零新增字段。
+# 取值：只用已有实测值——_LINE_SPEED 里的指数滑动平均吞吐（KB/s，
+# 按线路名记，1 小时过期，由 _line_speed 把关）。linepredict 记忆的
+# 是首字节延迟（秒）不是吞吐，没有 KB/s 值可标，不单独作为角标值来源；
+# 其记忆的线若另有 _LINE_SPEED 实测值，已包含在取最大值候选中。
+# 角标路径只读内存表，不发任何网络请求、不引入新锁/新竞态。
+def _format_speed_badge(kbps: float) -> str:
+    try:
+        v = float(kbps)
+    except (TypeError, ValueError):
+        return ""
+    if v <= 0:
+        return ""
+    if v >= 1024:
+        return f"⚡{v / 1024:.1f}MB/s"
+    return f"⚡{v:.0f}KB/s"
+
+
+def _brief_best_speed(brief: dict) -> float:
+    """该片各线路实测吞吐的最大值（KB/s）；无实测/全部过期返回 0.0。"""
+    best = 0.0
+    for lname in (brief or {}).get("lines") or {}:
+        try:
+            s = _line_speed({"line": lname})
+        except Exception:  # noqa: BLE001
+            _log.debug("_brief_best_speed failed", exc_info=True)
+            continue
+        if s > best:
+            best = s
+    return best
+
+
+def _poster_speed_badge_on() -> bool:
+    try:
+        return bool(config.get().get("poster_speed_badge", True))
+    except Exception:  # noqa: BLE001
+        _log.debug("_poster_speed_badge_on failed", exc_info=True)
+        return True
+
+
+def _brief_speed_badge(brief: dict) -> str:
+    """该片海报角标文本；开关关 / 无实测值 / 全部过期时为空串。"""
+    if not _poster_speed_badge_on():
+        return ""
+    return _format_speed_badge(_brief_best_speed(brief))
+
+
+def _line_speed_badge(line: str) -> str:
+    """单条线路的实测速度角标文本（线路墙卡用）；无实测/过期/开关关为空串。"""
+    if not _poster_speed_badge_on() or not line:
+        return ""
+    return _format_speed_badge(_line_speed({"line": line}))
+
+
+# 向注入层提供速度角标文本，使 search_item 的标题后缀统一生效。
+try:
+    inj.set_speed_badge_provider(lambda b: _brief_speed_badge(b))
+except Exception:  # noqa: BLE001
+    pass
+
+
 def _brief_poster_badged(brief: dict) -> str:
     """按 brief 线路的网盘/健康情况生成带角标的海报路径。"""
     cover = brief.get("poster") or ""
@@ -1650,7 +1721,9 @@ def _catalog_card(brief: dict, cat: str) -> dict:
     row = inj.search_item(brief)
     title = (brief.get("title") or "").strip()
     remarks = (brief.get("remarks") or "").strip()
-    row["title"] = title + (f" ·{remarks}" if remarks else "")
+    sb = _brief_speed_badge(brief)
+    row["title"] = title + (f" ·{remarks}" if remarks else "") + (
+        f" ·{sb}" if sb else "")
     row["ancestor_guid"] = CATALOG_LIB_GUIDS[cat]
     row["ancestor_name"] = catalogmod.catalog_title(cat)
     row["ancestor_category"] = catalogmod.catalog_mdb(cat)
@@ -3019,9 +3092,11 @@ def _vod_line_card(brief: dict, line: str, index: int, parent: str) -> dict:
             "local_number_of_episodes": 0,
             "local_number_of_seasons": 0,
         })
+    # 线路墙单线卡：角标取该线自己的实测速度（不是全片最大值）。
+    lsb = _line_speed_badge(line)
     row.update({
         "guid": item_guid,
-        "title": f"{source}｜{title}",
+        "title": f"{source}｜{title}" + (f" ·{lsb}" if lsb else ""),
         "can_play": 1,
         "play_item_guid": item_guid,
         "parent_guid": folder_guid,
@@ -3506,8 +3581,10 @@ async def item_list(request: Request):
         rows = []
         for b in briefs:
             row = inj.search_item(b)
+            _sb = _brief_speed_badge(b)
             row["title"] = (b.get("title") or "") + (
-                f" ·{b['remarks']}" if b.get("remarks") else "")
+                f" ·{b['remarks']}" if b.get("remarks") else "") + (
+                f" ·{_sb}" if _sb else "")
             row["ancestor_guid"] = aguid
             row["ancestor_name"] = lib_name
             row["ancestor_category"] = "Mix"
@@ -4592,8 +4669,10 @@ def _favorite_card(rec: dict) -> dict | None:
             brief = store.get_title_by_guid(folder_og)
     if brief:
         row = inj.search_item(brief)
+        _sb = _brief_speed_badge(brief)
         row["title"] = inj._f(brief, "title") + (
-            f" ·{inj._f(brief, 'remarks')}" if inj._f(brief, "remarks") else "")
+            f" ·{inj._f(brief, 'remarks')}" if inj._f(brief, "remarks") else "") + (
+            f" ·{_sb}" if _sb else "")
     elif chart_cache.is_chart_guid(guid):
         meta = chart_cache.get_guid(guid) or {}
         if not meta:
@@ -4607,8 +4686,10 @@ def _favorite_card(rec: dict) -> dict | None:
         parent = store.get_title_by_guid(ep.get("online_guid", "")) or {}
         if parent:
             row = inj.search_item(parent)
+            _sb = _brief_speed_badge(parent)
             row["title"] = inj._f(parent, "title") + (
-                f" ·{inj._f(parent, 'remarks')}" if inj._f(parent, "remarks") else "")
+                f" ·{inj._f(parent, 'remarks')}" if inj._f(parent, "remarks") else "") + (
+                f" ·{_sb}" if _sb else "")
         else:
             title = (rec.get("title") or "").strip()
             if not title:

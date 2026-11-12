@@ -106,7 +106,9 @@ async def _guard_browse_rows(glib: dict, body: dict) -> tuple[list[dict], int]:
             continue
         row = inj.search_item(b)
         row["guid"] = b["guid"]
-        row["title"] = (t.title or "") + (f" ·{t.remarks}" if t.remarks else "")
+        _sb = inj._speed_badge_for_brief(b)
+        row["title"] = (t.title or "") + (f" ·{t.remarks}" if t.remarks else "") + (
+            f" ·{_sb}" if _sb else "")
         row["ancestor_guid"] = guard_lib_guid(conf["key"])
         row["ancestor_name"] = guard_lib_name(conf)
         row["ancestor_category"] = "Mix"

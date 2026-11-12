@@ -781,6 +781,7 @@ async def ext_set_config(request: Request):
         "linepredict_zero_race",  # 可信预测零竞速直出开关（默认开）
         "mid_playback_switch",  # 播放中静默换线开关（默认开）
         "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
+        "poster_speed_badge",  # 海报速度角标开关（默认开）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
