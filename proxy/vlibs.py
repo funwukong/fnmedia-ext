@@ -11,8 +11,8 @@
 - 账号识别（谁在看）在 ``fnusers.py``；本模块只回答“这个账号能不能看到这张库”。
 
 与上游的差别（仅此处）：
-- CATALOG_LIB_GUIDS 按本 fork 的 11 个分类（含 documentary/uhd/shortdrama/
-  overseas/ai_comic/ted/adult），guid 与 app.py 完全一致；
+- CATALOG_LIB_GUIDS 按本 fork 的 16 个分类（含 documentary/uhd/shortdrama/
+  overseas/ai_comic/ted/adult/sports/live/kids/opera/music），guid 与 app.py 完全一致；
 - 多一个 K_HGDJ = "hgdj"（红果短剧库，guid 是 fork 特有的 "on"+md5 形式，
   由 app.py 的 _vkey_for_guid 现场反查，不进 key_of_guid）。
 """
@@ -52,13 +52,24 @@ CATALOG_LIB_GUIDS = {
     "ai_comic":   "6784f423ff4be5af4fe60cde6c8da303",
     "ted":        "34883d4af44ca4a5539cb38827158294",
     "adult":      "411515e17c85709cf1966697b7b2c58e",
+    # cat-wiring 新增：guid 由固定串 md5 派生，与 app.py 一致。
+    # md5("fnmedia-catalog-lib:sports") / md5("fnmedia-catalog-lib:live")
+    # md5("fnmedia-catalog-lib:kids") / md5("fnmedia-catalog-lib:opera")
+    # md5("fnmedia-catalog-lib:music")
+    "sports":     "9b93ebd34f12099811bcb2e700825169",
+    "live":       "465e85f3a6cb1a4ce5d4e397de29384b",
+    "kids":       "cd91e59c8f342225b8741f18d70a26be",
+    "opera":      "495704bcc69d765082a218219fbf3c1e",
+    "music":      "00a744b183e5c4ef1d375ab8514f515b",
 }
 CHART_CAT_LABEL = {"movie": "电影榜", "tv": "剧集榜", "anime": "动漫榜", "variety": "综艺榜"}
 CATALOG_CAT_LABEL = {
     "movie": "海量电影", "tv": "海量剧集", "anime": "海量动漫", "variety": "海量综艺",
     "documentary": "纪录片", "uhd": "4K影视", "shortdrama": "热门短剧",
-    "overseas": "海外剧集", "ai_comic": "AI漫剧", "ted": "TED学习",
+    "overseas": "海外剧集", "ai_comic": "AI漫剧", "ted": "教育",
     "adult": "扩展资源",
+    "sports": "体育节目", "live": "直播", "kids": "少儿",
+    "opera": "戏曲", "music": "音乐MV",
 }
 
 _STANDALONE_PREFIX = "fnmedia-standalone:"

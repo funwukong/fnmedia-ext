@@ -57,7 +57,15 @@ CATALOG_CATEGORIES = [
     ("overseas", "🌍海外剧集", "TV"),
     ("ai_comic", "🤖AI漫剧", "Mix"),
     # P2 追加：TED学习，跟随海量主开关，不设独立开关。
-    ("ted", "🎓TED学习", "Mix"),
+    # cat-core：显示名改为“🎓教育”，键 ted 不动，GUID 因此不变。
+    ("ted", "🎓教育", "Mix"),
+    # cat-core 新增：体育 / 直播 / 少儿 / 戏曲 / 音乐MV，跟随海量主开关，不设独立开关。
+    # MDB 类别按现有惯例：体育/直播用 TV，少儿/戏曲/音乐用 Mix。
+    ("sports", "⚽体育节目", "TV"),
+    ("live", "📡直播", "TV"),
+    ("kids", "🧒少儿", "Mix"),
+    ("opera", "🎭戏曲", "Mix"),
+    ("music", "🎵音乐MV", "Mix"),
 ]
 
 # 跨源聚合的“海量四库”使用的保留作用域 id；单源独立库作用域为其 source id。
@@ -83,6 +91,16 @@ _SHORT_KW = ("短剧", "微短剧", "剧场")
 _AI_COMIC_KW = ("AI漫剧", "AI动漫", "AI漫画", "动态漫画", "漫剧")
 # P2 追加：TED学习（大小写不敏感，用小写匹配，见 classify）。
 _TED_KW = ("ted", "ted演讲", "tedx", "ted-ed", "ted演讲")
+# cat-core 新增：体育 / 直播 / 少儿 / 戏曲 / 音乐（判定顺序见 classify）。
+# 体育与音乐必须在 _EXCLUDE_KW 判定之前（“体育/赛事”“音乐/MV”在排除表里）；
+# 音乐用小写匹配（nl），参考 ted 的写法；裸“晚会”不在音乐表里（与综艺重叠）。
+_SPORTS_KW = ("体育", "足球", "篮球", "赛事", "乒乓", "网球", "排球",
+              "羽毛球", "田径", "拳击", "格斗", "斯诺克", "高尔夫", "赛车", "运动")
+_LIVE_KW = ("直播", "现场直播", "电视直播")
+_KIDS_KW = ("少儿", "儿童", "儿歌", "幼儿", "亲子", "童话")
+_OPERA_KW = ("戏曲", "京剧", "越剧", "黄梅戏", "豫剧", "评剧", "昆曲",
+             "秦腔", "川剧", "粤剧", "二人转", "沪剧", "淮剧")
+_MUSIC_KW = ("mv", "音乐", "演唱会", "音乐会", "音乐节", "音乐现场", "音综", "打歌")
 _OVERSEAS_KW = ("海外剧", "美剧", "英剧", "韩剧", "日剧", "泰剧",
                 "港台剧", "欧美剧", "海外电视剧")
 # 成人向分类名：显式导向 ADULT 福利分类，绝不落入常规电影/剧集类。
@@ -176,6 +194,20 @@ def classify(name: str) -> str | None:
     # P2 追加：TED学习（小写匹配，TED / Ted / TEDx 都认）。
     if any(k in nl for k in _TED_KW):
         return "ted"
+    # cat-core：新分类判定，统一在 ai_comic/ted 之后、_EXCLUDE_KW 之前——
+    # “体育/赛事”“音乐/MV”在排除表里，须先截获；“电视直播”含“电视”、
+    # “少儿动画”含“动画”、“音乐纪录片”含“纪录”，须先于 tv/anime/
+    # documentary 判定；五类之间互不重叠，顺序不限。
+    if any(k in n for k in _SPORTS_KW):
+        return "sports"
+    if any(k in n for k in _LIVE_KW):
+        return "live"
+    if any(k in n for k in _KIDS_KW):
+        return "kids"
+    if any(k in n for k in _OPERA_KW):
+        return "opera"
+    if any(k in nl for k in _MUSIC_KW):
+        return "music"
     if any(k in n for k in _EXCLUDE_KW):
         return None
     # P2：海外剧先于普通剧集判定——美剧/韩剧/日剧等不再混进“海量剧集”。

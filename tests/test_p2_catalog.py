@@ -7,10 +7,10 @@ def test_new_categories_registered():
     cats = dict((c, t) for c, t, _ in catalog.CATALOG_CATEGORIES)
     assert cats["overseas"] == "🌍海外剧集"
     assert cats["ai_comic"] == "🤖AI漫剧"
-    assert cats["ted"] == "🎓TED学习"
+    assert cats["ted"] == "🎓教育"
     assert catalog.catalog_title("overseas") == "🌍海外剧集"
     assert catalog.catalog_title("ai_comic") == "🤖AI漫剧"
-    assert catalog.catalog_title("ted") == "🎓TED学习"
+    assert catalog.catalog_title("ted") == "🎓教育"
 
 
 def test_ted_classify():
