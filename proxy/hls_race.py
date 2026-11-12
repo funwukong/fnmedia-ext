@@ -1030,7 +1030,11 @@ _NOT_HLS = object()
 
 
 def _playlist_cache_key(picked: dict) -> str:
-    return f'{picked.get("online_guid","")}|{picked.get("line","")}|{int(picked.get("index",0) or 0)}'
+    # 跳过签名进键：改开关/秒数后旧缓存（另一时间线）不再命中，
+    # 避免改后仍播出旧的已剪/未剪清单。
+    intro_s, outro_s = _skip_seconds()
+    return (f'{picked.get("online_guid","")}|{picked.get("line","")}|'
+            f'{int(picked.get("index",0) or 0)}|sk{intro_s}-{outro_s}')
 
 
 async def _build_playlist_body(mg: str, picked: dict, request: Request):
@@ -1082,6 +1086,19 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
             text, _ad_removed = _adfilter.filter_hls(text, src_url)
     except Exception:
         _log.info("hls adfilter failed", exc_info=True)
+
+    # 跳过片头/片尾（仅剧集点播媒体清单）：在分片改写前对原文剪裁；
+    # 直播（无 ENDLIST）/电影/未知标题/片长不足时 _trim_playlist 原样返回。
+    intro_s, outro_s = _skip_seconds()
+    if intro_s or outro_s:
+        try:
+            from app import store as _store
+            _og = picked.get("online_guid")
+            _brief = _store.get_title_by_guid(_og) if _og else None
+        except (ImportError, AttributeError, TypeError, KeyError):
+            _brief = None
+        if _skip_applies_to_brief(_brief):
+            text = _trim_playlist(text, intro_s, outro_s)
 
     sel_qs = ""
     if picked.get("line"):
@@ -1269,6 +1286,162 @@ def _cached_playlist_seconds(picked: dict) -> int:
     return _playlist_total_seconds(body)
 
 
+# ---- 跳过片头/片尾（playback-skip）----
+# 生效路径：_build_playlist_body 在分片改写前对剧集点播媒体清单剪裁；
+# CMS 里没有片头片尾时长（_map_vod 只有 vod_duration 总时长），
+# 跳过秒数只能由用户在配置里给。客户端是否消费 play/info 里的
+# skip_intro/skip_outro 标记未验证（无客户端源码），实际剪裁由
+# 服务端清单完成，不依赖客户端。
+# 续播换算：客户端在裁剪后清单上播放，其时钟 t=0 即原片头剪掉后的
+# 位置；history.record 存的是客户端上报的 ts（已是裁剪后时间线），
+# resume 原样取回即落在裁剪后时间线内，无需换算。开关启用前已存
+# 的记录是原时间线上的 ts，启用后会整体偏后一个片头（反之亦然），
+# 无法区分新旧记录，故不做换算，特此说明。
+SKIP_SECONDS_MAX = 300
+
+
+def _skip_seconds() -> tuple[int, int]:
+    """当前生效的跳过秒数 (intro, outro)：开关关时对应项为 0。
+
+    每次实时读配置（改值即时生效，无需重启）；配置读不到/非法时
+    回落 (0, 0)，绝不影响播放。"""
+    try:
+        from app import config as _cfg
+        d = _cfg.get() or {}
+    except (ImportError, AttributeError, TypeError, ValueError):
+        return (0, 0)
+    try:
+        import config as cfgmod
+        intro = cfgmod.clamp_skip_seconds(d.get("skip_intro_seconds")) \
+            if d.get("skip_intro_enabled") else 0
+        outro = cfgmod.clamp_skip_seconds(d.get("skip_outro_seconds")) \
+            if d.get("skip_outro_enabled") else 0
+    except (AttributeError, TypeError):
+        _log.debug("_skip_seconds failed", exc_info=True)
+        return (0, 0)
+    return (intro, outro)
+
+
+def _skip_applies_to_brief(brief) -> bool:
+    """跳过剪裁是否适用于该标题：仅剧集（TV）；电影/未知标题不剪。"""
+    if not brief:
+        return False
+    try:
+        return bool(inj.is_tv(brief))
+    except (AttributeError, TypeError):
+        return False
+
+
+def _skip_adjusted_duration(duration: int, brief) -> int:
+    """把原始时长扣掉已剪掉的片头片尾（仅剧集目标；开关关/电影原样返回）。"""
+    intro, outro = _skip_seconds()
+    if (intro, outro) == (0, 0) or not _skip_applies_to_brief(brief):
+        return int(duration or 0)
+    return max(0, int(duration or 0) - intro - outro)
+
+
+def _trim_playlist(text: str, intro_seconds: int, outro_seconds: int) -> str:
+    """按秒数剪掉媒体清单首尾分片（整分片剪，不切分片），返回新文本。
+
+    只剪点播媒体清单：无 #EXTINF（master 清单）或无 #EXT-X-ENDLIST
+    （直播滑动窗口）时原样返回；片头+片尾 >= 总时长时原样返回（不剪、
+    不炸、不留空清单）。剪掉的分片整单元丢弃（其前的 #EXT-X-KEY /
+    #EXT-X-DISCONTINUITY 等标签跟着走，保留分片的标签不动）；
+    #EXT-X-MEDIA-SEQUENCE 按剪掉的片头分片数递增（缺失时补写）；
+    #EXT-X-TARGETDURATION 不动（剩余分片最大时长 <= 原值，仍合法）。
+    分片横跨跳过边界时保留该分片：实际剪掉的秒数 <= 配置秒数。"""
+    if not text or not isinstance(text, str):
+        return text
+    intro = max(0, int(intro_seconds or 0))
+    outro = max(0, int(outro_seconds or 0))
+    if intro <= 0 and outro <= 0:
+        return text
+    if "#EXTINF" not in text or "#EXT-X-ENDLIST" not in text:
+        return text
+    lines = text.splitlines()
+    first_inf = next((i for i, ln in enumerate(lines)
+                      if ln.strip().startswith("#EXTINF:")), None)
+    if first_inf is None:
+        return text
+    header = lines[:first_inf]
+    rest = lines[first_inf:]
+    # 单元：前置标签行 + #EXTINF + 分片 URI 行；最后一个 URI 之后的
+    # 残行（#EXT-X-ENDLIST 等）进 footer，原样保留。
+    units: list[dict] = []
+    pending: list[str] = []
+    pending_dur = 0.0
+    pending_has_inf = False
+    for ln in rest:
+        s = ln.strip()
+        if s.startswith("#EXTINF:"):
+            # 畸形：上一单元无 URI（孤儿 EXTINF），标签行并入同一单元。
+            try:
+                pending_dur = float(s.split(":", 1)[1].split(",", 1)[0])
+            except (ValueError, IndexError):
+                pending_dur = 0.0
+            pending_has_inf = True
+            pending.append(ln)
+        elif s.startswith("#"):
+            pending.append(ln)
+        elif s:
+            units.append({"tags": pending, "dur": pending_dur,
+                          "uri": ln, "has_inf": pending_has_inf})
+            pending, pending_dur, pending_has_inf = [], 0.0, False
+        else:
+            pending.append(ln)
+    footer = pending
+    total = sum(u["dur"] for u in units if u["has_inf"])
+    if total <= 0 or total <= intro + outro:
+        return text
+    drop_front = 0
+    acc = 0.0
+    for u in units:
+        if not u["has_inf"] or u["dur"] <= 0:
+            break  # 无法计时的分片不参与片头剪裁，保留
+        if acc + u["dur"] <= intro:
+            acc += u["dur"]
+            drop_front += 1
+        else:
+            break
+    drop_back = 0
+    acc = 0.0
+    for u in reversed(units[drop_front:]):
+        if not u["has_inf"] or u["dur"] <= 0:
+            break
+        if acc + u["dur"] <= outro:
+            acc += u["dur"]
+            drop_back += 1
+        else:
+            break
+    if drop_front == 0 and drop_back == 0:
+        return text
+    end = len(units) - drop_back if drop_back else len(units)
+    kept = units[drop_front:end]
+    if not kept:
+        return text
+    seq = 0
+    seq_idx = None
+    for i, ln in enumerate(header):
+        m = re.search(r"#EXT-X-MEDIA-SEQUENCE:\s*(\d+)", ln)
+        if m:
+            seq = int(m.group(1))
+            seq_idx = i
+            break
+    new_header = list(header)
+    if seq_idx is not None:
+        new_header[seq_idx] = f"#EXT-X-MEDIA-SEQUENCE:{seq + drop_front}"
+    elif drop_front:
+        insert_at = 1 if new_header and \
+            new_header[0].strip() == "#EXTM3U" else 0
+        new_header.insert(insert_at, f"#EXT-X-MEDIA-SEQUENCE:{drop_front}")
+    out_lines = list(new_header)
+    for u in kept:
+        out_lines.extend(u["tags"])
+        out_lines.append(u["uri"])
+    out_lines.extend(footer)
+    return "\n".join(out_lines) + "\n"
+
+
 def _remember_episode_duration(og: str, index: int, seconds: int) -> bool:
     """探测到的时长缓存到集记录上，随 titles.json 持久化（store 防抖落盘）。
 
@@ -1314,6 +1487,34 @@ def _play_duration_for(ep: dict | None = None,
     """play/info 返回的 duration：同步可得的来源按优先级取，
     均不发网络请求（playlist 只读已缓存的 _PLAYLIST_CACHE）。"""
     from app import history, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    intro_s, outro_s = _skip_seconds()
+    if (intro_s, outro_s) != (0, 0):
+        # 跳过片头/片尾开着且目标是剧集：duration 必须按裁剪后时间线给。
+        # 1. 已缓存的裁剪后清单 EXTINF 求和（精确值，含分片边界取整）；
+        # 2. CMS 标题时长减配置秒数（近似值，误差 < 一个分片）；
+        # 3. 两者都没有时落回既有链：history 上报时长 / playlist 探测
+        #    均为裁剪后时间线上的值，不再二次扣减。
+        _b = brief
+        if _b is None and ep is not None:
+            try:
+                _b = store.get_title_by_guid(ep.get("online_guid", ""))
+            except (AttributeError, TypeError, KeyError):
+                _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
+                _b = None
+        if _b is not None and inj.is_tv(_b):
+            if ep is not None:
+                try:
+                    _target = store.get_episode_target(ep["ep_guid"])
+                except (AttributeError, TypeError, KeyError):
+                    _log.debug("_play_duration_for failed: ep=%s", ep, exc_info=True)
+                    _target = None
+                if _target:
+                    _secs = _cached_playlist_seconds(_target)
+                    if _secs:
+                        return _secs
+            _cms = inj.brief_duration(_b)
+            if _cms:
+                return max(0, _cms - intro_s - outro_s)
     if ep is not None:
         dur = inj.episode_duration(ep, brief)
         if dur:
@@ -1382,6 +1583,23 @@ def _attach_play_duration(info: dict, *, ep: dict | None = None,
         if isinstance(item, dict):
             item["duration"] = dur
             item["runtime"] = int(dur / 60)
+    # 跳过标记（信息性字段：客户端是否消费未验证，仅供端侧/诊断参考；
+    # 实际剪裁由服务端清单完成，不依赖客户端）——仅剧集目标给。
+    try:
+        intro_s, outro_s = _skip_seconds()
+        if (intro_s, outro_s) != (0, 0):
+            _b = brief
+            if _b is None and ep is not None:
+                from app import store as _store
+                try:
+                    _b = _store.get_title_by_guid(ep.get("online_guid", ""))
+                except (ImportError, AttributeError, TypeError, KeyError):
+                    _b = None
+            if _b is not None and inj.is_tv(_b):
+                info["skip_intro"] = intro_s
+                info["skip_outro"] = outro_s
+    except (AttributeError, TypeError):
+        _log.debug("_attach_play_duration failed: ep=%s", ep, exc_info=True)
     return info
 
 

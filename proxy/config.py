@@ -53,6 +53,23 @@ def clamp_main_ready_budget(raw) -> float:
     return min(max(v, MAIN_READY_BUDGET_MIN), MAIN_READY_BUDGET_MAX)
 
 
+# 跳过片头/片尾秒数上限（秒）：单边 0~300；非法/非有限值回落 0。
+SKIP_SECONDS_MAX = 300
+
+
+def clamp_skip_seconds(raw) -> int:
+    """把任意输入归一化为跳过秒数：非法/非有限值回落 0，否则夹取 [0, 300]。"""
+    import math
+
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return 0
+    if not math.isfinite(v):
+        return 0
+    return min(max(int(v), 0), SKIP_SECONDS_MAX)
+
+
 def parse_config_version(raw):
     """解析存量 config_version：返回 int，无法确定时返回 None。
 
@@ -249,6 +266,15 @@ DEFAULTS = {
     # 可信预测线零竞速直出（默认开）：记忆新鲜且够快时点播放直接用该线、
     # 跳过竞速；关时恢复旧行为（预测线只作竞速候选排序种子）。
     "linepredict_zero_race": True,
+    # 跳过片头/片尾（仅剧集点播 HLS 清单剪裁，电影/直播不剪；默认全关）：
+    # 开关开且秒数 >0 时，起播清单剪掉片头/片尾分片（整分片剪，不切分片），
+    # play/info 与 stream/list 的 duration 同步扣减；片长 <= 片头+片尾
+    # 时不剪。秒数夹取 [0, 300]，改值即时生效（清单缓存键含跳过签名，
+    # 改后不命中旧缓存）。
+    "skip_intro_enabled": False,
+    "skip_intro_seconds": 0,
+    "skip_outro_enabled": False,
+    "skip_outro_seconds": 0,
     # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
     # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
     "prewarm_mode": "realtime",

@@ -4396,6 +4396,7 @@ async def _stream_list_impl(guid: str, request: Request):
         vs = sl.get("video_streams") or []
         if vs:
             dur = int(vs[0].get("duration") or 0)
+            dur_from_probe = False
             probe_target = None
             if target and target.get("url"):
                 probe_target = target
@@ -4413,6 +4414,8 @@ async def _stream_list_impl(guid: str, request: Request):
             if not dur and probe_target and not probe_target.get("t4"):
                 mg = vs[0].get("media_guid") or ""
                 dur = _cached_playlist_seconds(probe_target)
+                if dur:
+                    dur_from_probe = True
                 if not dur and mg:
                     try:
                         body = await asyncio.wait_for(
@@ -4423,12 +4426,22 @@ async def _stream_list_impl(guid: str, request: Request):
                         body = None
                     if body and body is not _NOT_HLS:
                         dur = _playlist_total_seconds(body)
+                        if dur:
+                            dur_from_probe = True
             if dur and probe_target and probe_target.get("online_guid"):
-                vs[0]["duration"] = dur
-                sl["duration"] = dur
+                # 集记录里存原始时长（探测值本身已是裁剪后时间线上的值，
+                # CMS 值则是原始时长；上报给客户端前再扣减，避免二次扣减）。
                 _remember_episode_duration(
                     probe_target.get("online_guid", ""),
                     probe_target.get("index", 0), dur)
+                if not dur_from_probe:
+                    # CMS/集记录来源是原始时长：仅剧集目标扣掉已剪掉的
+                    # 片头片尾；电影/开关关时原样返回。
+                    _brief = store.get_title_by_guid(
+                        probe_target.get("online_guid", "")) or {}
+                    dur = _skip_adjusted_duration(dur, _brief)
+                vs[0]["duration"] = dur
+                sl["duration"] = dur
     except Exception:
         _log.debug("_stream_list_impl failed: guid=%s", guid, exc_info=True)
         pass
@@ -6417,7 +6430,7 @@ async def _resolve_spider(picked: dict) -> bool:
 # 302/下发，从不校验死活，播放器一直报错；坏线也不会被记忆，退出重放仍黏在该线。
 # 方案：①坏线短时记忆 ②起播/取流前并行探测同集各候选线路，自动切到首个可用线路。
 # P2 拆分：HLS 播放链路与线路竞速：探活、复活、竞速、播放列表、HLS 路由。已移入 proxy/hls_race.py；以下重导出（对外 import 名称不变）。
-from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _source_health_enabled, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
+from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _skip_adjusted_duration, _skip_seconds, _source_health_enabled, _trim_playlist, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
 app.router.routes.extend(hls_router.routes)
 
 

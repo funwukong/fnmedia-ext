@@ -623,6 +623,20 @@ def history_item(brief: dict, rec: dict, ep: dict | None = None) -> dict:
     dur = int(rec.get("duration", 0) or 0)
     if not dur:
         dur = episode_duration(ep, brief) if is_ep else brief_duration(brief)
+        # 跳过片头/片尾：play/list 的兜底时长也要按裁剪后时间线给，
+        # 否则 95% 看完判定永远够不着、ts 恒不归零。只调兜底分支
+        # （record 自带的 duration 是客户端在裁剪后时间线上报的，不动）；
+        # 只用 CMS 时长扣减（无 CMS 时长时探测值已是裁剪后时间线上的，
+        # 不再二次扣减）。
+        if dur and is_tv(brief):
+            try:
+                import hls_race as _hr
+                if _hr._skip_seconds() != (0, 0):
+                    _cms = brief_duration(brief)
+                    if _cms:
+                        dur = _hr._skip_adjusted_duration(_cms, brief)
+            except (ImportError, AttributeError, TypeError):
+                pass
     # 已看完（进度≥95%）则从0开始，不占继续观看
     if dur and ts >= dur * 0.95:
         ts = 0
