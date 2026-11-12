@@ -215,6 +215,15 @@ CATALOG_LIB_GUIDS: dict[str, str] = {
     "overseas":    "c2fe61ae4d3adc87756a253cb108066e",
     "ai_comic":    "6784f423ff4be5af4fe60cde6c8da303",
     "ted":         "34883d4af44ca4a5539cb38827158294",
+    # cat-wiring 新增：guid 由固定串 md5 派生，保持稳定（与上方注释的生成方式一致）。
+    # md5("fnmedia-catalog-lib:sports") / md5("fnmedia-catalog-lib:live")
+    # md5("fnmedia-catalog-lib:kids") / md5("fnmedia-catalog-lib:opera")
+    # md5("fnmedia-catalog-lib:music")
+    "sports":      "9b93ebd34f12099811bcb2e700825169",
+    "live":        "465e85f3a6cb1a4ce5d4e397de29384b",
+    "kids":        "cd91e59c8f342225b8741f18d70a26be",
+    "opera":       "495704bcc69d765082a218219fbf3c1e",
+    "music":       "00a744b183e5c4ef1d375ab8514f515b",
     # 福利独立库（md5("fnmedia-welfare-lib")，GUID 种子保持不变）：独立开关 welfare_library_enabled
     # 控制是否建库/显示，反查 cat = catalog.ADULT_CAT，走同一条海量深翻链路。
     "adult":       "411515e17c85709cf1966697b7b2c58e",

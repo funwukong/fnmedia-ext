@@ -40,7 +40,9 @@
      ``gkey_of(provider)`` 查源定义；provider 本身就是源 id，
      guard 专区库按 ``gkey`` 分组）。
    - 再加一张分类库门：按类型名用与 ``inject.hot_category`` 相同的
-     规则归入 movie/tv/anime/variety 之一 → ``"catalog:<cat>"``。
+     规则归入 movie/tv/anime/variety 之一，另按 ``catalog.classify()``
+     的关键词口径归入 sports/live/kids/opera/music 之一
+     （见 ``catalog_cat_for_type``）→ ``"catalog:<cat>"``。
      **这是本次的关键取舍**：非独立库 CMS 源出的标题同时归属
      “源自身的独立库”和“聚合分类库”，取并集（ANY），不是二选一。
      理由：聚合分类库（海量电影/剧集/动漫/综艺）正是用同一批 CMS 源
@@ -63,9 +65,13 @@
    批记录。榜单详情里“已绑定资源站标题”的分支（``item_detail`` 的
    chart-bound 分支）在 app 层额外并上 ``chart:<cat>``——那是
    榜单库这扇真实存在的门，不属于本模块。
-5. 扩展分类库（documentary/uhd/shortdrama/overseas/ai_comic/ted/
-   adult）**不从类型名推断**（类型名→扩展分类没有可靠规则，
+5. 其余扩展分类库（uhd/shortdrama/overseas/ai_comic/ted/adult）
+   **不从类型名推断**（类型名→扩展分类没有可靠规则，
    强行推断会错放），改走 ``catalog_route`` 路由门（见规则 3）。
+   例外是体育/直播/少儿/戏曲/音乐五类：``catalog.classify()``
+   有明确的关键词表（_SPORTS_KW 等），``catalog_cat_for_type``
+   按同一口径从类型名推断，与 classify 的判定顺序一致（新五类
+   先于 anime/variety/documentary）。
    另：类型名含“纪录片”此前被 ``_MOVIE_CAT_WORDS`` 命中归入
    ``catalog:movie``，现 ``catalog_cat_for_type`` 先判纪录片词，
    归入 ``catalog:documentary``（与 ``inject.hot_category`` 的
@@ -107,22 +113,53 @@ _MOVIE_CAT_WORDS = ("电影", "影片", "剧情片", "动作片", "喜剧片", "
                     "科幻片", "恐怖片", "动画电影")
 _DOC_WORDS = ("纪录片", "纪录", "纪实")
 
+# cat-wiring 新增五类（与 catalog.py 的 _SPORTS_KW / _LIVE_KW / _KIDS_KW /
+# _OPERA_KW / _MUSIC_KW 同源，改动须同步；tests/test_catalog_wiring.py
+# 对一组探针类型名断言 catalog_cat_for_type 与 catalog.classify() 一致）。
+# 音乐用小写匹配（"MV"/"mv" 都认），与 classify 的 nl 写法一致。
+_SPORTS_WORDS = ("体育", "足球", "篮球", "赛事", "乒乓", "网球", "排球",
+                 "羽毛球", "田径", "拳击", "格斗", "斯诺克", "高尔夫",
+                 "赛车", "运动")
+_LIVE_WORDS = ("直播", "现场直播", "电视直播")
+_KIDS_WORDS = ("少儿", "儿童", "儿歌", "幼儿", "亲子", "童话")
+_OPERA_WORDS = ("戏曲", "京剧", "越剧", "黄梅戏", "豫剧", "评剧", "昆曲",
+                "秦腔", "川剧", "粤剧", "二人转", "沪剧", "淮剧")
+_MUSIC_WORDS = ("mv", "音乐", "演唱会", "音乐会", "音乐节", "音乐现场",
+                "音综", "打歌")
+
 # 分类库全部 cat（含扩展分类），供 catalog_route 校验；与
 # app.CATALOG_LIB_GUIDS 的键一致（tests 会断言两者一致）。
 _KNOWN_CATALOG_CATS = frozenset((
     "movie", "tv", "anime", "variety", "documentary", "uhd",
-    "shortdrama", "overseas", "ai_comic", "ted", "adult"))
+    "shortdrama", "overseas", "ai_comic", "ted", "adult",
+    "sports", "live", "kids", "opera", "music"))
 
 
 def catalog_cat_for_type(type_name: str) -> str:
-    """类型名 → 聚合分类库 cat（movie/tv/anime/variety/documentary 之一）。
+    """类型名 → 聚合分类库 cat（movie/tv/anime/variety/documentary /
+    sports/live/kids/opera/music 之一）。
 
-    与 inject.hot_category 同规则，仅一处有意分歧：类型名含“纪录片”
+    与 inject.hot_category 同规则，仅两处有意分歧：类型名含“纪录片”
     归 documentary 而非 movie（hot_category 的四分类里没有纪录片库，
-    仍归 movie；搜索过滤侧有 catalog:documentary 这张库）。
-    扩展分类（uhd/shortdrama/…）仍不从类型名推断，走 catalog_route。
+    仍归 movie；搜索过滤侧有 catalog:documentary 这张库）；体育/
+    直播/少儿/戏曲/音乐五类按 catalog.classify() 的关键词口径归入
+    新分类库（hot_category 里没有这五张库，仍按四分类回退）。
+    顺序与 classify() 一致：新五类先于 anime/variety/documentary
+    判定（“音乐纪录片”归 music、“少儿动画”归 kids、“电视直播”归
+    live，不被后者吸走）；其余扩展分类（uhd/shortdrama/overseas/
+    ai_comic/ted/adult）仍不从类型名推断，走 catalog_route。
     """
     typ = (type_name or "").strip()
+    if any(w in typ for w in _SPORTS_WORDS):
+        return "sports"
+    if any(w in typ for w in _LIVE_WORDS):
+        return "live"
+    if any(w in typ for w in _KIDS_WORDS):
+        return "kids"
+    if any(w in typ for w in _OPERA_WORDS):
+        return "opera"
+    if any(w in typ.lower() for w in _MUSIC_WORDS):
+        return "music"
     if any(w in typ for w in _ANIME_WORDS):
         return "anime"
     if any(w in typ for w in _VARIETY_WORDS):
