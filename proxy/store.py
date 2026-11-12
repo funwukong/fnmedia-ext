@@ -95,6 +95,10 @@ class Store:
         self._lock = threading.RLock()
         self._titles: dict[str, dict] = {}
         self._orig: dict[str, str] = {}
+        # 标题池代际（内存工人 3）：_titles 内容每次真实变化 +1，
+        # 供详情关联缓存（related_cache）作失效依据。直接改 _titles
+        # 的调用方（管理页清缓存）须同步调 bump_titles_version()。
+        self._titles_version = 0
         self._play: dict[str, dict] = {}
         self._detail_cache: dict[str, providers.OnlineTitle] = {}
         self._dirty = False
@@ -110,6 +114,16 @@ class Store:
         self._ep_index: dict[str, dict] = {}   # episode guid -> 定位信息（含多线路）
         self._media_index: dict[str, str] = {} # media/video guid -> ("t:"|"e:") + JSON
         self._load()
+
+    @property
+    def titles_version(self) -> int:
+        with self._lock:
+            return self._titles_version
+
+    def bump_titles_version(self) -> None:
+        """标题池内容变化（入库/更新/删除/裁剪/清空）后调用，使关联缓存失效。"""
+        with self._lock:
+            self._titles_version += 1
 
     def _ensure_writer(self):
         """惰性启动后台写线程（daemon，仅一个）。"""
@@ -595,7 +609,9 @@ class Store:
                 self._detail_cache[t.online_id] = t
                 briefs.append(b)
             self._play = {k: v for k, v in self._play.items() if now - v["ts"] < _TTL}
-            self._prune_memory_locked({make_guid(t) for t in titles})
+            pruned = self._prune_memory_locked({make_guid(t) for t in titles})
+            if changed or pruned:
+                self._titles_version += 1
             if changed:
                 self._schedule_flush()
             self._rebuild_index()
@@ -629,7 +645,9 @@ class Store:
                         self._index_brief(b["guid"], old, drop=True)
                 self._titles[b["guid"]] = b
                 self._orig.setdefault(b["guid"], b.get("online_id", ""))
-            self._prune_memory_locked({b["guid"] for b in briefs})
+            pruned = self._prune_memory_locked({b["guid"] for b in briefs})
+            if changed or pruned:
+                self._titles_version += 1
             if changed:
                 self._schedule_flush()
             for b in briefs:
@@ -656,6 +674,7 @@ class Store:
             self._titles[guid] = brief
             self._orig[guid] = title.online_id
             if changed:
+                self._titles_version += 1
                 self._schedule_flush()
             self._rebuild_index()
             return brief
@@ -700,7 +719,9 @@ class Store:
             self._titles[g] = brief
             self._orig[g] = t.online_id
             self._detail_cache[t.online_id] = t
-            self._prune_memory_locked({g})
+            pruned = self._prune_memory_locked({g})
+            if changed or pruned:
+                self._titles_version += 1
             if changed:
                 self._schedule_flush()
             self._rebuild_index()

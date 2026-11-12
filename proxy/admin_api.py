@@ -120,6 +120,7 @@ async def ext_titles_cache_clear(request: Request):
             store._titles, store._orig = {}, {}
             store._ep_index, store._media_index = {}, {}
             store._dirty = False
+            store._titles_version += 1  # 标题池清空：关联缓存失效
         try:
             store._state.unlink(missing_ok=True)
         except Exception:
@@ -226,6 +227,7 @@ async def ext_cache_clear(request: Request):
                     store._titles, store._orig = {}, {}
                     store._ep_index, store._media_index = {}, {}
                     store._dirty = False
+                    store._titles_version += 1  # 标题池清空：关联缓存失效
                 store._state.unlink(missing_ok=True)
             except Exception:
                 _log.debug("_clear_titles_restart failed", exc_info=True)

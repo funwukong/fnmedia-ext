@@ -38,6 +38,14 @@ MAX_PAGES = 250
 # P1-17：分类深翻有界并发度。一批最多同时在途这么多页；CMS 源多为
 # 慢源/共享带宽，并发度取 4 既能把逐页等待折叠，又不至于冲垮源站。
 DEEP_FETCH_CONCURRENCY = 4
+# 内存工人 3：路由探测有界并发。首轮每个 (源,类) 只探首选叶子，源多
+# 时约 100 路突发；信号量 12 把在途探测压到有界范围，慢源不再互相
+# 挤占连接，也不放大对源站的请求压力（只限流，不多发请求）。
+PROBE_CONCURRENCY = 12
+# 内存工人 3：单源独立库交错 merged 缓存 TTL。页缓存本身 10 分钟，
+# merged 只取 60s：同一浏览会话内翻页直接切片，深翻不再每次从 0
+# 重建 O(offset) 合并；路由刷新/_updated 变化时立即失效，不靠 TTL。
+STANDALONE_MERGED_TTL = 60.0
 CLASS_REFRESH = 6 * 3600
 PAGE_TTL = 10 * 60
 # 空页（多为慢源抖动超时）只短缓存，避免该页被长时间冻结
@@ -274,6 +282,10 @@ class Catalog:
         self._dense_count: dict[str, int] = {}
         # (sid, cat) -> [备用叶子 route...]（首选分类探测失败时 rescue 得到）
         self._fallbacks: dict[tuple[str, str], list[dict]] = {}
+        # 内存工人 3：单源独立库交错 merged 缓存。
+        # scope -> {merged, total, cats, updated, built_at}；失效见
+        # standalone_window（TTL / 路由刷新 / reset）。
+        self._standalone_cache: dict[str, dict] = {}
 
     # 移植上游 v0.2.54（缓存管理）：清空海量库分类路由/分页/聚合缓冲
     # （管理页一键清缓存），下次浏览海量库时重新探测分类并深翻。
@@ -291,6 +303,7 @@ class Catalog:
             self._scanned_page.clear()
             self._dense_count.clear()
             self._fallbacks.clear()
+            self._standalone_cache.clear()
 
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
@@ -338,23 +351,28 @@ class Catalog:
                     order.append(key)
             probed: dict[tuple[str, str], dict] = {}
 
+            probe_sem = asyncio.Semaphore(PROBE_CONCURRENCY)
+
             async with netutil.async_client(
                     timeout=HTTP_TIMEOUT) as client:
                 async def probe_one(sid, cat, cl):
-                    source = self._source_by_id(sid)
-                    if not source:
-                        return None
-                    try:
-                        _lst, pc = await _fetch_category_page(
-                            client, source, cl["type_id"], 1)
-                    except Exception:
-                        _log.debug("probe_one failed: sid=%s", sid, exc_info=True)
-                        return None
-                    if not _lst:
-                        return None
-                    return {"source_id": sid, "type_id": cl["type_id"],
-                            "type_name": cl["type_name"],
-                            "pagecount": int(pc or 0)}
+                    # 探测有界并发：首轮 + rescue 共用同一信号量，约 100 路
+                    # (源,类) 探测突发变为最多 PROBE_CONCURRENCY 路在途。
+                    async with probe_sem:
+                        source = self._source_by_id(sid)
+                        if not source:
+                            return None
+                        try:
+                            _lst, pc = await _fetch_category_page(
+                                client, source, cl["type_id"], 1)
+                        except Exception:
+                            _log.debug("probe_one failed: sid=%s", sid, exc_info=True)
+                            return None
+                        if not _lst:
+                            return None
+                        return {"source_id": sid, "type_id": cl["type_id"],
+                                "type_name": cl["type_name"],
+                                "pagecount": int(pc or 0)}
 
                 # 第一轮：每个 (源,类) 只探首选
                 first = await asyncio.gather(
@@ -569,6 +587,14 @@ class Catalog:
         with self._lock:
             dense = self._dense.get(self._scope_key(scope, cat)) or []
             return list(dense[:max(0, int(limit))])
+
+    def dense_fingerprint(self, scope: str = AGG_SCOPE) -> tuple[int, ...]:
+        """各大类 dense 长度元组（纯本地、零网络）：详情关联缓存的
+        dense 侧指纹。dense 只追加不清零（reset 除外），长度变化即
+        代表候选池变化；与 store.titles_version 一起作缓存失效依据。"""
+        with self._lock:
+            return tuple(len(self._dense.get(self._scope_key(scope, c)) or [])
+                         for c in CATS)
 
     def total(self, cat: str, scope: str = AGG_SCOPE) -> int:
         # 用规范源页数估算 total；最后一页条数未知，前端以空页自然停止。
@@ -943,13 +969,31 @@ class Catalog:
 
         返回 (brief 列表, 估算 total)。四类各取 offset..offset+limit 的窗，
         再按排名轮次合并去重，最后按全局 offset 切片。
+
+        内存工人 3：交错 merged 结果按 scope 缓存。同一浏览会话内翻页
+        （offset 增大、但仍在已缓存 merged 覆盖范围内）直接切片返回，
+        不再每次从 0 重建 O(offset) 合并、重复调 _source_cat_window。
+        失效：TTL 60s、路由刷新（_updated 变化）、分类集合变化、reset()；
+        请求超出已缓存 merged 长度时按新 end 重建一次并更新缓存。
+        合并顺序/去重逻辑与旧版完全一致，只是不重复算。
         """
         src = self._source_by_id(scope)
         pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
         cats = [c for c in pool if self.available(c, scope)]
         if not cats:
             return [], 0
+        offset = max(0, int(offset))
+        limit = max(1, int(limit))
         end = offset + limit
+        with self._lock:
+            entry = self._standalone_cache.get(scope)
+            updated = self._updated
+        if (entry is not None
+                and entry.get("cats") == tuple(cats)
+                and entry.get("updated") == updated
+                and time.time() - entry.get("built_at", 0) < STANDALONE_MERGED_TTL
+                and len(entry.get("merged") or []) >= end):
+            return list(entry["merged"][offset:end]), entry["total"]
         results = await asyncio.gather(
             *[self._source_cat_window(scope, c, 0, end) for c in cats],
             return_exceptions=True)
@@ -971,6 +1015,10 @@ class Catalog:
                     if g and g not in seen:
                         seen.add(g)
                         merged.append(b)
+        with self._lock:
+            self._standalone_cache[scope] = {
+                "merged": merged, "total": total, "cats": tuple(cats),
+                "updated": self._updated, "built_at": time.time()}
         return merged[offset:offset + limit], total
 
     def standalone_available(self, scope: str) -> bool:

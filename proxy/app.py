@@ -833,6 +833,43 @@ async def lifespan(app: FastAPI):
             pass
 
 
+# 内存工人 3：海量首屏预热并发度与每轮总预算。旧版 10 类串行、每类
+# 25s 超时，理论最坏 10x25=250s/轮，队尾分类要等前面慢源；4 路并
+# 发 + 120s 总预算后，慢源最多拖住一轮预算，不再拖垮整轮。信号量
+# 只限流、不多发请求，不放大对源站的压力。
+HOT_PREWARM_CONCURRENCY = 4
+HOT_PREWARM_BUDGET_SECONDS = 120.0
+
+
+async def _prewarm_catalog(budget: float = HOT_PREWARM_BUDGET_SECONDS) -> None:
+    """预热海量首屏：各分类 gather + 信号量并发，不再串行等慢源。
+
+    每类仍是 get_window(cat, 0, 22) + 25s 单类超时；整轮再加总预算，
+    超时后未完成的分类直接取消、本轮已预热的分类保留，下轮再试。
+    """
+    sem = asyncio.Semaphore(HOT_PREWARM_CONCURRENCY)
+
+    async def warm_one(cat: str) -> None:
+        async with sem:
+            try:
+                if catalog.available(cat):
+                    await asyncio.wait_for(catalog.get_window(cat, 0, 22),
+                                           timeout=25)
+            except Exception:
+                _log.debug("_prewarm_catalog failed", exc_info=True)
+                pass
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[warm_one(c) for c, _t, _x in catalogmod.CATALOG_CATEGORIES],
+                return_exceptions=True),
+            timeout=budget)
+    except asyncio.TimeoutError:
+        _log.warning("catalog prewarm exceeded %.0fs budget; "
+                     "keeping warmed categories", budget)
+
+
 async def _hot_worker(app: FastAPI):
     """榜单 + 海量库路由后台刷新。启动先读旧缓存，稍等再刷新；之后按配置轮询。"""
     await asyncio.sleep(4)
@@ -858,15 +895,9 @@ async def _hot_worker(app: FastAPI):
                 _log.warning("catalog routes failed: %s", exc)
         # 预热海量四库首屏：首次打开现抓多源页面要 6~19s，超过客户端等待就会
         # 显示“加载失败/空海报墙”。后台先抓一次，页面缓存命中后秒开。
+        # 内存工人 3：gather + 信号量并发 + 每轮总预算（见 _prewarm_catalog）。
         if catalog_on:
-            for _cat, _t, _x in catalogmod.CATALOG_CATEGORIES:
-                try:
-                    if catalog.available(_cat):
-                        await asyncio.wait_for(catalog.get_window(_cat, 0, 22),
-                                               timeout=25)
-                except Exception:
-                    _log.debug("_hot_worker failed", exc_info=True)
-                    pass
+            await _prewarm_catalog()
         try:
             await asyncio.wait_for(app.state.stop_hot.wait(), timeout=300)
         except asyncio.TimeoutError:
@@ -4534,15 +4565,30 @@ def _attach_related(data: dict, brief: dict) -> None:
         _log.debug("related config check failed: %s", type(exc).__name__)
         return
     try:
-        from related import DEFAULT_LIMIT, related_for, related_for_with_dense
+        from related import (DEFAULT_LIMIT, related_cache_lookup,
+                             related_cache_store, related_for,
+                             related_for_with_dense)
         pool = list(store._titles.values())
-        items = related_for(brief, pool)
-        if len(items) < DEFAULT_LIMIT:
-            dense: list[dict] = []
-            for _cat in catalogmod.CATS:
-                dense.extend(catalog.cached_dense(_cat, 40))
-            if dense:
-                items = related_for_with_dense(brief, pool, dense)
+        # 内存工人 3：按 guid 缓存。失效依据 = 标题池代际 + dense 指纹；
+        # 命中时不再全池扫描，dense 列表也不用现拼。
+        pool_version = getattr(store, "titles_version", 0)
+        dense_fp = catalog.dense_fingerprint()
+        dense_len = sum(dense_fp)
+        items = related_cache_lookup(
+            brief, pool_version=pool_version, dense_fingerprint=dense_fp,
+            pool_len=len(pool), dense_len=dense_len)
+        if items is None:
+            items = related_for(brief, pool)
+            if len(items) < DEFAULT_LIMIT:
+                dense: list[dict] = []
+                for _cat in catalogmod.CATS:
+                    dense.extend(catalog.cached_dense(_cat, 40))
+                if dense:
+                    items = related_for_with_dense(brief, pool, dense)
+            related_cache_store(
+                brief, items, pool_version=pool_version,
+                dense_fingerprint=dense_fp, pool_len=len(pool),
+                dense_len=dense_len)
     except Exception as exc:
         _log.debug("related failed: %s", type(exc).__name__)
         return
