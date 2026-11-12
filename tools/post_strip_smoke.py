@@ -25,7 +25,11 @@ import 检查、pytest 子集）由本文件传入，见 ``main()``。剥离版�
   - tests/test_verify_tls.py：它 import 已剥离的网盘模块；
   - tests/test_p1_pan_cleanup.py、tests/test_pan_shared.py：同上，
     测的是已剥离的网盘模块（P1-8/P1-15），公开构建里无此模块可 import；
-  - 名含 dduo_probe_source 的两个测试：它们直接调已剥离的私有源探测函数。
+  - 名含 dduo_probe_source 的两个测试：它们直接调已剥离的私有源探测函数；
+  - tests/test_public_strip_guard.py：同 test_public_strip.py，import 已剥离的 tools/；
+  - tests/test_guardfix_*.py、tests/test_config_whitelist.py：测完整构建的
+    guard/spider/runner 模块与白名单分类，剥离树里模块已删、DEFAULTS 已改；
+  - tests/test_memory_caches.py：模块级 import 已剥离的 xlib。
 
 注意：本文件故意不出现任何残留扫描的原样关键字（针列表见剥离器源码），
 否则它一旦被拷进剥离树就会误报——所有敏感字面量都由拼接构成。
@@ -110,6 +114,19 @@ _PYTEST_CMD = [
     "--ignore=tests/test_app_split.py",
     # P2 新增：counts 测试调 tools/count_except.py（剥离删 tools/），剥离树上跳过。
     "--ignore=tests/test_p2_except_counts.py",
+    # guardfix 新增：测完整构建的 guard/spider/runner 模块与白名单分类，
+    # 剥离树里模块已删、DEFAULTS 已改，构造不兼容，跳过。
+    "--ignore=tests/test_public_strip_guard.py",
+    "--ignore=tests/test_guardfix_a.py",
+    "--ignore=tests/test_guardfix_b.py",
+    "--ignore=tests/test_guardfix_c.py",
+    "--ignore=tests/test_guardfix_e_proxy.py",
+    "--ignore=tests/test_guardfix_e_runner.py",
+    "--ignore=tests/test_guardfix_f.py",
+    "--ignore=tests/test_guardfix_merge.py",
+    "--ignore=tests/test_config_whitelist.py",
+    # 内存批新增：模块级 import 已剥离的 xlib，构造不兼容，跳过。
+    "--ignore=tests/test_memory_caches.py",
     "-k", "not dduo_probe_source",
 ]
 
