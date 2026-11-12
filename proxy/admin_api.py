@@ -777,7 +777,8 @@ async def ext_set_config(request: Request):
         "welfare_library_enabled",
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
-        "line_fastest_prefer", "line_autofail",
+        "line_fastest_prefer", "line_autofail", "fixed_line_direct",
+        "mid_playback_switch",  # 播放中静默换线开关（默认开）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
@@ -821,6 +822,8 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "mid_playback_switch" in patch:
+        patch["mid_playback_switch"] = bool(patch["mid_playback_switch"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}

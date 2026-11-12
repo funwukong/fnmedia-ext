@@ -591,6 +591,20 @@ def _fastest_on() -> bool:
         return True
 
 
+def _fixed_line_direct_on() -> bool:
+    """固定线直出开关（config.fixed_line_direct，默认 True）。
+
+    开时：用户手动选线直接用该线，不再先探活（见 _ensure_playable）；
+    自动起播不受此开关影响，仍走竞速流程。
+    """
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        return bool(config.get().get("fixed_line_direct", True))
+    except Exception:
+        _log.debug("_fixed_line_direct_on failed", exc_info=True)
+        return True
+
+
 # --- 线路实测吞吐（KB/s，指数滑动平均） ------------------------------------
 # 竞速只比"首字节延迟"，会挑中"响应快、吞吐烂"的线：实测同一部片里既有 250 KB/s
 # 的线，也有 26 KB/s 的坑，延迟上看不出差别，播起来差 10 倍。播放时顺便把每条线
@@ -630,6 +644,131 @@ def _line_score(cand: dict) -> float:
     永远不再试别的线。先验 150 介于"已知很差"和"已知不错"之间。"""
     s = _line_speed(cand)
     return s if s > 0 else _SPEED_PRIOR
+
+
+# ---- 播放中静默换线（解冻第 3 项）----
+# 触发点：播放器重取 main.m3u8 时（seek/分片报错后恢复/清单刷新），_serve_normal
+# 在 _ensure_playable 之后调用 _maybe_mid_switch。首播不换线：无分片历史时
+# cur_line_slow 为 None，直接返回。
+# 决策只用已有实测数据：分片耗时（linepredict._SEG）、线路实测吞吐
+# （_LINE_SPEED，经 _line_score/_line_speed）、冠军线记忆
+# （linepredict.fastest）；不为决策新增同步探测。
+# 防抖：每集 30 秒内最多换一次（linepredict._SWITCH_COOLDOWN，样本路径与
+# 后备路径共用同一冷却戳）；上限：同一集连续换线失败 3 次后不再主动换线。
+_MID_SWITCH_MAX_FAILS = 3        # 同一集连续换线失败上限（换过去的新线取不到清单）
+_MID_SWITCH_FAIL_TTL = 600.0     # 失败计数有效期（秒）；过期后重新计数
+_MID_SWITCH_FAILS: dict[str, tuple[int, float]] = {}  # 集 key -> (失败次数, 最近失败时间)
+
+
+def _mid_switch_on() -> bool:
+    """播放中静默换线开关（config.mid_playback_switch，默认 True）。
+    关时恢复旧行为：劣化走既有失败路径。"""
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        return bool(config.get().get("mid_playback_switch", True))
+    except Exception:
+        _log.debug("_mid_switch_on failed", exc_info=True)
+        return True
+
+
+def _mid_switch_failures(picked: dict) -> int:
+    """该集当前连续换线失败次数（过期清零）。"""
+    key = _episode_key(picked)
+    rec = _MID_SWITCH_FAILS.get(key)
+    if not rec:
+        return 0
+    n, ts = rec
+    if time.time() - ts >= _MID_SWITCH_FAIL_TTL:
+        _MID_SWITCH_FAILS.pop(key, None)
+        return 0
+    return n
+
+
+def _mid_switch_note_fail(picked: dict) -> None:
+    """记一次换线失败（换过去的新线取不到清单）。达到上限后不再主动换线。"""
+    key = _episode_key(picked)
+    n = _mid_switch_failures(picked)
+    _MID_SWITCH_FAILS[key] = (n + 1, time.time())
+    if len(_MID_SWITCH_FAILS) > 1000:
+        for k in list(_MID_SWITCH_FAILS)[:500]:
+            _MID_SWITCH_FAILS.pop(k, None)
+
+
+def _mid_switch_note_ok(picked: dict) -> None:
+    """换线成功出流：清零该集失败计数。"""
+    _MID_SWITCH_FAILS.pop(_episode_key(picked), None)
+
+
+def _pick_mid_switch_target(picked: dict) -> dict | None:
+    """播放中静默换线的决策（纯内存数据，不发任何网络请求）。
+
+    返回应切换到的同集目标，或 None（不换线）。不换线的几种情况：
+    当前线不慢、无可用备选、备选已被记坏、30 秒冷却未过、连续失败已达上限、
+    备选线没有任何实测数据（不赌没测过的线）。
+    """
+    from app import _episode_candidates, _line_is_bad, _line_score, _line_speed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    if not picked or not picked.get("online_guid") or not picked.get("line"):
+        return None
+    og = picked["online_guid"]
+    idx = int(picked.get("index", 0) or 0)
+    cur_line = picked["line"]
+    if _mid_switch_failures(picked) >= _MID_SWITCH_MAX_FAILS:
+        return None
+    if not linepredict.switch_allowed(og, idx):
+        return None
+    cands = [c for c in _episode_candidates(picked, include_current=False)
+             if not _line_is_bad(c)]
+    if not cands:
+        return None
+    by_line = {c.get("line"): c for c in cands}
+    # ① 分片耗时实测：另一条线有新鲜的更快分片样本（冷却戳由其内部记下）
+    fast = linepredict.pick_faster_line(og, idx, cur_line)
+    if fast and fast in by_line:
+        return by_line[fast]
+    # pick_faster_line 为 None 时当前线未必不慢（可能只是他线无样本）：
+    # ② 确认当前线是否持续慢，不慢则不换
+    if linepredict.cur_line_slow(og, idx, cur_line) is None:
+        return None
+    # ③ 只用已实测数据挑备选：实测吞吐达标，或 linepredict 冠军线记忆；
+    # 实测达标者按吞吐分排序，冠军线次之；都没测过的线不碰
+    pred = None
+    try:
+        pred = linepredict.fastest(linepredict.ep_key(og, idx))
+    except Exception:
+        _log.debug("_pick_mid_switch_target failed", exc_info=True)
+        pred = None
+    ranked = []
+    for c in cands:
+        ln = c.get("line")
+        if not ln or ln == cur_line:
+            continue
+        good = _line_speed(c) >= _SPEED_GOOD
+        is_pred = bool(pred) and ln == pred
+        if not (good or is_pred):
+            continue
+        ranked.append((0 if good else 1, -_line_score(c), ln))
+    if not ranked:
+        return None
+    ranked.sort()
+    linepredict.mark_switched(og, idx)
+    return by_line[ranked[0][2]]
+
+
+def _maybe_mid_switch(picked: dict, auto: bool) -> dict | None:
+    """_serve_normal 的换线入口：仅 auto 起播（系统选线）可静默换线。
+
+    auto=False = 用户手动选线（query 带 line）：绝不擅自换走，劣化只走
+    既有故障切换（第 1 项固定线直出的语义）。开关关时返回 None（旧行为）。
+    返回新目标或 None（不换线）。"""
+    if not auto:
+        return None
+    if not _mid_switch_on():
+        return None
+    target = _pick_mid_switch_target(picked)
+    if target is not None:
+        _log.info("播放中静默换线 %s -> %s 《%s》",
+                  picked.get("line"), target.get("line"), picked.get("title"))
+    return target
 
 
 def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
@@ -687,9 +826,11 @@ async def _ensure_playable(picked: dict, request: Request,
     """取流前确保目标可播。
 
     - auto=True（播放器自动起播，非用户手动切线）且开启最快线：并行竞速选最快线。
-    - 否则（用户手动选了某条线）：先探当前线，失败才记忆坏线并故障切换到首个可用线。
+    - 否则（用户手动选了某条线）且固定线直出开（默认）：直接用该线，不先探活；
+      已知坏线仍故障切换到首个可用线。开关关时恢复旧行为：先探当前线，
+      失败才记忆坏线并故障切换到首个可用线。
     返回应播放的 picked（可能已换成另一线路）。"""
-    from app import _autofail_on, _fastest_on, _line_is_bad, _race_fastest, _resolve_if_needed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import _autofail_on, _fastest_on, _fixed_line_direct_on, _line_is_bad, _race_fastest, _resolve_if_needed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     if not picked or not picked.get("online_guid"):
         return picked
     if auto and _autofail_on() and _fastest_on():
@@ -699,6 +840,18 @@ async def _ensure_playable(picked: dict, request: Request,
         # 竞速全失败：退回常规故障切换（探当前线/换线）
     if not _autofail_on():
         await _resolve_if_needed(picked, request)
+        return picked
+    if not auto and _fixed_line_direct_on():
+        # 固定线直出（解冻第 1 项）：用户手动选线直接用该线，不再先探活，
+        # 零新增同步网络等待；已知坏线仍按现有故障切换走 _find_playable，
+        # 绝不返回已知死链。未探过的线不预判死活，真正死活由下游取清单
+        # 失败换线（_serve_normal）与首分片验活兜底。
+        if _line_is_bad(picked):
+            good = await _find_playable(picked, request, skip_current=True)
+            if good is not None:
+                _log.info("手动选线为已知坏线，切换到可用线路: %s -> %s",
+                          picked.get("line"), good.get("line"))
+                return good
         return picked
     cur_bad = _line_is_bad(picked)
     if not cur_bad:
@@ -1451,14 +1604,24 @@ async def hls_main(mg: str, request: Request):
 
     async def _serve_normal(picked: dict):
         # 整条“解析+换线+建清单”服务逻辑（上游 v1.0.0 _serve_normal）。
-        # 有意偏离：不含 auto 起播快路径——pick_faster_line（播放中静默换线）与
-        # _cached_sibling_playlist 是已冻结、明确不接线的功能，本次不搬。
+        # 解冻第 3 项：pick_faster_line（播放中静默换线）已接线——见下方
+        # _maybe_mid_switch；_cached_sibling_playlist 仍是冻结功能，本次不搬。
         # 线路健康探测 + 自动选最快线
         from app import _autofail_on, _ensure_playable, _get_playlist_cached, _pick_episode, _verify_rewritten_first_seg  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+        # 播放中静默换线（解冻第 3 项）：_mid_switched_from 记换线前的原线，
+        # 新线取不到清单时回退它重试一次（见下方 body is None 分支）。
+        _mid_switched_from = None
         if _autofail_on():
             picked = await _ensure_playable(picked, request, auto=auto_play)
             # 若自动换到了别的线路，后续 _pick_episode 仍按 query 的旧线解析；用换好的目标
             request.state._failover_picked = picked
+            # 当前线在播放中劣化时静默切到同集更快的线：仅 auto 起播可换，
+            # 用户手动选线（auto=False）不动，开关关时不动；首播无分片历史不换
+            _switched = _maybe_mid_switch(picked, auto_play)
+            if _switched is not None:
+                _mid_switched_from = picked
+                picked = _switched
+                request.state._failover_picked = picked
 
         # >>> PRIVATE:CATVOD
         from app import _resolve_catvod  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -1482,6 +1645,16 @@ async def hls_main(mg: str, request: Request):
         # <<< PRIVATE:CATVOD
 
         body = await _get_playlist_cached(mg, picked, request)
+        if body is None and _mid_switched_from is not None:
+            # 静默换过去的新线取不到清单：记一次换线失败，回退原线重试一次；
+            # 原线也取不到时再走下面既有失败路径（不再无限换线）。
+            _mid_switch_note_fail(picked)
+            _log.info("静默换线失败，回退原线 %s -> %s",
+                      picked.get("line"), _mid_switched_from.get("line"))
+            picked = _mid_switched_from
+            _mid_switched_from = None
+            request.state._failover_picked = picked
+            body = await _get_playlist_cached(mg, picked, request)
         if body is None:
             # 当前线抓取失败：记忆并自动换一条已探测可用的线路重试一次
             if _autofail_on():
@@ -1507,6 +1680,9 @@ async def hls_main(mg: str, request: Request):
             if _is_slow_line(picked):
                 return _placeholder_playlist_response(mg)
             return Response("fetch fail upstream", status_code=502)
+        if _mid_switched_from is not None:
+            # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
+            _mid_switch_note_ok(picked)
         if body is _NOT_HLS:
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
             q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
@@ -1648,6 +1824,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     async def pump():
         nbytes = 0
         t0 = time.time()
+        completed = False
         try:
             if first:
                 nbytes += len(first)
@@ -1655,6 +1832,7 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
             async for chunk in it:
                 nbytes += len(chunk)
                 yield chunk
+            completed = True
         finally:
             # 边下边播的同时把这条线的真实吞吐记下来（零额外流量）
             try:
@@ -1664,6 +1842,19 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
             except Exception:
                 _log.debug("pump failed", exc_info=True)
                 pass
+            # 播放中分片耗时（供静默换线决策）：只记完整下完的分片，
+            # 播放器中途断开的不记，避免把断流误判成慢线
+            if completed:
+                try:
+                    dt = time.time() - t0
+                    if picked and picked.get("line") and nbytes and dt > 0:
+                        linepredict.record_seg(
+                            picked.get("online_guid", ""),
+                            int(picked.get("index", 0) or 0),
+                            picked["line"], dt)
+                except Exception:
+                    _log.debug("pump record_seg failed", exc_info=True)
+                    pass
             await rs.aclose()
 
     return StreamingResponse(
@@ -1796,6 +1987,7 @@ async def hls_seg(mg: str, request: Request):
         _streamed = await _try_stream_segment(request, src_url, fwd, picked)
         if _streamed is not None:
             return _streamed
+    _seg_t0 = time.time()
     try:
         # 分片在播放中途持续拉取，对瞬时抖动必须重试，否则单次失败播放器直接报错
         r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
@@ -1804,6 +1996,16 @@ async def hls_seg(mg: str, request: Request):
                      urllib.parse.urlsplit(src_url).netloc)
         return Response(f"seg fail {type(exc).__name__}", status_code=502)
     body = r.content
+    # 播放中分片耗时（供静默换线决策）：整段缓冲回退路径同样记录完整下载耗时
+    try:
+        if picked and picked.get("line") and r.status_code < 400 and body:
+            linepredict.record_seg(
+                picked.get("online_guid", ""),
+                int(picked.get("index", 0) or 0),
+                picked["line"], time.time() - _seg_t0)
+    except Exception:
+        _log.debug("hls_seg record_seg failed", exc_info=True)
+        pass
     # 服务端解密 AES-128 HLS 分片：m3u8 已移除 EXT-X-KEY，这里把密文 TS 解成纯 TS，
     # 并强制按完整 200 内容返回（密文 206 不能直接解密/拼接）。
     decrypt_resp_status = r.status_code
