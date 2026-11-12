@@ -754,6 +754,20 @@ def reload_sites() -> dict[str, dict]:
         return _load_sites()
 
 
+def _invalidate_site_caches(key: str) -> None:
+    """源定义更新后，按 key 前缀清该源的详情/浏览缓存。
+
+    _DETAIL_CACHE（TTL 1800s）与 _BROWSE_CACHE（TTL 600s）否则会在源定义
+    更新后 30 分钟内仍返回旧详情/旧列表。只清该 key 前缀，不动其它源。
+    """
+    prefix = f"{key}|"
+    with _lock:
+        for k in [k for k in _DETAIL_CACHE if k.startswith(prefix)]:
+            _DETAIL_CACHE.pop(k, None)
+        for k in [k for k in _BROWSE_CACHE if k.startswith(prefix)]:
+            _BROWSE_CACHE.pop(k, None)
+
+
 # ----------------------------------------------------------- TVBox 配置解析
 
 # 风险/重资源加固源：默认关闭，避免拖慢聚合或缺登录态报错；可手动启用。
@@ -886,6 +900,8 @@ def import_tvbox(text_or_obj, enable=None) -> dict:
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(_IMPORTED)
     reload_sites()
+    for _s in incoming:
+        _invalidate_site_caches(_s["key"])
     enabled_keys = [k for k, v in cur.items() if v.get("enabled")]
     risk_keys = [s["key"] for s in incoming if s.get("risk")]
     return {**parsed, "added": added, "updated": updated,
@@ -902,6 +918,7 @@ def remove_imported(key: str) -> bool:
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(_IMPORTED)
     reload_sites()
+    _invalidate_site_caches(key)
     return True
 
 
@@ -928,6 +945,7 @@ def set_enabled(key: str, on: bool) -> bool:
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
     tmp.replace(_IMPORTED)
     reload_sites()
+    _invalidate_site_caches(key)
     return True
 
 
@@ -1287,9 +1305,26 @@ def filters_for(site_conf: dict, tid: str) -> list[dict]:
 
 
 def status() -> dict:
+    """加固源总体状态。
+
+    state 区分三种情况，不只靠 feature_on() 一个布尔值：
+    - "no_sites"：没有任何源定义（干净检出：内置 sites.json 不在版本控制内、
+      也未导入过 TVBox 配置，guard 搜索/专区/msearch 全部无源）；
+    - "runner_down"：有源但 runner 不通；
+    - "ok"：有源且 runner 通。
+    """
     sites = _load_sites()
+    h = health(force=True)
+    if not sites:
+        state = "no_sites"
+    elif not h.get("ok"):
+        state = "runner_down"
+    else:
+        state = "ok"
     return {"available": available(), "runner": RUNNER_URL,
-            "health": health(force=True),
+            "health": h, "state": state,
+            "no_sites": not sites,
+            "runner_down": bool(sites) and not h.get("ok"),
             "builtin": len([s for s in sites.values() if s.get("_builtin")]),
             "imported": len([s for s in sites.values() if not s.get("_builtin")]),
             "sites": [{"id": "guard-" + k, "key": k, "name": s.get("name"),

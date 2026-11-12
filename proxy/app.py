@@ -5994,36 +5994,73 @@ def _msearch_parse(vod_id: str) -> tuple[str, str]:
     return title, poster
 
 
+def _msearch_health_weight(sid: str, key: str) -> tuple:
+    """某 guard 源的健康排序权重（越小越优先）：等级 → 平均延迟 → 失败率。
+
+    sourcehealth 的画像键以源 id（guard-<key>）为主；个别老路径用裸 key
+    记账，故两键都查，取样本更多的那份画像；都没有则取中性值。
+    """
+    best = None
+    for cand in (sid, key):
+        st = sourcehealth.stats(cand)
+        if st.get("samples"):
+            if best is None or st["samples"] > best[0]:
+                best = (st["samples"], sourcehealth.weight(cand))
+    return best[1] if best else sourcehealth.weight(sid)
+
+
 def _msearch_targets() -> list[dict]:
     """可用于扇出聚合的【可搜索加固源】，按“易命中/出片快”优先排序。
 
-    redroid 池通常只有 2~3 台、每台设备内仍串行，因此扇出必须收敛到少量真正
-    不同的快源（8 个源里塞 6 个同后端的 AppSx 镜像只会重复排队）。优先级：
-    多线秒播主力 → 秒播单站；同前缀镜像只留一个（AppSx2..6 与 AppSx 同后端）。"""
+    动态取数：全部已启用、可搜索的 guard 源都参与候选，按
+    providers.source_priority（用户覆盖优先，否则内省默认档）降序、再按
+    sourcehealth 最近成功率/健康度升序排序，取前 _MSEARCH_MAX_SRCS 个；
+    硬编码 PREF 只作并列时的排序种子。失效源（死亡冷却、等级最末）自然
+    沉底，由健康源自动替补，不再只认 PREF 里的 10 个源。
+    同前缀镜像去重（AppSx / AppSx2..7 视为一族，只取一个）。
+    """
     import guard as _g
-    # 主力多线源（2026-10-31 实测重排）：按“能搜到 + 能解出真实 m3u8 + 出片快”排序。
-    # 实测 Bttwoo(字节CDN)/Jpys(PP视频) 搜索与 play 均稳定秒出地址；Hmys 有结果但 play
-    # 偶发空、JPJ/KkSs/Seedhub 详情易超时，故它们作为补充/兜底，不放最前。
-    # （原先置顶的 AppSx/Nmyswv/AppTT/Auete/NewCz 等已实测对大众片返回 0 条，移出主力。）
-    # 前 3 个是实测“能搜到且能解出真实 m3u8”的主力（正好对应 _MSEARCH_MAX_SRCS=3，
-    # 每源独占一台 redroid 不排队）；其余作为缓存命中或扩容时的后备。
+    # 主力多线源（2026-10-31 实测重排）只作排序种子：Bttwoo(字节CDN)/
+    # Jpys(PP视频) 搜索与 play 均稳定秒出地址；Hmys 有结果但 play 偶发空、
+    # JPJ/KkSs/Seedhub 详情易超时，故作补充/兜底；原先置顶的 AppSx/Nmyswv/
+    # AppTT/Auete/NewCz 等已实测对大众片返回 0 条，移出主力种子（仍可凭
+    # 健康度/优先级从动态候选中入选）。
     PREF = ["Bttwoo", "Jpys", "Hmys", "JPJ", "YpanSo",
             "KkSs", "Seedhub", "NewCz", "YCyz", "T42"]
+    pref_rank = {key: i for i, key in enumerate(PREF)}
+    try:
+        overrides = config.get().get("source_priority") or {}
+    except Exception:  # noqa: BLE001
+        _log.debug("_msearch_targets failed", exc_info=True)
+        overrides = {}
+    cands = []
+    for key, conf in (_g._load_sites() or {}).items():
+        if not conf.get("enabled", True):
+            continue
+        if not conf.get("searchable", True):
+            continue
+        sid = "guard-" + key
+        prio = providers.source_priority(
+            {"id": sid, "guard": True, "guard_key": key}, overrides)
+        health = _msearch_health_weight(sid, key)
+        cands.append({"key": key, "conf": conf,
+                      "name": conf.get("name") or key,
+                      "multi": ("多线" in str(conf.get("name") or "")),
+                      "_sort": (-prio, health, pref_rank.get(key, len(PREF)))})
+    cands.sort(key=lambda c: c["_sort"])
     seen_prefix: set[str] = set()
     out = []
-    for key in PREF:
-        conf = _g.site(key)
-        if not conf or not conf.get("searchable", True):
-            continue
+    for c in cands:
         # 同后端镜像去重（AppSx / AppSx2..7 视为一族，只取一个）
-        prefix = "AppSx" if key.startswith("AppSx") else key
+        prefix = "AppSx" if c["key"].startswith("AppSx") else c["key"]
         if prefix in seen_prefix:
             continue
         seen_prefix.add(prefix)
-        name = conf.get("name") or key
-        out.append({"key": key, "conf": conf, "name": name,
-                    "multi": ("多线" in str(name))})
-    return out[:_MSEARCH_MAX_SRCS]
+        out.append({"key": c["key"], "conf": c["conf"], "name": c["name"],
+                    "multi": c["multi"]})
+        if len(out) >= _MSEARCH_MAX_SRCS:
+            break
+    return out
 
 
 async def _msearch_resolve_one(key: str, vid: str, want_idx: int,

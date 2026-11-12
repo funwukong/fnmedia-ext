@@ -239,6 +239,20 @@ async def _fetch_class_list(client: httpx.AsyncClient, source: dict) -> list[dic
     return cls if isinstance(cls, list) else []
 
 
+# 非苹果 CMS 协议的源：分类表深翻只认 http(s) 的 CMS 接口，guard://、
+# csprun://、drpy://、catvod:// 等其它协议源一律不参与。
+_NON_CMS_KINDS = {"t4", "guard", "spider", "drpy", "catvod", "xsrc"}
+
+
+def _is_non_cms_source(source: dict) -> bool:
+    """该源是否不是苹果 CMS 源（无 kind 时按 guard/spider/drpy/catvod/xsrc 标记判）。"""
+    if str(source.get("kind") or "") in _NON_CMS_KINDS:
+        return True
+    return bool(source.get("guard") or source.get("spider_src")
+                or source.get("drpy") or source.get("catvod")
+                or source.get("xsrc"))
+
+
 async def _fetch_category_page(client: httpx.AsyncClient, source: dict,
                                type_id, page: int,
                                timeout: float = HTTP_TIMEOUT) -> tuple[list, int]:
@@ -307,8 +321,10 @@ class Catalog:
 
     # -------------------------------------------------- 分类表 / 路由
     async def refresh_routes(self, sources: list[dict]) -> dict[str, Any]:
-        # T4 browsing is not CMS deep crawling; never pre-expand cloud plugins.
-        sources = [s for s in sources if s.get("kind") != "t4"]
+        # 只有苹果 CMS 源能走分类表深翻；T4 与 guard/spider/drpy/catvod/xsrc
+        # 均非 CMS 协议（guard:// 等），当成 CMS 请求只会报 UnsupportedProtocol
+        # 且独立库恒为空，故在入口一并排除。
+        sources = [s for s in sources if not _is_non_cms_source(s)]
         if self._refreshing:
             return self.status()
         self._refreshing = True
@@ -454,6 +470,14 @@ class Catalog:
         return self.status()
 
     async def _load_source_classes(self, client: httpx.AsyncClient, source: dict):
+        # 非 http(s) api（如 guard://Fake）不是 CMS 接口，直接跳过：交给
+        # _fetch_class_list 会把 "guard://..." 当 URL 请求，httpx 报
+        # UnsupportedProtocol。
+        api = str(source.get("api") or "")
+        if not api.lower().startswith(("http://", "https://")):
+            _log.info("_load_source_classes skipped non-http source: id=%s",
+                      source.get("id"))
+            return
         try:
             cls = await _fetch_class_list(client, source)
         except Exception:
