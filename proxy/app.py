@@ -3265,6 +3265,21 @@ def _vod_play_info(guid: str, client) -> JSONResponse | None:
     brief = store.get_title_by_guid(og)
     if not brief:
         return None
+    # 续播定位：用户从固定线路卡点进某剧，应从「上次看到的那集」续播，而不是
+    # 机械地用线路卡默认的 index（通常第1集）。用该剧名下最近交互的集记录定位，
+    # 保留其 ts；无集记录时才沿用请求 index（首次观看/从头看）。T4 保留原语义；
+    # 已看完的集记录不触发（落到原有 position 逻辑）。
+    if brief.get("locator", {}).get("kind") != "t4":
+        _latest = history.latest_episode_record(og)
+        if _latest and not history._finished(_latest):
+            _snap = _latest.get("snapshot") or {}
+            if _snap.get("_ep_index") is not None:
+                try:
+                    _resume_idx = int(_snap["_ep_index"])
+                except (TypeError, ValueError):
+                    _resume_idx = -1
+                if 0 <= _resume_idx < len(store.list_episodes(og, line)):
+                    index = _resume_idx
     target = store.resolve_episode(og, line, index)
     if not target:
         return None
@@ -4796,6 +4811,21 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
         return _diag_play_info(guid, info)
     brief = store.get_title_by_guid(guid)
     if not brief:
+        # store 缓存淘汰兜底：用历史快照重建（续播不再依赖易失的搜索缓存）
+        snap_rec = history.get(guid)
+        if snap_rec is None:
+            # 影片级 guid 请求：找该剧名下最近交互的集级记录
+            #（同线按 snapshot.guid 命中；跨线需 store 解析标题，store 已
+            # 淘汰时只剩同线可命中，见 latest_episode_record 注释）
+            snap_rec = history.latest_episode_record(guid)
+        if snap_rec:
+            brief, snap_ep = _history_from_snapshot(snap_rec)
+            if brief is not None:
+                info = (inj.episode_play_info(snap_ep) if snap_ep
+                        else inj.play_info(brief))
+                info["ts"] = snap_rec.get("ts", 0)
+                _attach_play_duration(info, ep=snap_ep, brief=brief)
+                return _diag_play_info(guid, info)
         return None
     rec = history.get(guid)
     if inj.is_tv(brief):
@@ -4813,6 +4843,29 @@ def _online_play_info(guid: str, request: Request) -> dict | None:
                     info["ts"] = resume_ts
                     _attach_play_duration(info, ep=ep)
                     return _diag_play_info(guid, info)
+    # store 剧集结构缺失（有 brief 但无可用集 guid）时，用该剧名下最近交互
+    # 的集级记录快照恢复到具体集与 ts；T4 保留原语义，已看完的集记录不触发。
+    # fork 适配：快照 ep 是记录那条线的集身份，store 有本线同集时换成本线
+    # 的 ep（集 guid 按请求线路走，跨线口径不变）；store 里没有才用快照 ep。
+    if brief.get("locator", {}).get("kind") != "t4":
+        latest_ep_rec = history.latest_episode_record(guid)
+        if latest_ep_rec and not history._finished(latest_ep_rec):
+            _sb, _se = _history_from_snapshot(latest_ep_rec)
+            if _se is not None:
+                _idx = _se["index"]
+                _egs = store.tv_episode_guids(guid, regular_only=True)
+                _cur = None
+                if 0 <= _idx < len(_egs):
+                    _cur = store.get_episode(_egs[_idx])
+                if _cur is not None:
+                    info = inj.episode_play_info(_cur)
+                    info["ts"] = latest_ep_rec.get("ts", 0)
+                    _attach_play_duration(info, ep=_cur)
+                else:
+                    info = inj.episode_play_info(_se)
+                    info["ts"] = latest_ep_rec.get("ts", 0)
+                    _attach_play_duration(info, ep=_se, brief=_sb)
+                return _diag_play_info(guid, info)
     info = inj.play_info(brief)
     if rec:
         info["ts"] = rec.get("ts", 0)
@@ -4934,6 +4987,13 @@ async def play_info(request: Request):
             return JSONResponse({"code": 0, "msg": "",
                                  "data": clientmod.normalize_detail(info, client)})
     if not brief:
+        # store 已淘汰：先试历史快照恢复（_online_play_info 的快照分支），
+        # 恢复不到才 forward 上游。
+        info = _online_play_info(guid, request)
+        if info is not None:
+            _prewarm_from_info(info)
+            return JSONResponse({"code": 0, "msg": "",
+                                 "data": clientmod.normalize_detail(info, client)})
         return await forward_upstream(request)
     info = _online_play_info(guid, request)
     if info is None:
@@ -5537,6 +5597,89 @@ async def person_list(guid: str, request: Request):
     return JSONResponse({"code": 0, "msg": "", "data": {"total": 0, "list": []}})
 
 
+def _history_snapshot(raw_guid: str, norm_guid: str) -> dict | None:
+    """为一次播放记录构造精简 brief 快照（离线容错，任何异常返回 None）。
+
+    store 缓存可能已淘汰该片；快照让续播不依赖 store 是否仍保留。剧集按归一化
+    后的集 guid 提取当前集线路条目，电影存首条可播线路。
+    """
+    try:
+        ep = store.get_episode(norm_guid)
+        brief = None
+        if ep:
+            brief = store.get_title_by_guid(ep.get("online_guid", ""))
+        if brief is None:
+            brief = store.get_title_by_guid(norm_guid)
+        if brief is None:
+            # 复合线路卡：解析出原影片 guid 再试
+            parsed = _parse_line_item_guid(raw_guid)
+            if parsed:
+                brief = store.get_title_by_guid(parsed[0])
+                if brief is None and ep is None:
+                    ep = store.get_episode(norm_guid) or None
+        if brief is None:
+            return None
+        return histmod.build_snapshot(brief, norm_guid, ep)
+    except Exception:  # noqa: BLE001  快照失败不得影响进度记录主流程
+        return None
+
+
+def _history_from_snapshot(rec: dict):
+    """store 缓存淘汰后，用历史快照重建 (brief, ep)。
+
+    返回 (brief, ep_or_None)；快照缺失/无效返回 (None, None)。
+    剧集快照的 lines 只含当前集条目，据此构造最小 ep 供 history_item/play_info 复用。
+
+    fork 适配：ep 带上记录里的 duration——episode_duration 优先读它，
+    淘汰后 play/info 仍有合法时长（客户端续播守门用），不依赖 store。
+    注意：不把精简快照回注 store 主缓存。快照每条线路只含当前集，回注会
+    覆盖 store 里可能存在的完整 brief（导致 is_tv 误判、ep_guid 对不上）。
+    快照仅在本次请求内用于构造 play/info 卡片，store 仍由搜索链路自行维护。
+    快照内直链可能已过期：这里只恢复标题/集身份/ts，不校验直链有效性；
+    过期直链由后续取流/重搜链路补线（_slim 快照连 lines 都没有，同样走重搜）。
+    """
+    try:
+        snap = rec.get("snapshot")
+        if not isinstance(snap, dict) or not snap.get("guid"):
+            return None, None
+        brief = dict(snap)
+        ig = rec.get("item_guid", "")
+        # 集序号：真实 ep guid 是 hash 无法反解，依赖快照写入时存的 _ep_index
+        ep_idx = snap.get("_ep_index")
+        if ep_idx is None and isinstance(ig, str) and ig.startswith("ep:"):
+            try:
+                ep_idx = int(ig.rsplit(":", 1)[-1])
+            except ValueError:
+                ep_idx = None
+        ep = None
+        if ep_idx is not None:
+            try:
+                ep_idx = int(ep_idx)
+            except (TypeError, ValueError):
+                ep_idx = None
+        if ep_idx is not None:
+            lines = brief.get("lines") or {}
+            default_line = next(iter(lines), "")
+            ep = {
+                "ep_guid": snap.get("_ep_guid") or ig,
+                "online_guid": brief["guid"],
+                "index": ep_idx,
+                "episode_number": ep_idx + 1,
+                "season": 1,
+                "season_guid": season_guid(brief["guid"]),
+                "title": brief.get("title", ""),
+                "default_line": default_line,
+                "lines": list(lines.keys()),
+                "ep_title": (lines.get(default_line) or [{}])[0].get("title", "")
+                if default_line else "",
+                "line": default_line,
+                "duration": int(rec.get("duration", 0) or 0),
+            }
+        return brief, ep
+    except Exception:  # noqa: BLE001
+        return None, None
+
+
 @app.post("/v/api/v1/play/record")
 async def play_record(request: Request):
     import json
@@ -5556,7 +5699,21 @@ async def play_record(request: Request):
     if ig and (store.get_title_by_guid(ig) or store.get_episode(ig)
                or chart_cache.is_chart_guid(ig)):
         # 记录在线播放进度到本地（继续观看），不上报官方库
-        history.record(body)
+        history.record(body, snapshot=_history_snapshot(raw_guid, ig))
+        try:
+            resume_diagmod.note_record(raw_guid, ig, body,
+                                       outcome="history", parsed=parsed,
+                                       canon_key=_diag_record_canon_key(ig))
+        except Exception:
+            _log.debug("play_record failed", exc_info=True)
+            pass
+        return JSONResponse({"code": 0, "msg": "", "data": True})
+    if history.get(ig):
+        # store 缓存可能已淘汰该片，但 history 里已有该 guid（含快照）：进度仍应更新，
+        # 不能因此 forward 到官方（否则在线片的续播点会丢失、从头播放）。
+        # 快照沿用旧的（不重算——store 里已无 brief 可算）；record() 会把它
+        # 落回原规范键桶。
+        history.record(body, snapshot=history.get_snapshot(ig))
         try:
             resume_diagmod.note_record(raw_guid, ig, body,
                                        outcome="history", parsed=parsed,
@@ -5614,6 +5771,8 @@ async def play_list(request: Request):
         local_items = []
 
     online_items = []
+    best_by_show: dict = {}
+    standalone = []
     for rec in history.all():
         ig = rec.get("item_guid", "")
         ep = store.get_episode(ig)
@@ -5621,12 +5780,31 @@ async def play_list(request: Request):
         if ep:
             brief = store.get_title_by_guid(ep["online_guid"])
         if not brief:
-            continue  # 缓存已淘汰的标题不再展示
+            # store 缓存已淘汰：用历史快照重建，使「继续播放」不丢失
+            brief, snap_ep = _history_from_snapshot(rec)
+            if snap_ep and not ep:
+                ep = snap_ep
+        if not brief:
+            continue  # 既无缓存也无快照（旧记录），无法展示
         extra = _chart_extra_keys(ig) if chart_cache.is_chart_guid(ig) \
             else None
         if not _brief_viewable(request, brief, extra_keys=extra, _ctx=_viewer_ctx(request)):
             continue  # P0-3：权限收回后旧记录不再展示
-        online_items.append(inj.history_item(brief, rec, ep))
+        card = inj.history_item(brief, rec, ep)
+        # 同一部剧可能同时有影片级记录和各集记录：集级（快照带 _ep_index）才是
+        # 真实续播点，优先于影片级；同级再按最近交互时间。
+        is_ep_rec = isinstance(rec.get("snapshot"), dict) and \
+            rec["snapshot"].get("_ep_index") is not None
+        show = ep.get("online_guid") if ep else brief.get("guid") or ig
+        up = float(rec.get("updated_at", 0) or 0)
+        rank = (1 if is_ep_rec else 0, up)
+        if show:
+            prev = best_by_show.get(show)
+            if prev is None or rank >= prev[0]:
+                best_by_show[show] = (rank, card)
+        else:
+            standalone.append(card)
+    online_items = [c for _, c in best_by_show.values()] + standalone
 
     # 在线历史按最近播放排序，置顶；按 guid 与官方去重
     online_items.sort(key=lambda x: x.get("_updated_at", 0), reverse=True)
