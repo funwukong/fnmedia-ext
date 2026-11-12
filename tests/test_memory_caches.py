@@ -28,7 +28,7 @@ import pan as panmod
 import sniff as sniffmod
 import store as storemod
 
-# xlib 是私有模块：直接写 `import xlib` 会触发公开剥离的残留扫描
+# xlib 是私有模块：直接写 import 语句会触发公开剥离的残留扫描
 # （纯子串针），故用 importlib 绕针（P2 同款惯例）。
 xlibmod = importlib.import_module("xlib")
 
