@@ -143,6 +143,14 @@ SEG_SLOW_MIN = 3
 # 两次静默切线的最小间隔（每集），防频繁切换：30 秒内最多换一次
 _SWITCH_COOLDOWN = 30.0
 _LAST_SWITCH: dict[str, float] = {}
+_LAST_SWITCH_MAX = 2000  # 换线冷却戳表上限：只存时间戳，超限删最旧
+
+
+def _bounded_put(d: dict, key, value, cap: int) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap（分摊 O(1)，见 hls_race 同名函数）。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
 
 
 def _slow_median_locked(v: list[float]) -> float | None:
@@ -184,7 +192,8 @@ def mark_switched(og: str, index: int) -> None:
     if not og:
         return
     with _SEG_LOCK:
-        _LAST_SWITCH[ep_key(og, index)] = time.time()
+        _bounded_put(_LAST_SWITCH, ep_key(og, index), time.time(),
+                     _LAST_SWITCH_MAX)
 
 
 def _seg_key(og: str, index: int, line: str) -> str:
@@ -250,7 +259,7 @@ def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
             if m <= best_med and m < SEG_SLOW_SEC:
                 best_line, best_med = line, m
         if best_line:
-            _LAST_SWITCH[cool_key] = now
+            _bounded_put(_LAST_SWITCH, cool_key, now, _LAST_SWITCH_MAX)
         return best_line
 
 
