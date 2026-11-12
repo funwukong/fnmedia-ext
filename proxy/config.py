@@ -521,6 +521,8 @@ class Config:
                 # >>> PRIVATE:GUARD
                 m["guard"] = bool(s.get("guard", False)) if features.GUARD else False
                 m["guard_key"] = s.get("guard_key", "") if features.GUARD else ""
+                m["spider_src"] = bool(s.get("spider_src", False)) if features.GUARD else False
+                m["spider_key"] = s.get("spider_key", "") if features.GUARD else ""
                 # <<< PRIVATE:GUARD
                 m["builtin"] = bool(s.get("builtin", False))
                 for key in ("kind", "site_key", "ext", "searchable", "filterable", "indexs", "method"):

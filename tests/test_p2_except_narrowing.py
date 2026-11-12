@@ -267,9 +267,6 @@ def test_app_resolve_spider_inner_fallback(monkeypatch, boom_json):
                         lambda: [{"id": "s1", "spider_src": True}])
     monkeypatch.setattr(appmod.providers, "_spider_conf",
                         lambda src: {"key": "s1"})
-    # NOTE: app.py lacks a top-level import of the guard module at baseline;
-    # inject it here so the spider path runs as intended (source fix is out of scope).
-    monkeypatch.setattr(appmod, "guard", guard, raising=False)
     monkeypatch.setattr(spiders, "play", lambda *a, **k: "{bad json")
     picked = {"play_from": "s1:L1", "url": "playUrl=http://cdn/x.m3u8"}
     assert asyncio.run(appmod._resolve_spider(picked)) is True

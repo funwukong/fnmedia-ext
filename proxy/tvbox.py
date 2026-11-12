@@ -479,7 +479,7 @@ def classify_subscription(sites: list[dict], spider: str = "",
     t4: list[dict] = []
     skipped: list[dict] = []
     seen_cms: set[str] = set()
-    seen_guard: set[str] = set()
+    seen_guard: set[tuple] = set()
     seen_csp: set[str] = set()
     seen_drpy: set[str] = set()
     seen_t4: set[str] = set()
@@ -503,7 +503,13 @@ def classify_subscription(sites: list[dict], spider: str = "",
 
         # 1) 加固爬虫 csp_*Guard
         if is_guard_site(s):
-            gk = api.lower()
+            # 同 api 不同 ext 是多配置源（如同一 Guard 类的不同加密 ext），
+            # 去重键必须含 ext，否则后配的源在订阅导入前就被丢掉；下游
+            # parse_tvbox 按 spider 名 count 序号生成唯一 key。
+            ext = s.get("ext")
+            ext_str = ext if isinstance(ext, str) else (
+                "" if ext is None else json.dumps(ext, ensure_ascii=False))
+            gk = (api.lower(), ext_str)
             if gk in seen_guard:
                 continue
             seen_guard.add(gk)

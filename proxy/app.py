@@ -6148,6 +6148,13 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         return False
 
 
+def _safe_index(picked: dict) -> int:
+    """集序号容错取值：缺失/非数字/负数一律按 0 集处理，绝不抛错。
+    集序号读取统一走这里。"""
+    try:
+        return max(0, int(picked.get("index", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _resolve_guard_pan(picked: dict) -> bool:
@@ -6197,7 +6204,7 @@ async def _resolve_guard_pan(picked: dict) -> bool:
     items = [x for x in (r.get("items") or []) if x.get("url")]
     if not items:
         return False
-    idx = int(picked.get("index", 0) or 0)
+    idx = _safe_index(picked)
     item = items[min(idx, len(items) - 1)]
     # 根相对地址：播放器与本服务同源（quark 走旧路径，UC 走 /pan/uc/play）。
     play_path = "/v/api/ext/pan/play" if key == "quark" else f"/v/api/ext/pan/{key}/play"
@@ -6233,7 +6240,7 @@ async def _resolve_guard(picked: dict) -> bool:
     if cacheable:
         source = _guard_source_for(picked) or {}
         key = "%s|%s|%s" % (source.get("key") or picked.get("play_from", ""),
-                           vod_id, int(picked.get("index", 0) or 0))
+                           vod_id, _safe_index(picked))
         ent = _GUARD_RES_CACHE.get(key)
         if ent:
             ts, snap = ent
@@ -6263,48 +6270,53 @@ async def _resolve_guard(picked: dict) -> bool:
 async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
     """加固爬虫：搜索结果只持有 vod_id；播放前动态取详情，再调用
     Android runner 的 playerContent 取得真实 m3u8/mp4。"""
-    import guard
-    # 片单/元搜索源（豆豆片单等）的影片 id 形如 "msearch:###片名###海报"，自身不提供
-    # 线路；其在 OK影视 里由加密 mergeguard + 宿主本地聚合服务扇出到订阅内各源。我们的
-    # 精简 bridge host 没有该本地服务，故这里用片名在“可搜索的加固兄弟源”里自助扇出，
-    # 等价实现“自动聚合各订阅线路、优先能秒解的那条”。
-    if str(picked.get("url", "")).startswith("msearch:"):
-        return await _resolve_guard_msearch(picked)
-    # 网盘分享型（夸克 / UC / 阿里 / 百度 / 迅雷 / 115 / 天翼 / 移动，或四盘
-    # 聚合的 /link_start/?redirect_to=pan_id_xxx 占位）。已适配的家（夸克）转存→
-    # 原画→cookie 注入播放代理；识别到但未适配的家给可读提示，不再静默走普通加固
-    # （普通加固对网盘链接必然失败，错误信息无意义）。
-    pv = _pan_match(str(picked.get("url", ""))) or (
-        _PAN_LINKSTART_RE.search(str(picked.get("url", ""))) and _PAN_PROVIDERS[0])
-    if pv:
-        if not any(_PAN_MODS.values()):
-            picked["pan_error"] = "识别到网盘资源，但本构建不含网盘播放模块"
-            return False
-        try:
-            pan_hit = await _resolve_guard_pan(picked)
-        except _GuardPanUnsupported as exc:
-            picked["pan_error"] = str(exc)
-            _log.info("网盘资源暂不支持：%s 《%s》 %s",
-                      picked.get("line"), picked.get("title"), exc)
-            return False
-        if pan_hit:
-            picked.pop("pan_error", None)
-            return True
-    source = _guard_source_for(picked)
-    conf = providers._guard_conf(source) if source else None
-    if not conf:
-        return False
-    vod_id = picked.get("url", "")
-    if not vod_id:
-        return False
+    # import guard 与前置分支（msearch/网盘）都在 try 内：guard 模块导入失败时返回 False，不把异常抛到播放接口。
     try:
+        import guard
+        # 片单/元搜索源（豆豆片单等）的影片 id 形如 "msearch:###片名###海报"，自身不提供
+        # 线路；其在 OK影视 里由加密 mergeguard + 宿主本地聚合服务扇出到订阅内各源。我们的
+        # 精简 bridge host 没有该本地服务，故这里用片名在“可搜索的加固兄弟源”里自助扇出，
+        # 等价实现“自动聚合各订阅线路、优先能秒解的那条”。
+        if str(picked.get("url", "")).startswith("msearch:"):
+            return await _resolve_guard_msearch(picked)
+        # 网盘分享型（夸克 / UC / 阿里 / 百度 / 迅雷 / 115 / 天翼 / 移动，或四盘
+        # 聚合的 /link_start/?redirect_to=pan_id_xxx 占位）。已适配的家（夸克）转存→
+        # 原画→cookie 注入播放代理；识别到但未适配的家给可读提示，不再静默走普通加固
+        # （普通加固对网盘链接必然失败，错误信息无意义）。
+        pv = _pan_match(str(picked.get("url", ""))) or (
+            _PAN_LINKSTART_RE.search(str(picked.get("url", ""))) and _PAN_PROVIDERS[0])
+        if pv:
+            if not any(_PAN_MODS.values()):
+                picked["pan_error"] = "识别到网盘资源，但本构建不含网盘播放模块"
+                return False
+            try:
+                pan_hit = await _resolve_guard_pan(picked)
+            except _GuardPanUnsupported as exc:
+                picked["pan_error"] = str(exc)
+                _log.info("网盘资源暂不支持：%s 《%s》 %s",
+                          picked.get("line"), picked.get("title"), exc)
+                return False
+            if pan_hit:
+                picked.pop("pan_error", None)
+                return True
+        source = _guard_source_for(picked)
+        conf = providers._guard_conf(source) if source else None
+        if not conf:
+            return False
+        vod_id = picked.get("url", "")
+        if not vod_id:
+            return False
         want_line = (picked.get("play_from", "").split(":", 1)[1]
                      if ":" in picked.get("play_from", "") else "")
         # 详情已绑定的集（play_from 带真实线路，url 是完整 episode id，可能形如
         # "{play_id=..,playUrl=..}"）直接播放，不必再按 vod_id 取详情；
         # 只有搜索占位（url 是裸 vod_id、无线路）才需要先 detail 解析集列表。
+        if want_line and "playUrl=" not in vod_id and not vod_id.startswith("{"):
+            _log.warning(
+                "_resolve_guard_once: want_line=%r but vod_id=%r has no "
+                "episode shape; resolving via detail", want_line, vod_id)
         direct_ep = bool(want_line) and (
-            "playUrl=" in vod_id or vod_id.startswith("{") or "/" not in vod_id[:1])
+            "playUrl=" in vod_id or vod_id.startswith("{"))
         if direct_ep:
             chosen = {"line": want_line, "id": vod_id}
         else:
@@ -6312,7 +6324,7 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
             episodes = guard.parse_episodes(det)
             if not episodes:
                 return False
-            idx = int(picked.get("index", 0) or 0)
+            idx = _safe_index(picked)
             same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
             chosen = None
             if idx < len(same_line):
@@ -6364,6 +6376,7 @@ def _spider_source_for(picked: dict) -> dict | None:
 async def _resolve_spider(picked: dict) -> bool:
     """普通 csp_ 爬虫（订阅导入）：按各自 jar 经 redroid 解析真实播放地址。"""
     import spiders
+    import guard
     source = _spider_source_for(picked)
     conf = providers._spider_conf(source) if source else None
     if not conf:
@@ -6374,8 +6387,12 @@ async def _resolve_spider(picked: dict) -> bool:
     try:
         want_line = (picked.get("play_from", "").split(":", 1)[1]
                      if ":" in picked.get("play_from", "") else "")
+        if want_line and "playUrl=" not in vod_id and not vod_id.startswith("{"):
+            _log.warning(
+                "_resolve_spider: want_line=%r but vod_id=%r has no "
+                "episode shape; resolving via detail", want_line, vod_id)
         direct_ep = bool(want_line) and (
-            "playUrl=" in vod_id or vod_id.startswith("{") or "/" not in vod_id[:1])
+            "playUrl=" in vod_id or vod_id.startswith("{"))
         if direct_ep:
             chosen = {"line": want_line, "id": vod_id}
         else:
@@ -6383,7 +6400,7 @@ async def _resolve_spider(picked: dict) -> bool:
             episodes = guard.parse_episodes(det)
             if not episodes:
                 return False
-            idx = int(picked.get("index", 0) or 0)
+            idx = _safe_index(picked)
             same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
             if idx < len(same_line):
                 chosen = same_line[idx]
