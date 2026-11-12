@@ -414,6 +414,25 @@ class HistoryFromSnapshotTests(unittest.TestCase):
         self.assertEqual(appmod._history_from_snapshot(
             {"snapshot": {"title": "无 guid"}}), (None, None))
 
+    def test_malformed_snapshot_data_returns_none_none(self):
+        """收窄后的 except 只捕数据形态异常：duration 非数字、lines 条目非
+        dict、duration 为 inf 都应静默回退 (None, None)，而不是上抛。"""
+        import app as appmod
+        base = {"guid": "og-ffzy", "title": TITLE, "_ep_index": 3,
+                "_ep_guid": "ep-guid-3",
+                "lines": {FFZY: [{"title": "第4集",
+                                  "url": "https://ffzy.test/v3.m3u8"}]}}
+        rec = {"item_guid": "ep-guid-3", "ts": 600, "duration": "abc",
+               "snapshot": dict(base)}
+        self.assertEqual(appmod._history_from_snapshot(rec), (None, None))
+        bad_lines = dict(base, lines={FFZY: ["not-a-dict"]})
+        rec = {"item_guid": "ep-guid-3", "ts": 600, "duration": 3600,
+               "snapshot": bad_lines}
+        self.assertEqual(appmod._history_from_snapshot(rec), (None, None))
+        rec = {"item_guid": "ep-guid-3", "ts": 600, "duration": float("inf"),
+               "snapshot": dict(base)}
+        self.assertEqual(appmod._history_from_snapshot(rec), (None, None))
+
 
 # ------------------------------------------------------------------ Part B
 # app 级接线测试：沿用 test_resume3_identity.py 的 ASGI harness（CMS 源）。

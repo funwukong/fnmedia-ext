@@ -5931,7 +5931,10 @@ def _history_from_snapshot(rec: dict):
                 "duration": int(rec.get("duration", 0) or 0),
             }
         return brief, ep
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError,
+            OverflowError):
+        # 数据形态失败才静默回退（快照来自 history.json，字段可能缺失/类型错乱，
+        # 如 duration="abc" 或 int(inf)；其余异常应上抛而非吞掉，便于测试发现）。
         return None, None
 
 
