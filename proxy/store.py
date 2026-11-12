@@ -33,6 +33,153 @@ _GUID_PREFIX = "on"
 _TTL = 24 * 3600
 _MAX_TITLES = 4000
 _STATE = Path(__file__).resolve().parent.parent / "state" / "titles.json"
+# 超过该字节数的 titles.json 走流式载入（逐条解析、边读边裁剪），
+# 避免 100MB 级文件全量进内存；小文件仍用 json.loads 快捷路径。
+_STREAM_LOAD_MIN_BYTES = 1024 * 1024
+# 单集布尔字段：落盘时省略 False 值，读盘时补默认 False（见 _compact_brief）。
+_EP_BOOL_FIELDS = ("direct", "resolve", "redirect", "xsrc", "t4",
+                   "catvod", "drpy", "guard")
+
+
+def _compact_brief(brief: dict) -> dict:
+    """落盘瘦身：单集 headers 提为线路级一份、省略恒 False 的布尔字段。
+
+    只用于落盘快照与字节测算；内存里的 _titles 始终保持完整形态
+    （逐集 headers、布尔字段齐全），各读路径不用改。
+    同线路各集 headers 全等且非空时提为 {"headers": ..., "eps": [...]}；
+    各集 headers 不同（或为空）时保持列表形态、逐集保留非空 headers。
+    """
+    lines = brief.get("lines")
+    if not isinstance(lines, dict):
+        return dict(brief)
+    new_lines: dict = {}
+    for name, eps in lines.items():
+        if not isinstance(eps, list):
+            new_lines[name] = eps  # 已是紧凑形态或异常形态：原样保留
+            continue
+        compact_eps: list = []
+        header_jsons: set = set()
+        all_have_headers = bool(eps)
+        for e in eps:
+            if not isinstance(e, dict):
+                compact_eps.append(e)
+                all_have_headers = False
+                continue
+            ce = {k: v for k, v in e.items()
+                  if not (k in _EP_BOOL_FIELDS and v is False)}
+            h = ce.pop("headers", None)
+            if h:
+                header_jsons.add(json.dumps(h, ensure_ascii=False,
+                                            sort_keys=True))
+            else:
+                all_have_headers = False
+            compact_eps.append(ce)
+        if all_have_headers and len(header_jsons) == 1:
+            new_lines[name] = {
+                "headers": json.loads(next(iter(header_jsons))),
+                "eps": compact_eps}
+        else:
+            for ce, e in zip(compact_eps, eps):
+                if isinstance(e, dict) and e.get("headers"):
+                    ce["headers"] = e["headers"]
+            new_lines[name] = compact_eps
+    out = dict(brief)
+    out["lines"] = new_lines
+    return out
+
+
+def _expand_brief(brief: dict) -> dict:
+    """读盘展开：紧凑形态 -> 内存完整形态（逐集 headers、布尔字段补 False）。
+
+    旧文件（逐集 headers 的列表形态）原样通过，仅补缺失的默认值
+    （缺 headers 补 {}、缺布尔字段补 False），新旧两种形状都能读。
+    """
+    lines = brief.get("lines")
+    if not isinstance(lines, dict):
+        return brief
+    new_lines: dict = {}
+    changed = False
+    for name, val in lines.items():
+        if isinstance(val, dict) and "eps" in val:
+            changed = True
+            line_headers = val.get("headers") or {}
+            eps = []
+            for e in val.get("eps") or []:
+                if not isinstance(e, dict):
+                    eps.append(e)
+                    continue
+                ne = dict(e)
+                ne["headers"] = e.get("headers") or line_headers
+                for k in _EP_BOOL_FIELDS:
+                    ne.setdefault(k, False)
+                eps.append(ne)
+            new_lines[name] = eps
+        elif isinstance(val, list):
+            # 旧形态：只有缺默认值时才重建，完整旧文件零拷贝通过。
+            need = any(
+                isinstance(e, dict)
+                and ("headers" not in e
+                     or any(k not in e for k in _EP_BOOL_FIELDS))
+                for e in val)
+            if not need:
+                new_lines[name] = val
+                continue
+            eps = []
+            for e in val:
+                if not isinstance(e, dict):
+                    eps.append(e)
+                    continue
+                ne = dict(e)
+                if "headers" not in ne:
+                    ne["headers"] = {}
+                    changed = True
+                for k in _EP_BOOL_FIELDS:
+                    if k not in ne:
+                        ne[k] = False
+                        changed = True
+                eps.append(ne)
+            new_lines[name] = eps
+        else:
+            new_lines[name] = val
+    if not changed:
+        return brief
+    out = dict(brief)
+    out["lines"] = new_lines
+    return out
+
+
+def _select_capped(g_items: list, o_items: list) -> tuple[dict, dict]:
+    """按「条数上限 + 字节上限」裁剪（与落盘、载入共用同一规则）。
+
+    入参为插入顺序的 [(key, brief)] / [(key, orig)]；从最旧丢起，留最新。
+    字节按落盘紧凑形态的 UTF-8 长度算（中文 3 字节/字），留 2% 余量。
+    返回 (titles, orig)：titles 为紧凑形态（供落盘），调用方读盘时需
+    再 _expand_brief 回完整形态。
+    """
+    max_n, max_bytes, _ = _cache_cfg()
+    if len(g_items) > max_n:
+        g_items = g_items[-max_n:]
+        keep = {k for k, _ in g_items}
+        o_items = [(k, v) for k, v in o_items if k in keep]
+    compacted = [(k, _compact_brief(b)) for k, b in g_items]
+    if max_bytes > 0:
+        o_map = dict(o_items)
+        sizes = [
+            len(json.dumps(cb, ensure_ascii=False).encode("utf-8"))
+            + len(json.dumps(o_map.get(k, ""), ensure_ascii=False)
+                    .encode("utf-8"))
+            for k, cb in compacted]
+        budget = max_bytes * 0.92
+        total = sum(sizes) + 256
+        drop = 0
+        while total > budget and drop < len(compacted):
+            total -= sizes[drop]
+            drop += 1
+        if drop:
+            compacted = compacted[drop:]
+            keep = {k for k, _ in compacted}
+            o_items = [(k, v) for k, v in o_items if k in keep]
+    return dict(compacted), dict(o_items)
 
 
 def _cache_cfg() -> tuple[int, int, float]:
@@ -153,14 +300,193 @@ class Store:
         self._ensure_writer()
 
     def _load(self):
+        """载入 titles.json：形状校验 + 与落盘相同的截断。
+
+        旧实现只包读盘/解析：超限文件全量进内存（8000 条/116MB），且
+        titles 为 list、条目为数字等形状错误会让随后的 _rebuild_index
+        抛 AttributeError，Store() 构造失败（模块级 store = Store()，
+        即启动即崩溃）。现在：非 dict 的 titles/orig、非 dict 的条目、
+        非 str 的 orig 值逐一丢弃并记日志；超限内容按落盘规则裁剪后
+        才进内存与索引；大文件走流式解析。
+        """
         try:
-            j = json.loads(self._state.read_text(encoding="utf-8"))
-            self._titles = j.get("titles", {})
-            self._orig = j.get("orig", {})
+            try:
+                size = self._state.stat().st_size
+            except OSError:
+                size = 0
+            if size > _STREAM_LOAD_MIN_BYTES:
+                titles, orig = self._load_streaming()
+            else:
+                j = json.loads(self._state.read_text(encoding="utf-8"))
+                if not isinstance(j, dict):
+                    raise ValueError("titles.json top level is not an object")
+                titles, orig = self._validate_loaded(j.get("titles"),
+                                                      j.get("orig"), size)
+            self._titles, self._orig = titles, orig
         except Exception:
             _log.debug("_load failed", exc_info=True)
             self._titles, self._orig = {}, {}
         self._rebuild_index()
+
+    @staticmethod
+    def _validate_loaded(titles, orig, file_size: int = 0) -> tuple[dict, dict]:
+        """小文件路径的形状校验 + 裁剪：返回内存完整形态的 (titles, orig)。
+
+        titles 非 dict → 整库丢弃（条目形状无法信任）；orig 非 dict →
+        只丢 orig（标题可再生，orig 下次写入时补）；条目非 dict、
+        orig 值非 str 逐条丢弃。裁剪复用落盘同一规则。
+        快捷路径：条数、文件字节都已在上限内时不做逐条算字节
+        （落盘紧凑形态只会更小，磁盘文件尺寸已是上界）。
+        """
+        if not isinstance(titles, dict):
+            _log.warning("_load: 'titles' is not an object (%r), "
+                         "starting with an empty store", type(titles).__name__)
+            return {}, {}
+        if not isinstance(orig, dict):
+            _log.warning("_load: 'orig' is not an object (%r), discarding it",
+                         type(orig).__name__)
+            orig = {}
+        clean_t: dict = {}
+        for k, b in titles.items():
+            if not isinstance(b, dict):
+                _log.warning("_load: dropping non-object title entry %r", k)
+                continue
+            clean_t[k] = _expand_brief(b)
+        clean_o = {k: v for k, v in orig.items()
+                   if k in clean_t and isinstance(v, str)}
+        max_n, max_bytes, _ = _cache_cfg()
+        if (len(clean_t) <= max_n
+                and (max_bytes <= 0 or file_size + 256 <= max_bytes * 0.92)):
+            return clean_t, clean_o
+        capped, capped_o = _select_capped(list(clean_t.items()),
+                                          list(clean_o.items()))
+        # _select_capped 返回紧凑形态；内存要完整形态，展开回去。
+        return {k: _expand_brief(v) for k, v in capped.items()}, capped_o
+
+    def _load_streaming(self) -> tuple[dict, dict]:
+        """大文件流式载入：逐条解析 titles/orig，边读边按条数上限裁剪，
+        读完再按字节上限裁剪；任意时刻内存里最多只有上限内的条目，
+        不再把整个超限文件全量解析进内存。"""
+        from collections import deque
+
+        text = self._state.read_text(encoding="utf-8")
+        dec = json.JSONDecoder()
+
+        def skip_ws(i: int) -> int:
+            while i < len(text) and text[i] in " \t\r\n":
+                i += 1
+            return i
+
+        def parse_titles(i: int, keep: deque, max_n: int) -> int:
+            if text[i] != "{":
+                raise ValueError("'titles' is not an object")
+            i += 1
+            while True:
+                i = skip_ws(i)
+                if i >= len(text):
+                    raise ValueError("unterminated 'titles' object")
+                if text[i] == "}":
+                    return i + 1
+                key, i = dec.raw_decode(text, i)
+                i = skip_ws(i)
+                if text[i] != ":":
+                    raise ValueError("expected ':' in 'titles'")
+                i = skip_ws(i + 1)
+                brief, i = dec.raw_decode(text, i)
+                if isinstance(brief, dict):
+                    full = _expand_brief(brief)
+                    size = len(json.dumps(
+                        _compact_brief(full),
+                        ensure_ascii=False).encode("utf-8"))
+                    keep.append((key, full, size))
+                    while len(keep) > max_n:
+                        keep.popleft()
+                else:
+                    _log.warning("_load: dropping non-object title entry %r",
+                                 key)
+                i = skip_ws(i)
+                if text[i] == ",":
+                    i += 1
+                    continue
+                if text[i] == "}":
+                    return i + 1
+                raise ValueError("expected ',' or '}' in 'titles'")
+
+        def parse_orig(i: int) -> tuple[int, dict]:
+            if text[i] != "{":
+                raise ValueError("'orig' is not an object")
+            i += 1
+            out: dict = {}
+            while True:
+                i = skip_ws(i)
+                if i >= len(text):
+                    raise ValueError("unterminated 'orig' object")
+                if text[i] == "}":
+                    return i + 1, out
+                key, i = dec.raw_decode(text, i)
+                i = skip_ws(i)
+                if text[i] != ":":
+                    raise ValueError("expected ':' in 'orig'")
+                i = skip_ws(i + 1)
+                val, i = dec.raw_decode(text, i)
+                if isinstance(val, str):
+                    out[key] = val
+                i = skip_ws(i)
+                if text[i] == ",":
+                    i += 1
+                    continue
+                if text[i] == "}":
+                    return i + 1, out
+                raise ValueError("expected ',' or '}' in 'orig'")
+
+        max_n, max_bytes, _ = _cache_cfg()
+        keep: deque = deque()
+        orig: dict = {}
+        i = skip_ws(0)
+        if i >= len(text) or text[i] != "{":
+            raise ValueError("titles.json top level is not an object")
+        i += 1
+        while True:
+            i = skip_ws(i)
+            if i >= len(text):
+                raise ValueError("unterminated top-level object")
+            if text[i] == "}":
+                break
+            key, i = dec.raw_decode(text, i)
+            i = skip_ws(i)
+            if text[i] != ":":
+                raise ValueError("expected ':' at top level")
+            i = skip_ws(i + 1)
+            if key == "titles":
+                i = parse_titles(i, keep, max_n)
+            elif key == "orig":
+                i, orig = parse_orig(i)
+            else:
+                _, i = dec.raw_decode(text, i)
+            i = skip_ws(i)
+            if text[i] == ",":
+                i += 1
+                continue
+            if text[i] == "}":
+                break
+            raise ValueError("expected ',' or '}' at top level")
+        # 字节上限：条数上限已在解析时增量执行，这里只做字节裁剪。
+        items = list(keep)
+        if max_bytes > 0:
+            sizes = [sz + len(json.dumps(orig.get(k, ""),
+                                         ensure_ascii=False).encode("utf-8"))
+                     for k, _, sz in items]
+            total = sum(sizes) + 256
+            budget = max_bytes * 0.92
+            drop = 0
+            while total > budget and drop < len(items):
+                total -= sizes[drop]
+                drop += 1
+            if drop:
+                items = items[drop:]
+        titles = {k: b for k, b, _ in items}
+        keep_keys = set(titles)
+        return titles, {k: v for k, v in orig.items() if k in keep_keys}
 
     def _direct_eps(self, brief: dict, line: str) -> list[dict]:
         # 可直接播放，或可按需解析的播放页（/share/<id>）
@@ -237,6 +563,49 @@ class Store:
         for sg in [k for k, v in self._season_index.items()
                    if v.get("online_guid") == g]:
             self._season_index.pop(sg, None)
+
+    def _drop_title_index_locked(self, g: str) -> bool:
+        """摘除单个标题的 ep/media 索引（增量更新用）；返回是否碰过 T4。
+        调用时须已持 _lock，且 _titles[g] 仍在（_index_brief 的 drop
+        路径要读旧 brief 定默认线路）。"""
+        old = self._titles.get(g)
+        if old is None:
+            return False
+        if old.get("locator", {}).get("kind") == "t4":
+            self._drop_t4(g)
+            return True
+        self._index_brief(g, old, drop=True)
+        return False
+
+    def _index_title_locked(self, b: dict) -> bool:
+        """写入单个标题的 ep/media 索引；返回是否碰过 T4。调用时须已持 _lock。"""
+        g = b["guid"]
+        if b.get("locator", {}).get("kind") == "t4":
+            self._media_index[media_guid(g)] = "t:" + json.dumps(
+                {"og": g, "line": ""})
+            self._media_index[video_guid(g)] = "t:" + json.dumps(
+                {"og": g, "line": ""})
+            self._index_t4(g, b)
+            return True
+        self._index_brief(g, b)
+        return False
+
+    def _prune_detail_cache_locked(self):
+        """_detail_cache 与标题淘汰同步（调用时须已持 _lock）。
+
+        _detail_cache 以前没有任何淘汰路径，随写入 1:1 增长；现在只留
+        仍在库的 online_id，超出条数上限再截最旧。get_detail 在代码库
+        内暂无调用方，淘汰不影响任何读路径。
+        """
+        live = set(self._orig.values())
+        for oid in [k for k in self._detail_cache if k not in live]:
+            self._detail_cache.pop(oid, None)
+        # 与标题内存上限同步：1.5× 条数上限才截，截到条数上限。
+        max_n, _, _ = _cache_cfg()
+        ceiling = int(max_n * 1.5)
+        if len(self._detail_cache) > ceiling:
+            for oid in list(self._detail_cache)[:len(self._detail_cache) - max_n]:
+                self._detail_cache.pop(oid, None)
 
     def _rebuild_season_index(self) -> None:
         self._season_index = {}
@@ -472,54 +841,49 @@ class Store:
 
     def _prune_memory_locked(self, keep_guards: set):
         """内存软上限：条数远超配置上限时，丢最旧的非保护条目。
-        磁盘裁剪只影响落盘快照；这个防止长跑进程内存与索引无界增长（issue #42）。"""
+        磁盘裁剪只影响落盘快照；这个防止长跑进程内存与索引无界增长（issue #42）。
+
+        淘汰时同步摘除该标题的 ep/media 索引与 _detail_cache 条目：
+        旧实现只清 _titles/_orig，索引里残留的集/media guid 会让
+        resolve 走到已淘汰标题上（甚至抛 KeyError）。"""
         max_n, _, _ = _cache_cfg()
         ceiling = int(max_n * 1.5)
-        if len(self._titles) <= ceiling:
-            return False
-        keys = [k for k in self._titles.keys() if k not in keep_guards]
-        drop_n = len(self._titles) - max_n
-        for k in keys[:max(0, drop_n)]:
-            self._titles.pop(k, None)
-            self._orig.pop(k, None)
-        return True
+        pruned = False
+        if len(self._titles) > ceiling:
+            keys = [k for k in self._titles.keys() if k not in keep_guards]
+            drop_n = len(self._titles) - max_n
+            t4_touched = False
+            for k in keys[:max(0, drop_n)]:
+                # 先摘索引（需旧 brief 仍在 _titles 里定默认线路），再删数据。
+                t4_touched = self._drop_title_index_locked(k) or t4_touched
+                self._titles.pop(k, None)
+                self._orig.pop(k, None)
+            if t4_touched:
+                self._rebuild_season_index()
+            pruned = True
+        self._prune_detail_cache_locked()
+        return pruned
 
     def _snapshot_capped(self) -> tuple[dict, dict]:
-        """在锁内按「条数上限 + 字节上限」裁剪出待落盘快照。
+        """在锁内只拷贝条目列表，条数/字节裁剪与逐条 json.dumps 算字节
+        都在锁外做（旧实现持锁算字节，4000 条约 0.3 秒阻塞搜索/读）。
+        返回落盘用快照：titles 为紧凑形态（见 _compact_brief）。
         只裁剪落盘内容，不动内存；按插入顺序丢最旧（dict 保序，最近搜索在后）。"""
-        max_n, max_bytes, _ = _cache_cfg()
-        g_items = list(self._titles.items())
-        o_items = list(self._orig.items())
-        # 1) 条数上限
-        if len(g_items) > max_n:
-            g_items = g_items[-max_n:]
-            keep = {k for k, _ in g_items}
-            o_items = [(k, v) for k, v in o_items if k in keep]
-        # 2) 字节上限（0=不限制）。逐条算【UTF-8 字节】长度（titles + 对应 orig；
-        #    中文在磁盘上 3 字节/字，不能用字符 len 估算），从最旧丢到达标，留 2% 余量。
-        if max_bytes > 0:
-            def _bsize(v) -> int:
-                return len(json.dumps(v, ensure_ascii=False).encode("utf-8"))
-            o_map = dict(o_items)
-            budget = max_bytes * 0.92
-            sizes = [_bsize(b) + _bsize(o_map.get(k, "")) for k, b in g_items]
-            total = sum(sizes) + 256
-            drop = 0
-            while total > budget and drop < len(g_items):
-                total -= sizes[drop]
-                drop += 1
-            if drop:
-                g_items = g_items[drop:]
-                keep = {k for k, _ in g_items}
-                o_items = [(k, v) for k, v in o_items if k in keep]
-        return dict(g_items), dict(o_items)
+        with self._lock:
+            g_items = list(self._titles.items())
+            o_items = list(self._orig.items())
+        return _select_capped(g_items, o_items)
 
     def _flush_now(self) -> bool:
         """实际落盘：锁内取裁剪快照，锁外序列化+原子替换（写盘不阻塞搜索/读）。
 
         P1-18：快照时记下 _dirty_seq；落盘后只有代际未变才清脏——
         写盘期间若又有新变化，脏标记保留，后台防抖线程会再写一次，
-        不丢数据。无变化时直接返回 False，不碰磁盘。"""
+        不丢数据。无变化时直接返回 False，不碰磁盘。
+
+        代际在锁内取，快照（_snapshot_capped，含逐条算字节）在锁外做，
+        避免落盘裁剪阻塞搜索/读；快照与写盘之间进来的新变化会计入
+        新一代，落盘后脏标记保留、由防抖线程补写。"""
         if not self._dirty:
             return False
         with self._lock:
@@ -528,7 +892,7 @@ class Store:
             # 代际必须在快照之前取：快照期间的变脏要计入新一代，
             # 落盘后才不被误清（先快照后取代际会让保护失效）。
             seq = self._dirty_seq
-            titles, orig = self._snapshot_capped()
+        titles, orig = self._snapshot_capped()
         try:
             self._state.parent.mkdir(parents=True, exist_ok=True)
             data = json.dumps({"titles": titles, "orig": orig},
@@ -584,12 +948,18 @@ class Store:
             # P1-18：只有标题/来源真实变化才记脏；内容完全相同的重复
             # 写入（如同一搜索结果反复入库）不再触发写盘。_detail_cache
             # 与 _play 只在内存，不计入脏判断。
+            # 增量索引（与 remember_merged 同款）：只摘除/写入本批标题
+            # 的索引，不再每次全量 _rebuild_index（4000 条下 10 秒级，
+            # 且全程持锁阻塞搜索）。
             changed = False
+            t4_touched = False
             for t in titles:
                 g = make_guid(t)
                 b = inject.brief_of(t)
                 if self._titles.get(g) != b or self._orig.get(g) != t.online_id:
                     changed = True
+                if self._titles.get(g) is not None:
+                    t4_touched = self._drop_title_index_locked(g) or t4_touched
                 self._titles[g] = b
                 self._orig[g] = t.online_id
                 self._detail_cache[t.online_id] = t
@@ -598,7 +968,14 @@ class Store:
             self._prune_memory_locked({make_guid(t) for t in titles})
             if changed:
                 self._schedule_flush()
-            self._rebuild_index()
+            # 同一批里同一 guid 出现多次时只索引最后一份，避免旧份残留。
+            index_targets: dict = {}
+            for b in briefs:
+                index_targets[b["guid"]] = b
+            for b in index_targets.values():
+                t4_touched = self._index_title_locked(b) or t4_touched
+            if t4_touched:
+                self._rebuild_season_index()
         return briefs
 
     def remember_merged(self, briefs: list[dict]) -> list[dict]:
@@ -653,11 +1030,17 @@ class Store:
             # P1-18：内容无变化不记脏
             changed = (self._titles.get(guid) != brief
                        or self._orig.get(guid) != title.online_id)
+            t4_touched = False
+            if self._titles.get(guid) is not None:
+                t4_touched = self._drop_title_index_locked(guid)
             self._titles[guid] = brief
             self._orig[guid] = title.online_id
+            self._prune_memory_locked({guid})
             if changed:
                 self._schedule_flush()
-            self._rebuild_index()
+            t4_touched = self._index_title_locked(brief) or t4_touched
+            if t4_touched:
+                self._rebuild_season_index()
             return brief
 
     def get_title_by_guid(self, guid: str) -> Optional[dict]:
@@ -697,13 +1080,18 @@ class Store:
             # P1-18：内容无变化不记脏
             changed = (self._titles.get(g) != brief
                        or self._orig.get(g) != t.online_id)
+            t4_touched = False
+            if self._titles.get(g) is not None:
+                t4_touched = self._drop_title_index_locked(g)
             self._titles[g] = brief
             self._orig[g] = t.online_id
             self._detail_cache[t.online_id] = t
             self._prune_memory_locked({g})
             if changed:
                 self._schedule_flush()
-            self._rebuild_index()
+            t4_touched = self._index_title_locked(brief) or t4_touched
+            if t4_touched:
+                self._rebuild_season_index()
         return g
 
     def get_detail(self, online_id: str) -> Optional[providers.OnlineTitle]:
