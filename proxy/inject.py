@@ -225,6 +225,27 @@ def set_badge_provider(fn) -> None:
     _badge_provider = fn
 
 
+# app 层注入的速度角标提供者：brief -> 角标文本（如 "⚡860KB/s"，无实测为空串）。
+# 与 _badge_provider 同一模式，避免 inject 反向依赖 app；未注入时不显示角标。
+_speed_badge_provider = None
+
+
+def set_speed_badge_provider(fn) -> None:
+    global _speed_badge_provider
+    _speed_badge_provider = fn
+
+
+def _speed_badge_for_brief(b: dict) -> str:
+    """该 brief 的速度角标文本；提供者未注入/异常时为空串（不显示角标）。"""
+    if _speed_badge_provider is None:
+        return ""
+    try:
+        return str(_speed_badge_provider(b) or "")
+    except Exception:  # noqa: BLE001
+        _log.debug("_speed_badge_for_brief failed", exc_info=True)
+        return ""
+
+
 def _poster_for_brief(b: dict) -> str:
     """海报路径：按 brief 线路生成带角标海报（网盘资源 ☁ / 源健康点）。
 
@@ -253,6 +274,7 @@ def search_item(b: dict) -> dict:
     typ = fnos_type(b)
     nep = _ep_count(b)
     dur = brief_duration(b)
+    sb = _speed_badge_for_brief(b)
     return {
         "guid": guid,
         # TV/盒子端列表模型要求 video_guid/path/runtime，缺失会整库“加载失败”
@@ -265,8 +287,11 @@ def search_item(b: dict) -> dict:
         "tv_title": "",
         "parent_guid": "",
         "parent_title": "",
-        # 标题前置【在线】标签，搜索结果里与本地资源直观区分
-        "title": ONLINE_TAG + title + (f" ·{remarks}" if remarks else ""),
+        # 标题前置【在线】标签，搜索结果里与本地资源直观区分；
+        # 速度角标拼在 remarks 后缀之后（title 在 TV 白名单内、各端都渲染，
+        # 不新增卡片字段，TV 端零 fromJson 风险）。
+        "title": ONLINE_TAG + title + (f" ·{remarks}" if remarks else "") + (
+            f" ·{sb}" if sb else ""),
         "type": typ,
         "genres": [],
         "poster": _poster_for_brief(b),
