@@ -1121,7 +1121,9 @@ async def search_all(keyword: str, sources=None,
                      timeout: float | None = None,
                      soft_timeout: float | None = None,
                      *, budget: float | None = None,
-                     visible=None) -> list[OnlineTitle]:
+                     visible=None,
+                     early_min_wait: float | None = None,
+                     early_min_results: int | None = None) -> list[OnlineTitle]:
     """聚合搜索所有启用源。
 
     timeout/soft_timeout/budget：三者任一给出即为总预算（秒），到点返回已
@@ -1163,7 +1165,12 @@ async def search_all(keyword: str, sources=None,
             # 等待后，立即取消仍在途的慢源，不必干等满预算；预算仍作兜底，保证
             # 慢词/冷门词能拿全结果。只改预算分支的等待方式，不动源健康降级
             # （search_source 内）与并发/交错调度。
-            early_min_results, early_min_wait = 25, 0.8
+            # early_* 由调用方覆盖（二级目录冷片绑定传 0.4s/15 条，让最快源
+            # ~0.5s 即收手）；不传时保持旧默认 0.8s/25 条，其他调用方行为不变。
+            if early_min_results is None:
+                early_min_results = 25
+            if early_min_wait is None:
+                early_min_wait = 0.8
             loop = asyncio.get_running_loop()
             deadline = loop.time() + float(budget)
             early_gate = loop.time() + min(early_min_wait, float(budget))

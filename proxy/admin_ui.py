@@ -786,6 +786,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="number" id="fastestMax" min="2" max="12" style="width:100%"/></label>
         <label class="field" style="max-width:260px"><span>测速超时（秒）</span>
           <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
+        <label class="field" style="max-width:260px"><span>冷片二级目录等待（秒）</span>
+          <input type="number" id="folderBindWait" min="0" max="25" step="0.5" style="width:100%"/><span class="sub">冷片首次进二级线路墙时等搜索绑定的上限；0=本次不等、只后台绑定（重进即有）</span></label>
         <label class="switch-row"><input type="checkbox" id="posterSpeedBadge"/>
           <span>海报速度角标<span class="sub">列表卡标题后显示该片实测最快线路的速度（如 ⚡860KB/s）；只用竞速/播放中已测到的速度，没有实测值不显示</span></span></label>
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
@@ -2340,6 +2342,7 @@ async function saveLines(){
   const body={line_fastest:$("lineFastest").checked,
     line_fastest_max:Math.max(2,Math.min(12,parseInt($("fastestMax").value)||6)),
     line_fastest_timeout:Math.max(1,Math.min(10,parseFloat($("fastestTimeout").value)||4)),
+    folder_bind_wait:(()=>{const v=parseFloat($("folderBindWait").value);return Number.isFinite(v)?Math.max(0,Math.min(25,v)):8;})(),
     line_autofail:$("lineAutofail").checked,
     fixed_line_direct:$("fixedLineDirect").checked,
     mid_playback_switch:$("midPlaybackSwitch").checked,
@@ -2706,6 +2709,7 @@ async function init(){
   $("midPlaybackSwitch").checked=CFG.mid_playback_switch!==false;
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
+  $("folderBindWait").value=(CFG.folder_bind_wait??8);
   $("linePredict").checked=CFG.linepredict_enabled!==false;
   $("linePredictZeroRace").checked=CFG.linepredict_zero_race!==false;
   $("browseProbe").checked=CFG.browse_probe!==false;  $("linePredictMax").value=CFG.linepredict_max_lines||3;

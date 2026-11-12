@@ -783,6 +783,7 @@ async def ext_set_config(request: Request):
         "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
         "poster_speed_badge",  # 海报速度角标开关（默认开）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
+        "folder_bind_wait",  # 二级目录冷片绑定等待预算（秒），默认 8.0，夹取 [0, 25]
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
         "update_proxy",
@@ -812,6 +813,12 @@ async def ext_set_config(request: Request):
         # 实时读取 + 夹取 [0.8, 2.8]：非法值回落 2.4（见 config.clamp_main_ready_budget）
         patch["main_ready_budget"] = cfgmod.clamp_main_ready_budget(
             patch["main_ready_budget"])
+    if "folder_bind_wait" in patch:
+        try:
+            patch["folder_bind_wait"] = max(
+                0.0, min(25.0, float(patch["folder_bind_wait"])))
+        except (TypeError, ValueError):
+            patch.pop("folder_bind_wait", None)
     if "update_proxy" in patch:
         pu = str(patch["update_proxy"]).strip()[:300]
         patch["update_proxy"] = pu if re.match(r"^(https?|socks5h?)://", pu) else ""

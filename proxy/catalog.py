@@ -576,6 +576,27 @@ class Catalog:
                 return bool(self._dense.get(self._scope_key(scope, "uhd")))
             return False
 
+    def find_brief_by_guid(self, guid: str) -> dict | None:
+        """纯本地、零网络：在已缓存的密集列表/分页里按 guid 反查目录片 brief。
+
+        供二级线路墙对“海量库冷片”（非 chart、尚未 remember 进 store）按需
+        落库使用；找不到返回 None（调用方再走搜索绑定或返回空）。
+        上游原样（bf16a3b）；fork 适配：fork 的 _page_cache 值是 (ts, briefs)
+        二元组，上游是 (ts, briefs, ttl) 三元组，这里按二元组解包。
+        """
+        if not guid:
+            return None
+        with self._lock:
+            for briefs in list(self._dense.values()):
+                for b in briefs:
+                    if b.get("guid") == guid:
+                        return b
+            for _ts, briefs in list(self._page_cache.values()):
+                for b in briefs:
+                    if b.get("guid") == guid:
+                        return b
+        return None
+
     def pagecount(self, cat: str, scope: str = AGG_SCOPE) -> int:
         with self._lock:
             routes = self._routes.get(self._scope_key(scope, cat)) or []

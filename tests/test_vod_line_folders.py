@@ -206,20 +206,20 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_cold_folder_waits_for_binding_to_avoid_empty_page(self):
         b = brief()
-        async def slow_bind(*args, **kwargs):
-            await asyncio.sleep(0.05)
         # 首查冷（未绑定）、之后恒为已绑定；用函数而不用固定长度的
         # side_effect 列表——渲染线路卡时 _apply_marks 还会再查一次标题
         #（归一化线路卡 guid），固定列表会在第 3 次调用时 StopIteration。
+        # 移植后 _vod_line_folder 不再走 start_resolve_chart/_chart_resolving，
+        # 改走 ensure_folder_bound（冷片按需绑定，见 tests/test_folder_bind.py）。
         calls = {"n": 0}
         def _get_title(guid):
             calls["n"] += 1
             return None if calls["n"] == 1 else b
+        async def fake_ensure(guid):
+            return b
         with patch.object(appmod, "store") as store_mock, \
-                patch.object(appmod.chart_cache, "is_chart_guid", return_value=True), \
-                patch.object(appmod, "start_resolve_chart", return_value=None), \
-                patch.object(appmod, "_chart_resolving", {"chart-og": slow_bind()}), \
-                patch.object(appmod, "chart_card", return_value={"title": "测试"}):
+                patch.object(appmod, "ensure_folder_bound",
+                             side_effect=fake_ensure):
             store_mock.get_title_by_guid.side_effect = _get_title
             store_mock.target_lines.return_value = [target("lzi::lzm3u8")]
             response = await appmod._vod_line_folder(
