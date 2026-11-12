@@ -25,10 +25,19 @@ command -v rsync >/dev/null 2>&1 || { echo "ERROR: 需要 rsync" >&2; exit 1; }
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}/app/repo" "${STAGE}/app/ui"
 
+# 暂存（--stage-only，冒烟用）保留 tests/：冒烟要在暂存树里跑 pytest 子集；
+# 正式打包时排除 tests/，测试不进分发包（guardfix-d 引入的排除本意如此，
+# 但无条件排除会让暂存树里没有 tests/，冒烟 pytest 直接失败）。
+if [ "${STAGE_ONLY}" -eq 1 ]; then
+  TESTS_EXCLUDE=()
+else
+  TESTS_EXCLUDE=(--exclude='tests/')
+fi
+
 rsync -a --delete \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
-  --exclude='tests/' \
+  "${TESTS_EXCLUDE[@]}" \
   --exclude='.tools/' --exclude='.pytest_cache/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \
