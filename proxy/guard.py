@@ -19,6 +19,8 @@ from pathlib import Path
 
 import features
 import httpx
+import runner_errors
+from runner_errors import RunnerTransportError, from_envelope, kind_of
 
 _log = logging.getLogger("fnmedia")
 
@@ -940,11 +942,20 @@ def site(key: str) -> dict | None:
 
 
 def _runner_post(path: str, payload: dict, timeout: float | None = None):
-    r = httpx.post(RUNNER_URL + path, json=payload, timeout=timeout or TIMEOUT,
-                   trust_env=False)
-    j = r.json()
+    try:
+        r = httpx.post(RUNNER_URL + path, json=payload, timeout=timeout or TIMEOUT,
+                       trust_env=False)
+    except httpx.HTTPError as exc:
+        raise RunnerTransportError(
+            f"spider-runner 调用失败: {exc}", orig=type(exc).__name__) from exc
+    try:
+        j = r.json()
+    except ValueError:
+        # runner 返回非 JSON（如 502/空体）：按 HTTP 状态码合成传输层错误。
+        raise RunnerTransportError(f"runner HTTP {r.status_code}") from None
     if not j.get("ok"):
-        raise RuntimeError(str(j.get("error") or j)[:400])
+        # 信封透传 kind/原始类名/全文，不截断。
+        raise from_envelope(j)
     return j.get("result")
 
 
@@ -990,24 +1001,40 @@ def _call(site_conf: dict, method: str, **params):
         try:
             res = _runner_post("/invoke", payload, timeout=22.0)
             _bridge_fail = 0
-        except Exception:
+        except Exception as exc:
             _log.debug("_call failed", exc_info=True)
-            _bridge_fail += 1
-            # 单实例时代的整机卡死在池里已罕见；连续失败且过冷却期才串行重启主桥，
-            # 然后只重试一次本次调用。重启动作本身用独立锁串行，避免并发重复拉起。
-            now = time.time()
-            if _bridge_fail >= _BRIDGE_FAIL_RESTART and \
-                    now >= _bridge_restart_cooldown:
-                with _bridge_restart_lock:
-                    try:
-                        _restart_bridge_app()
-                    except Exception:  # noqa: BLE001
-                        _log.debug("_call failed", exc_info=True)
-                        pass
+            # 按 kind 分流（guardfix-e）：
+            #   timeout → 超时不计 _bridge_fail，不触发桥重启；
+            #   jar     → 补推用户 jar 后重试一次；
+            #   其余    → 沿用旧逻辑：计失败，满阈值且过冷却才重启桥并重试一次。
+            kind = kind_of(exc)
+            if kind == "timeout":
+                raise
+            if kind == "jar":
+                try:
+                    _push_user_jar()
+                except Exception:  # noqa: BLE001
+                    _log.debug("_call jar repush failed", exc_info=True)
+                    pass
                 res = _runner_post("/invoke", payload)
                 _bridge_fail = 0
             else:
-                raise
+                _bridge_fail += 1
+                # 单实例时代的整机卡死在池里已罕见；连续失败且过冷却期才串行重启主桥，
+                # 然后只重试一次本次调用。重启动作本身用独立锁串行，避免并发重复拉起。
+                now = time.time()
+                if _bridge_fail >= _BRIDGE_FAIL_RESTART and \
+                        now >= _bridge_restart_cooldown:
+                    with _bridge_restart_lock:
+                        try:
+                            _restart_bridge_app()
+                        except Exception:  # noqa: BLE001
+                            _log.debug("_call failed", exc_info=True)
+                            pass
+                    res = _runner_post("/invoke", payload)
+                    _bridge_fail = 0
+                else:
+                    raise
     _mark_android_used()  # 真实加固调用成功，刷新空闲计时
     return res
 

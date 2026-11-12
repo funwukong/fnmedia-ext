@@ -36,7 +36,9 @@ ENV CATVOD_ASSET=/srv/catvod \
     ANDROID_BRIDGE_URL=http://android:9101
 
 EXPOSE 9100
+# 解析 /health 的 ok 字段：curl 只看 HTTP 200 会把“全后端挂掉但服务在跑”
+# 也判为健康。ok 为三者（java/node/android）至少其一可用。
 HEALTHCHECK --interval=15s --timeout=5s --retries=3 \
-  CMD curl -fsS http://127.0.0.1:9100/health || exit 1
+  CMD python3 -c "import json,urllib.request; d=json.load(urllib.request.urlopen('http://127.0.0.1:9100/health',timeout=4)); raise SystemExit(0 if d.get('ok') else 1)"
 
 CMD ["python3", "/srv/runner/app/server.py"]
