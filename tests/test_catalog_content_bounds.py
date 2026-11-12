@@ -10,24 +10,10 @@
 - classify 成功即绕过 classify_source_class 的 _NEUTRAL_KW 拦截
   （该检查只在 classify 返回 None 时才走到）。
 """
-import pytest
-
 import catalog
 import libfilter
 from catalog import Catalog, classify, classify_source_class, is_redline
 
-# 工人 1 的实现已提交在 cat-core（8aeac92），尚未合入 main：
-# 以下 6 项断言依赖 classify() 的新分类，在干净的 cat-content
-#（main@d5a0f62）上会失败，故标 xfail（非严格）：合入 cat-core 后
-# 它们应转为 xpass/通过，届时可去掉标记。本文件 02:33 在共享树里
-#（工人 1 的 catalog.py + 工人 2 的 libfilter.py 同时在场时）已全量
-# 跑通过一次，断言本身与工人 1 的实现一致，不是推测。
-_NEEDS_CAT_CORE = (
-    "待 cat-core（工人 1，8aeac92）合入：classify() 新分类未在 main 上"
-)
-
-
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_live_names_classify_live():
     # 任务 1：直播是纯分类归类——分类名命中即收录，不需要订阅/探活/HLS 代理。
     assert classify("直播") == "live"
@@ -37,7 +23,6 @@ def test_live_names_classify_live():
     assert classify("电视") == "tv"
 
 
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_sports_checked_before_live():
     # “体育直播 / 赛事直播”同时含体育词与直播词：按工人 1 的顺序
     # sports 在 live 之前，归体育节目库，不归直播库（顺序约定，见报告）。
@@ -46,7 +31,6 @@ def test_sports_checked_before_live():
     assert classify("体育") == "sports"
 
 
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_sports_music_escape_exclude_kw():
     # 任务 3：体育/音乐类名不再被 _EXCLUDE_KW 丢弃（判定在排除之前）。
     assert classify("体育") == "sports"
@@ -59,7 +43,6 @@ def test_sports_music_escape_exclude_kw():
     assert classify("预告") is None
 
 
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_music_before_documentary():
     # 按工人 1 的约定：music 判定先于 documentary。
     assert classify("音乐纪录片") == "music"
@@ -68,7 +51,6 @@ def test_music_before_documentary():
     assert classify("纪录片") == "documentary"
 
 
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_classified_names_bypass_neutral_kw(monkeypatch):
     # 任务 3：classify 返回新分类后，classify_source_class 里的
     # _NEUTRAL_KW 检查不再走到——即使“直播/体育/音乐/MV”都在中性表里。
@@ -104,7 +86,6 @@ def test_redline_first_even_for_live_music_names(monkeypatch):
     assert classify_source_class("换脸视频", adult_allowed=True) is None
 
 
-@pytest.mark.xfail(strict=False, reason=_NEEDS_CAT_CORE)
 def test_classify_itself_ignores_redline():
     # classify 本身只做分类名归并，不管红线（红线由
     # classify_source_class 与 _briefs_from_vods 的标题/备注检查执行）。
@@ -148,12 +129,6 @@ def test_cat_for_source_type_covers_new_cats():
     assert cat.cat_for_source_type("ffzy", "") is None
 
 
-@pytest.mark.xfail(
-    strict=False,
-    reason="cat-wiring 缺口：libfilter._KNOWN_CATALOG_CATS 与 "
-           "app.CATALOG_LIB_GUIDS 未含 sports/live/kids/opera/music，"
-           "路由门会丢弃新分类的 catalog_route；只核查不改动，见报告任务 4。",
-)
 def test_libfilter_route_gate_covers_new_cats():
     # 任务 4 缺口：搜索 brief 即使带 catalog_route={"cat": "live"}，
     # libfilter 路由门（_KNOWN_CATALOG_CATS 校验）目前也会丢弃它，

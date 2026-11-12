@@ -336,7 +336,7 @@ async def ext_admin_token_rotate(request: Request):
             "data": {"new_token": new_token, "token": info}}
 
 
-# ------------------------------------------------------- 电视直播（IPTV）管理 API
+# ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
 @admin_router.get("/v/api/ext/status")

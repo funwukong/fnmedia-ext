@@ -56,7 +56,7 @@ CATALOG_CATEGORIES = [
     # P2 新增：海外电视剧、AI漫剧，跟随海量主开关，不设独立开关。
     ("overseas", "🌍海外剧集", "TV"),
     ("ai_comic", "🤖AI漫剧", "Mix"),
-    # P2 追加：TED学习，跟随海量主开关，不设独立开关。
+    # P2 追加：TED（现显示为“教育”），跟随海量主开关，不设独立开关。
     # cat-core：显示名改为“🎓教育”，键 ted 不动，GUID 因此不变。
     ("ted", "🎓教育", "Mix"),
     # cat-core 新增：体育 / 直播 / 少儿 / 戏曲 / 音乐MV，跟随海量主开关，不设独立开关。
@@ -89,7 +89,7 @@ def is_uhd_title(title: str, remarks: str) -> bool:
 _SHORT_KW = ("短剧", "微短剧", "剧场")
 # P2 新增：AI漫剧（先于 _EXCLUDE_KW 判定，见 classify），海外剧（先于普通剧集判定）。
 _AI_COMIC_KW = ("AI漫剧", "AI动漫", "AI漫画", "动态漫画", "漫剧")
-# P2 追加：TED学习（大小写不敏感，用小写匹配，见 classify）。
+# P2 追加：TED（现显示为“教育”）（大小写不敏感，用小写匹配，见 classify）。
 _TED_KW = ("ted", "ted演讲", "tedx", "ted-ed", "ted演讲")
 # cat-core 新增：体育 / 直播 / 少儿 / 戏曲 / 音乐（判定顺序见 classify）。
 # 体育与音乐必须在 _EXCLUDE_KW 判定之前（“体育/赛事”“音乐/MV”在排除表里）；
@@ -191,7 +191,7 @@ def classify(name: str) -> str | None:
     # 现在是正式分类，不再当噪音丢掉。
     if any(k in n for k in _AI_COMIC_KW):
         return "ai_comic"
-    # P2 追加：TED学习（小写匹配，TED / Ted / TEDx 都认）。
+    # P2 追加：TED（现显示为“教育”）（小写匹配，TED / Ted / TEDx 都认）。
     if any(k in nl for k in _TED_KW):
         return "ted"
     # cat-core：新分类判定，统一在 ai_comic/ted 之后、_EXCLUDE_KW 之前——
