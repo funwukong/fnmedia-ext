@@ -211,12 +211,16 @@ async def _probe_latency(cand: dict, request: Request,
         key = _playlist_cache_key(cand)
         cached = _PLAYLIST_CACHE.get(key)
         if cached:
-            body = cached[1]
-            if body is not _NOT_HLS and \
-                    not await _verify_rewritten_first_seg(body, request, cand):
-                _PLAYLIST_CACHE.pop(key, None)
-                return None
-            return time.time() - t0
+            if time.time() - cached[0] > _PLAYLIST_TTL:
+                # 过期清单不上游签名已失效：立即删，不再验活复用
+                _playlist_cache_drop(key)
+            else:
+                body = cached[1]
+                if body is not _NOT_HLS and \
+                        not await _verify_rewritten_first_seg(body, request, cand):
+                    _playlist_cache_drop(key)
+                    return None
+                return time.time() - t0
         if build_hls:
             mg = getattr(request.state, "_play_mg", "") if hasattr(request, "state") else ""
             if mg:
@@ -384,8 +388,20 @@ async def _find_playable(picked: dict, request: Request,
 # 内置线路全死后，按片名全网回源找到的可播记录：原 media_guid -> 真实可播 og。
 # 让播放器后续仍用原 mg 请求时能命中新记录（跨同名记录播放）。
 _MEDIA_REDIRECT: dict[str, str] = {}
+_MEDIA_REDIRECT_MAX = 2000  # 无 TTL 的重定向表：只存可再生的回源结果，超限删最旧
 _RESURRECT_FAIL: dict[str, float] = {}
+_RESURRECT_FAIL_MAX = 2000  # 10 分钟失败冷却表：超限删最旧
 _RESURRECT_FAIL_TTL = 10 * 60
+
+
+def _bounded_put(d: dict, key, value, cap: int) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap。
+
+    淘汰是分摊 O(1)：每条目最多被 pop 一次；写路径不做全表排序/扫描。
+    只用于存可再生派生内容的缓存字典，不用于用户数据。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
 _RESURRECT_FUT: dict[str, asyncio.Future] = {}  # 规范化片名 -> 后台回源任务（单飞）
 
 
@@ -503,7 +519,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
                     continue
                 # 命中：记录可播 og，并补一条可解析线路到该 og（_pick_episode 用）
                 if mg:
-                    _MEDIA_REDIRECT[mg] = og
+                    _bounded_put(_MEDIA_REDIRECT, mg, og, _MEDIA_REDIRECT_MAX)
                 _log.info("内置线路全死，全网回源《%s》-> %s", title, ln)
                 return True
         return False
@@ -524,7 +540,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
     except Exception:
         _log.debug("_resurrect_worker failed", exc_info=True)
         pass
-    _RESURRECT_FAIL[nkey] = time.time()
+    _bounded_put(_RESURRECT_FAIL, nkey, time.time(), _RESURRECT_FAIL_MAX)
     return False
 
 
@@ -630,6 +646,7 @@ def _line_speed(picked: dict) -> float:
     if not rec:
         return 0.0
     if time.time() - rec[1] > 3600:      # 一小时前的观测不再作数
+        _LINE_SPEED.pop(str(picked.get("line", "")), None)  # 过期即删，不占位
         return 0.0
     return rec[0]
 
@@ -992,8 +1009,48 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
 # 上游地址带时效签名，TTL 取短；只缓存成功结果。
 _PLAYLIST_CACHE: dict[str, tuple[float, str]] = {}
 _PLAYLIST_TTL = 120.0
+_PLAYLIST_MAX_BYTES = 64 * 1024 * 1024  # 64MB：改写后清单单条可达 1MB+，
+# 600 条数上限最坏 ~600MB；字节上限兜底，超限删最旧（清单可重新抓取生成）。
+_PLAYLIST_SIZE: dict[str, int] = {}     # key -> 该条字节数（len(body)）
+_PLAYLIST_BYTES = 0                     # 当前总量（运行值）
 # 单飞：同一「集+线路」只允许一次在途抓取，预热与真正取 main 共用同一个 Future
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
+
+
+def _playlist_cache_drop(key: str) -> None:
+    """删一条播放列表缓存，并同步扣减字节记账（外部直接赋值绕过记账时扣 0）。"""
+    global _PLAYLIST_BYTES
+    if _PLAYLIST_CACHE.pop(key, None) is not None:
+        _PLAYLIST_BYTES = max(0, _PLAYLIST_BYTES - _PLAYLIST_SIZE.pop(key, 0))
+
+
+def _rebuild_playlist_bytes() -> None:
+    """外部直接改动 _PLAYLIST_CACHE（如测试/管理端 clear）后重建字节记账。"""
+    global _PLAYLIST_BYTES
+    _PLAYLIST_SIZE.clear()
+    total = 0
+    for k, (_ts, body) in _PLAYLIST_CACHE.items():
+        s = len(body) if isinstance(body, str) else 0
+        _PLAYLIST_SIZE[k] = s
+        total += s
+    _PLAYLIST_BYTES = total
+
+
+def _playlist_cache_put(key: str, body: str) -> None:
+    """有界写播放列表缓存：条数 600 + 字节 64MB 双上限，超限删最旧条目
+    （dict 按插入序，最旧在队首；单条超限时保留该条，不清空整表）。"""
+    global _PLAYLIST_BYTES
+    _PLAYLIST_CACHE[key] = (time.time(), body)
+    if key in _PLAYLIST_SIZE:
+        _PLAYLIST_BYTES -= _PLAYLIST_SIZE[key]
+    _PLAYLIST_SIZE[key] = len(body) if isinstance(body, str) else 0
+    _PLAYLIST_BYTES += _PLAYLIST_SIZE[key]
+    if len(_PLAYLIST_SIZE) != len(_PLAYLIST_CACHE):
+        _rebuild_playlist_bytes()
+    while (len(_PLAYLIST_CACHE) > 600
+           or _PLAYLIST_BYTES > _PLAYLIST_MAX_BYTES) \
+            and len(_PLAYLIST_CACHE) > 1:
+        _playlist_cache_drop(next(iter(_PLAYLIST_CACHE)))
 
 # 紧凑分片注册表：夸克/UC 转码 HLS 的签名分片 URL 极长（~600 字符，base64 后近千），
 # 一部 90 分钟的片子上千分片会撑出 1MB+ 的清单，且每个分片 URL 超长，经外网网关
@@ -1003,15 +1060,49 @@ _HLS_REG: dict[str, tuple[float, list[str]]] = {}
 _HLS_REG_TTL = 3 * 3600.0
 _HLS_LONG_URL = 320          # 分片 URL 超过该长度即走紧凑注册表
 _HLS_REG_MAX = 4000
+_HLS_REG_MAX_BYTES = 64 * 1024 * 1024  # 64MB：单条最坏 595 KiB（900 个
+# 600 字符长 URL 分片），4000 条数上限最坏 2.4GB；字节上限兜底。64MB 可容
+# 约 100 条重清单或数千条轻清单；注册表 3 小时 TTL，到期即失效，可再生。
+_HLS_REG_SIZE: dict[str, int] = {}  # rid -> 该条字节数（sum(len(url))，
+# 分片 URL 为 ASCII，字符数≈字节数）
+_HLS_REG_BYTES = 0                  # 当前总量（运行值）
+
+
+def _hls_reg_drop(rid: str) -> None:
+    """删一条分片注册表，并同步扣减字节记账。"""
+    global _HLS_REG_BYTES
+    if _HLS_REG.pop(rid, None) is not None:
+        _HLS_REG_BYTES = max(0, _HLS_REG_BYTES - _HLS_REG_SIZE.pop(rid, 0))
+
+
+def _rebuild_hls_reg_bytes() -> None:
+    """外部直接改动 _HLS_REG 后重建字节记账。"""
+    global _HLS_REG_BYTES
+    _HLS_REG_SIZE.clear()
+    total = 0
+    for rid, (_ts, urls) in _HLS_REG.items():
+        s = sum(len(u) for u in urls)
+        _HLS_REG_SIZE[rid] = s
+        total += s
+    _HLS_REG_BYTES = total
 
 
 def _hls_reg_put(urls: list[str]) -> str:
+    global _HLS_REG_BYTES
     import secrets
     rid = secrets.token_hex(6)
     _HLS_REG[rid] = (time.time(), urls)
-    if len(_HLS_REG) > _HLS_REG_MAX:
-        for old in sorted(_HLS_REG, key=lambda k: _HLS_REG[k][0])[:len(_HLS_REG) - _HLS_REG_MAX]:
-            _HLS_REG.pop(old, None)
+    if len(_HLS_REG_SIZE) != len(_HLS_REG):
+        _rebuild_hls_reg_bytes()  # 外部直接改过注册表：重建记账（含新条）
+    else:
+        size = sum(len(u) for u in urls)
+        _HLS_REG_SIZE[rid] = size
+        _HLS_REG_BYTES += size
+    # 按插入序（≈时间序）删最旧，不做全表排序；单条超限时保留该条
+    while (len(_HLS_REG) > _HLS_REG_MAX
+           or _HLS_REG_BYTES > _HLS_REG_MAX_BYTES) \
+            and len(_HLS_REG) > 1:
+        _hls_reg_drop(next(iter(_HLS_REG)))
     return rid
 
 
@@ -1021,7 +1112,7 @@ def _hls_reg_get(rid: str, i: int) -> str:
         return ""
     ts, urls = ent
     if time.time() - ts > _HLS_REG_TTL:
-        _HLS_REG.pop(rid, None)
+        _hls_reg_drop(rid)
         return ""
     return urls[i] if 0 <= i < len(urls) else ""
 
@@ -1195,8 +1286,10 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
     key = _playlist_cache_key(picked)
     now = time.time()
     hit = _PLAYLIST_CACHE.get(key)
-    if hit and now - hit[0] < _PLAYLIST_TTL:
-        return hit[1]
+    if hit:
+        if now - hit[0] < _PLAYLIST_TTL:
+            return hit[1]
+        _playlist_cache_drop(key)
     fut = _PLAYLIST_FUT.get(key)
     if fut is None:
         fut = asyncio.get_event_loop().create_future()
@@ -1207,10 +1300,7 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
             try:
                 body, _base = await _build_playlist_body(mg, picked, request)
                 if body is not None and body is not _NOT_HLS:
-                    _PLAYLIST_CACHE[key] = (time.time(), body)
-                    if len(_PLAYLIST_CACHE) > 600:
-                        for k in list(_PLAYLIST_CACHE)[:300]:
-                            _PLAYLIST_CACHE.pop(k, None)
+                    _playlist_cache_put(key, body)
                 if not fut.done():
                     fut.set_result(body)
             except Exception as exc:
@@ -1272,13 +1362,18 @@ def _playlist_total_seconds(text) -> int:
 
 def _cached_playlist_seconds(picked: dict) -> int:
     """同步读 _PLAYLIST_CACHE 里已有的改写后清单并求和；无缓存返回 0，
-    不发任何请求。"""
+    不发任何请求。过期条目先校验 120 秒 TTL：过期即删、不参与求和
+    （过期清单的上游签名已失效，时长也不可信）。"""
     try:
-        hit = _PLAYLIST_CACHE.get(_playlist_cache_key(picked))
+        key = _playlist_cache_key(picked)
+        hit = _PLAYLIST_CACHE.get(key)
     except Exception:
         _log.debug("_cached_playlist_seconds failed", exc_info=True)
         return 0
     if not hit:
+        return 0
+    if time.time() - hit[0] > _PLAYLIST_TTL:
+        _playlist_cache_drop(key)
         return 0
     body = hit[1]
     if body is _NOT_HLS or not isinstance(body, str):

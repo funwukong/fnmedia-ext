@@ -1256,8 +1256,16 @@ class Store:
                 "total": len(eps)}
 
     def get_play(self, psid: str) -> Optional[dict]:
+        # 24h TTL 只在 remember_titles() 内顺带过滤：这里也校验，过期返回
+        # None 并删除（psid 是起播一次性凭证，过期复用无意义）。
         with self._lock:
-            return self._play.get(psid)
+            rec = self._play.get(psid)
+            if rec is None:
+                return None
+            if time.time() - rec.get("ts", 0) >= _TTL:
+                self._play.pop(psid, None)
+                return None
+            return rec
 
 
 store = Store()

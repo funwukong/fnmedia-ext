@@ -253,6 +253,7 @@ def account_info_safe() -> dict:
 
 # 进行中的扫码会话：token -> httpx.Client（保留申请二维码时下发的 _UP_* cookie）
 _QR_SESSIONS: dict[str, "httpx.Client"] = {}
+_QR_SESSIONS_MAX = 50  # 扫码会话上限：超限关掉最旧会话的客户端再建新的
 
 
 def _cookie_header(c: "httpx.Client") -> str:
@@ -274,6 +275,14 @@ def qr_start() -> dict:
     if not token:
         c.close()
         raise PanError("二维码 token 为空")
+    if len(_QR_SESSIONS) >= _QR_SESSIONS_MAX:
+        _old_tok, _old_c = next(iter(_QR_SESSIONS.items()))
+        _QR_SESSIONS.pop(_old_tok, None)
+        try:
+            _old_c.close()
+        except Exception:
+            _log.debug("qr_start failed", exc_info=True)
+            pass
     _QR_SESSIONS[token] = c
     # 与夸克网页端一致：把 token 拼到官方扫码落地页（su.quark.cn 短链页），
     # 并对 uc_biz_str 完整 URL 编码（未编码的 | : @ 会让夸克 App 误判成下载页）。
@@ -312,6 +321,14 @@ def qr_poll(session: dict) -> dict:
             c.close()
             return {"status": "success", "nickname": nickname}
         if st in (50004002, 50004003, 50004004):
+            # 二维码过期/被取消：会话永不再用，立即 pop 并关掉客户端，
+            # 否则 httpx.Client 连接池对象永久泄漏
+            _QR_SESSIONS.pop(session["token"], None)
+            try:
+                c.close()
+            except Exception:
+                _log.debug("qr_poll failed", exc_info=True)
+                pass
             return {"status": "expired", "message": j.get("message", "")}
         # 50004001 等待扫码；50003001 类为“已扫码待确认”
         if members or "scan" in str(j.get("message", "")).lower():

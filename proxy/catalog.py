@@ -43,6 +43,12 @@ PAGE_TTL = 10 * 60
 # 空页（多为慢源抖动超时）只短缓存，避免该页被长时间冻结
 EMPTY_TTL = 15
 HTTP_TIMEOUT = 12.0
+# 缓存上限（memory-caches 批）：淘汰的都是可再生的分页/去重派生内容，
+# 删后下次浏览重新翻页，不动用户数据。
+_DENSE_TOTAL_MAX = 50000  # dense 去重列表全作用域总条数（10 作用域 × 5000；
+# 实测 10 大类 × 5000 条重 brief 时 _dense 13.7MB + _seen_guids 9.2MB，
+# 5 万条总量约 23MB 级，可控）
+_PAGE_CACHE_MAX = 500      # 页缓存总页数（每页 ≤20 条 brief，500 页约万条量级）
 
 # 大类 -> 展示名 / MediaDB category
 CATALOG_CATEGORIES = [
@@ -327,6 +333,24 @@ class Catalog:
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
         return f"{scope}:{cat}"
+
+    def _enforce_dense_limits_locked(self, keep_sk: str | None = None) -> None:
+        """dense 总量超限时整作用域淘汰最旧分类（keep_sk 除外：正在浏览的
+        作用域不动）。按作用域整删，不动作用域内条目——dense 按全局偏移
+        索引，删中间条目会错位 get_window 的偏移；删整作用域只会让该分类
+        下次重新翻页。单个作用域独自超限时不删（偏移语义优先），等其它
+        作用域出现后再按总量淘汰。"""
+        with self._lock:
+            total = sum(len(v) for v in self._dense.values())
+            while total > _DENSE_TOTAL_MAX:
+                victim = next((sk for sk in self._dense if sk != keep_sk),
+                              None)
+                if victim is None:
+                    break
+                total -= len(self._dense.pop(victim, []))
+                self._seen_guids.pop(victim, None)
+                self._scanned_page.pop(victim, None)
+                self._dense_count.pop(victim, None)
 
     def standalone_scopes(self) -> list[str]:
         """当前需要独立成库的源 id（来源配置中的 standalone 标记）。"""
@@ -693,6 +717,7 @@ class Catalog:
             if stopped:
                 break
         self._dense_count[sk] = len(dense)
+        self._enforce_dense_limits_locked(keep_sk=sk)
         return len(dense)
 
     async def get_window(self, cat: str, offset: int, limit: int,
@@ -737,6 +762,10 @@ class Catalog:
                         # 空结果只短缓存，避免慢源一次抖动把该页冻结 10 分钟
                         ttl = EMPTY_TTL if not briefs else PAGE_TTL
                         self._page_cache[key] = (time.time(), briefs, ttl)
+                        # 页缓存总页数上限：按插入序删最旧页（可重新拉取）
+                        while len(self._page_cache) > _PAGE_CACHE_MAX:
+                            self._page_cache.pop(
+                                next(iter(self._page_cache)), None)
                     if not fut.done():
                         fut.set_result(briefs)
                 except asyncio.CancelledError:
