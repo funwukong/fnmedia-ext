@@ -140,9 +140,51 @@ SEG_SLOW_SEC = 2.2
 SEG_SWITCH_RATIO = 0.55
 # 至少累计这么多个慢分片才允许切（避免偶发一两个慢片误切）
 SEG_SLOW_MIN = 3
-# 两次静默切线的最小间隔（每集），防频繁切换
-_SWITCH_COOLDOWN = 25.0
+# 两次静默切线的最小间隔（每集），防频繁切换：30 秒内最多换一次
+_SWITCH_COOLDOWN = 30.0
 _LAST_SWITCH: dict[str, float] = {}
+
+
+def _slow_median_locked(v: list[float]) -> float | None:
+    """慢判定（调用方已持 _SEG_LOCK）：样本够多、慢分片够多、且中位数越阈
+    时返回中位数秒数，否则返回 None。pick_faster_line 与 cur_line_slow
+    共用同一口径，避免两处判定漂移。"""
+    slow_n = sum(1 for x in v if x >= SEG_SLOW_SEC)
+    if len(v) < SEG_SLOW_MIN or slow_n < SEG_SLOW_MIN:
+        return None
+    med = _median(v)
+    return med if med >= SEG_SLOW_SEC else None
+
+
+def cur_line_slow(og: str, index: int, cur_line: str) -> float | None:
+    """当前线最近分片是否持续慢：满足慢判定返回中位数秒数，否则 None。
+    纯判定，不碰冷却、不改状态；过期样本（> _SEG_TTL）不算数。"""
+    if not og or not cur_line:
+        return None
+    with _SEG_LOCK:
+        cur = _SEG.get(_seg_key(og, index, cur_line))
+        if not cur:
+            return None
+        if time.time() - cur[0] > _SEG_TTL:
+            return None
+        return _slow_median_locked(cur[1])
+
+
+def switch_allowed(og: str, index: int) -> bool:
+    """该集是否已出 30 秒换线冷却（防抖：短时间内不反复横跳）。"""
+    if not og:
+        return False
+    with _SEG_LOCK:
+        return time.time() - _LAST_SWITCH.get(ep_key(og, index), 0) >= _SWITCH_COOLDOWN
+
+
+def mark_switched(og: str, index: int) -> None:
+    """记下本次静默换线时间（供 switch_allowed 防抖；pick_faster_line
+    返回快线时内部同样会记，后备路径换线时由调用方补记）。"""
+    if not og:
+        return
+    with _SEG_LOCK:
+        _LAST_SWITCH[ep_key(og, index)] = time.time()
 
 
 def _seg_key(og: str, index: int, line: str) -> str:
@@ -193,11 +235,8 @@ def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
         if not cur:
             return None
         cur_v = cur[1]
-        slow_n = sum(1 for x in cur_v if x >= SEG_SLOW_SEC)
-        if len(cur_v) < SEG_SLOW_MIN or slow_n < SEG_SLOW_MIN:
-            return None
-        cur_med = _median(cur_v)
-        if cur_med < SEG_SLOW_SEC:
+        cur_med = _slow_median_locked(cur_v)
+        if cur_med is None:
             return None
         best_line, best_med = None, cur_med * SEG_SWITCH_RATIO
         for k, (_, v) in _SEG.items():
