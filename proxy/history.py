@@ -609,7 +609,8 @@ class History:
                 brief = st.get_title_by_guid(online_guid) if st else None
                 if brief:
                     ntitle = key_normalize_title(brief.get("title", ""))
-            except Exception:
+            except (ImportError, TypeError, ValueError, KeyError,
+                    AttributeError, IndexError):
                 _log.debug("latest_episode_record failed: guid=%s",
                            online_guid, exc_info=True)
                 ntitle = None

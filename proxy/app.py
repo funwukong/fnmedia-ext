@@ -740,7 +740,8 @@ def _schedule_folder_full_fallback(guid: str, title: str, want_year: str) -> Non
                 bound = dict(pick)
                 bound["guid"] = guid
                 store.remember_merged([bound])
-        except Exception:
+        except (TimeoutError, httpx.HTTPError, OSError, ValueError,
+                TypeError, KeyError, AttributeError, IndexError):
             _log.debug("_schedule_folder_full_fallback failed", exc_info=True)
             pass
         finally:
@@ -800,7 +801,9 @@ def _start_folder_bind(guid: str) -> asyncio.Future:
                             _aggregate_briefs(title, 12, timeout=_left),
                             timeout=_left)
                         pick = _pick_folder_brief(title, want_year, full)
-                    except Exception:
+                    except (TimeoutError, httpx.HTTPError, OSError,
+                            ValueError, TypeError, KeyError, AttributeError,
+                            IndexError):
                         _log.debug("_start_folder_bind full search failed",
                                    exc_info=True)
                         pick = None
@@ -814,7 +817,8 @@ def _start_folder_bind(guid: str) -> asyncio.Future:
                 # 实时预算耗尽仍无：后台静默跑全源（含慢源），命中后落库，
                 # 用户重进/客户端自动重拉即有，去重避免压源站。
                 _schedule_folder_full_fallback(guid, title, want_year)
-        except Exception:
+        except (TimeoutError, httpx.HTTPError, OSError, ValueError,
+                TypeError, KeyError, AttributeError, IndexError):
             _log.debug("_start_folder_bind failed", exc_info=True)
             pass
         finally:
@@ -835,7 +839,7 @@ def prefetch_folder_binding(guid: str) -> None:
         if store.get_title_by_guid(guid):
             return
         _start_folder_bind(guid)
-    except Exception:
+    except (RuntimeError, TypeError, ValueError, KeyError, AttributeError):
         _log.debug("prefetch_folder_binding failed", exc_info=True)
         pass
 
@@ -3526,7 +3530,7 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
             store._orig.pop(parent, None)
             store._rebuild_index()
             _FOLDER_BIND_FUT.pop(parent, None)
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, KeyError, AttributeError, IndexError):
             _log.debug("_vod_line_folder force refresh failed", exc_info=True)
             pass
     brief = store.get_title_by_guid(parent)
@@ -6004,7 +6008,8 @@ def _history_snapshot(raw_guid: str, norm_guid: str) -> dict | None:
         if brief is None:
             return None
         return histmod.build_snapshot(brief, norm_guid, ep)
-    except Exception:  # noqa: BLE001  快照失败不得影响进度记录主流程
+    except (TypeError, ValueError, KeyError, AttributeError, IndexError,
+            OverflowError):  # 快照失败不得影响进度记录主流程
         return None
 
 
@@ -6105,7 +6110,8 @@ async def play_record(request: Request):
             resume_diagmod.note_record(raw_guid, ig, body,
                                        outcome="history", parsed=parsed,
                                        canon_key=_diag_record_canon_key(ig))
-        except Exception:
+        except (TypeError, ValueError, KeyError, AttributeError, IndexError,
+                OSError):
             _log.debug("play_record failed", exc_info=True)
             pass
         return JSONResponse({"code": 0, "msg": "", "data": True})
