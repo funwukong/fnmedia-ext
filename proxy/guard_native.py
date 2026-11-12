@@ -220,8 +220,9 @@ _GN_CATALOG_GAP = 0.8               # 每页之间的喘息，保护唯一 redro
 # —— 高质量真机加固源的“适度深预拉”（OK影视 式点开即满墙、翻页秒开）——
 # 与片单源不同：这些是 jar/spider 真机源，每页都要打 redroid，故只深拉前若干页、
 # 低并发（池有 3 台设备）并留喘息；结果同样落 guard_catalog.json，翻页全部命中本地。
-_GN_DEEP_ENABLED = False            # 默认关闭：实测批量深拉会把 redroid 桥压进慢等，
-#                                   拖慢加固搜索/热榜起播；需要时在配置 guard_native_deep=true 手动开
+# 深预拉恒关闭：纯常量控制，无配置开关。实测批量深拉会把 redroid 桥压进慢等，
+# 拖慢加固搜索/热榜起播；不要再接 config 开关把它打开。
+_GN_DEEP_ENABLED = False
 _GN_DEEP_SRCS = (                   # 高价值“秒播/多线/不卡”真机源（内部 key）
     "Nmyswv",   # 🍓糯米·多线
     "AppSx",    # 🐻剧圈·多线
@@ -520,10 +521,8 @@ async def _gn_catalog_worker() -> None:
 
 
 def _gn_deep_enabled() -> bool:
-    """真机加固源“适度深预拉”开关：总开关 + 配置可关。"""
-    from app import config, guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    return bool(_GN_DEEP_ENABLED and guard_native_enabled()
-                and config.get().get("guard_native_deep", True))
+    """真机加固源“适度深预拉”开关：纯常量控制，恒关闭（无配置项可开）。"""
+    return bool(_GN_DEEP_ENABLED)
 
 
 def _gn_deep_all_fresh() -> bool:

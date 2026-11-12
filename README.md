@@ -40,6 +40,13 @@
 安装时选择应用所在存储卷，保持依赖应用 **影视 (trim.media)** 为运行状态。
 安装完成后启用「飞牛影视在线扩展」，桌面/应用内会出现 **影视在线扩展管理**。
 
+> **加固源定义（`proxy/assets/guard/sites.json`）不随 FPK 分发**：`packaging/fpk/build.sh`
+> 打包时排除 `sites.json` / `imported.json` / `guard.jar`，包内只留空目录占位（维护者
+> 私源与 jar 不进分发包）。因此新部署上加固源为空是预期状态，不是故障：需在管理页
+> 「导入 TVBox 配置」导入自己的 TVBox 订阅，或自行把 `sites.json` 放到
+> `proxy/assets/guard/` 后重启；未导入前 `guard.status()` 返回 `state=no_sites`，
+> 有源但 runner 不通时返回 `state=runner_down`。
+
 ### 方式二：源码部署（systemd）
 
 ```bash
