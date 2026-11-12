@@ -5980,9 +5980,20 @@ def _guard_source_for(picked: dict) -> dict | None:
 
 
 _MSEARCH_CACHE: dict[str, tuple] = {}   # 片名 -> (ts, source_key, vod_id, line)
+_MSEARCH_MAX = 1000    # 上限：超限按时间戳淘汰最旧 200 条，避免长期运行无限增长
+_MSEARCH_EVICT = 200
 _MSEARCH_TTL = 1800
 _MSEARCH_MAX_SRCS = 3   # 并发扇出的源数（=redroid 设备数，保证每源独占一台、零排队）
 _MSEARCH_SEARCH_TIMEOUT = 14.0  # 单源搜索超时：设备偶被预热占用时给足排队+出片时间（<播放端~20s窗口）
+
+
+def _msearch_cache_put(title: str, value: tuple) -> None:
+    """写入片名命中缓存；超 1000 条按时间戳淘汰最旧 200 条。"""
+    _MSEARCH_CACHE[title] = value
+    if len(_MSEARCH_CACHE) > _MSEARCH_MAX:
+        for k in sorted(_MSEARCH_CACHE,
+                        key=lambda kk: _MSEARCH_CACHE[kk][0])[:_MSEARCH_EVICT]:
+            _MSEARCH_CACHE.pop(k, None)
 
 
 def _msearch_parse(vod_id: str) -> tuple[str, str]:
@@ -6141,7 +6152,7 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
         picked["_guard_parse"] = int(res.get("parse", 0) or 0)
         picked["play_from"] = f"guard-{key}:{line}"
-        _MSEARCH_CACHE[title] = (now, key, vid, line)
+        _msearch_cache_put(title, (now, key, vid, line))
         return True
     except Exception:  # noqa: BLE001
         _log.debug("_resolve_guard_msearch failed", exc_info=True)

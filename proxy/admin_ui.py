@@ -2506,11 +2506,11 @@ function renderGuardRows(){
   const q=($("guardFilter")?.value||"").trim();
   const rows=GUARD_SITES.filter(s=>!q||(s.name||"").includes(q)).map(s=>{
     const tag=s.builtin?'<span class="muted">内置</span>':'<span style="color:var(--ok)">导入</span>';
-    const del=s.builtin?"":`<button class="small danger" onclick="removeGuard('${s.key}')">删</button>`;
+    const del=s.builtin?"":`<button class="small danger" onclick="removeGuard('${esc(s.key)}')">删</button>`;
     const cfg=s.need_config?' <span title="需要外部配置" style="color:var(--err)">⚠</span>':"";
     return `<tr><td>${esc(s.name)}${cfg}<div class="meta">${esc(s.key)}</div></td>
       <td>${s.searchable===false?"否":"是"}</td><td>${tag}</td>
-      <td><input type="checkbox" ${s.enabled?"checked":""} onchange="toggleGuard('${s.key}',this.checked)"
+      <td><input type="checkbox" ${s.enabled?"checked":""} onchange="toggleGuard('${esc(s.key)}',this.checked)"
         style="width:16px;height:16px;accent-color:var(--accent)"/></td><td>${del}</td></tr>`;
   }).join("");
   $("guardRows").innerHTML=rows||'<tr><td colspan="5" class="muted">无匹配加固源</td></tr>';

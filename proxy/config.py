@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -153,6 +154,7 @@ def _backup_config() -> Path | None:
             dst = d / f"config-{ts}-{i}.json"
             i += 1
         dst.write_bytes(_STATE.read_bytes())
+        os.chmod(dst, 0o600)
         # 按新旧删最旧：见 _backup_order_key，同秒备份只按名字会误删新备份。
         for old in sorted(d.glob("config-*.json"),
                           key=_backup_order_key)[: -BACKUP_KEEP]:
@@ -745,6 +747,7 @@ class Config:
         tmp = _STATE.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                        encoding="utf-8")
+        os.chmod(tmp, 0o600)
         tmp.replace(_STATE)
         # 成功写入后再备份：备份 = 最近一次已知的完好配置，
         # 主配置日后被外部写坏时可直接恢复到它。load() 里首次生成令牌

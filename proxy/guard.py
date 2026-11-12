@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -36,7 +37,7 @@ RUNNER_URL = os.environ.get("FNM_GUARD_RUNNER_URL",
                             os.environ.get("FNM_RUNNER_URL", "http://127.0.0.1:9100")).rstrip("/")
 TIMEOUT = float(os.environ.get("FNM_GUARD_TIMEOUT", "150"))
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 # redroid 以“多实例池”提供并发：runner（android_pool）对每台设备各持一把锁保证
 # 设备内严格串行，设备之间真并发。代理侧只做有界并发（默认 2，可按池大小自动放宽），
 # 避免极端扇出在池前堆积；不再像单实例时代那样全局串行。
@@ -95,9 +96,18 @@ REDROID_MEMORY = os.environ.get("FNM_REDROID_MEMORY", "2g")
 REDROID_BRIDGE_PORT = os.environ.get("FNM_BRIDGE_PORT", "9110")
 REDROID_DATA = os.environ.get(
     "FNM_REDROID_DATA", str(_SIDECAR_STATE_DIR / "redroid-data"))
+# docker pull 单次超时（秒）：600s 会让首次启动线程最长阻塞 20 分钟；
+# 300s 仍不够拉 2GB 镜像时由 _create_redroid 的回退/重试接手。
+# 可用 FNM_REDROID_PULL_TIMEOUT 覆盖。
+_PULL_TIMEOUT = int(os.environ.get("FNM_REDROID_PULL_TIMEOUT", "300"))
 _ANDROID_USE_FILE = _SIDECAR_STATE_DIR / "android_last_use"
 _ANDROID_STOP_FLAG = _SIDECAR_STATE_DIR / "android_manual_stop"
 _android_start_lock = threading.Lock()
+# 最近一次后台启动失败的记录（_bg 写入，sidecar_status 展示；成功启动后清空）。
+_last_start_error: dict = {}
+# 串行化 push_device_jar：宿主临时文件唯一名仍需加锁，避免两线程同时
+# docker cp 同名设备内临时路径互相覆盖。
+_push_lock = threading.Lock()
 
 
 def _env_flag(name: str, default: str) -> bool:
@@ -264,8 +274,10 @@ def _resolve_redroid_image() -> str:
         return REDROID_IMAGE
     for ref in (REDROID_IMAGE, REDROID_BASE):
         try:
+            _log.info("拉取 redroid 镜像：%s（超时 %ss）", ref, _PULL_TIMEOUT)
             pull = subprocess.run(["docker", "pull", ref],
-                                  capture_output=True, text=True, timeout=600)
+                                  capture_output=True, text=True,
+                                  timeout=_PULL_TIMEOUT)
             if pull.returncode == 0 and _redroid_image_present(ref):
                 return ref
         except Exception:
@@ -331,9 +343,14 @@ def _create_redroid() -> None:
     # 容器化 runner 经共享网络的固定名访问 redroid；缺失则建（幂等）
     subprocess.run(["docker", "network", "inspect", net],
                    capture_output=True, text=True, timeout=8)
-    if subprocess.run(["docker", "network", "create", net],
-                      capture_output=True, text=True).returncode != 0:
-        pass  # 已存在即可
+    try:
+        if subprocess.run(["docker", "network", "create", net],
+                          capture_output=True, text=True,
+                          timeout=15).returncode != 0:
+            pass  # 已存在即可
+    except Exception:
+        _log.debug("_create_redroid network create failed", exc_info=True)
+        pass  # 网络可能已存在或 docker 抖动，后续 docker run 会如实报错
     run_args = ["docker", "run", "-itd", "--privileged",
                 "--name", REDROID_CONTAINER,
                 "--restart", REDROID_RESTART_POLICY if REDROID_RESIDENT else "no",
@@ -383,16 +400,31 @@ def _install_bridge_assets() -> None:
         _log.debug("_install_bridge_assets failed", exc_info=True)
         has_builtin = False
     if has_builtin:
-        _docker_exec(["pm", "install", "-r", "/fnmedia/catvod-bridge.apk"], timeout=60)
+        r = _docker_exec(["pm", "install", "-r", "/fnmedia/catvod-bridge.apk"],
+                         timeout=60)
+        if r.returncode != 0:
+            _log.warning("_install_bridge_assets: pm install 失败 rc=%s: %s",
+                         r.returncode, (r.stderr or "")[-300:])
     else:
         apk = (Path(__file__).resolve().parent.parent / "spider-runner" / "android"
                / "build" / "catvod-bridge.apk")
         if apk.is_file():
-            subprocess.run(["docker", "cp", str(apk),
-                            f"{REDROID_CONTAINER}:/data/local/tmp/bridge.apk"],
-                           capture_output=True, text=True, timeout=60)
-            _docker_exec(["chmod", "644", "/data/local/tmp/bridge.apk"], timeout=10)
-            _docker_exec(["pm", "install", "-r", "/data/local/tmp/bridge.apk"], timeout=60)
+            cp = subprocess.run(["docker", "cp", str(apk),
+                                 f"{REDROID_CONTAINER}:/data/local/tmp/bridge.apk"],
+                                capture_output=True, text=True, timeout=60)
+            if cp.returncode != 0:
+                _log.warning("_install_bridge_assets: docker cp bridge.apk "
+                             "失败 rc=%s: %s", cp.returncode,
+                             (cp.stderr or "")[-300:])
+            else:
+                _docker_exec(["chmod", "644", "/data/local/tmp/bridge.apk"],
+                             timeout=10)
+                r = _docker_exec(["pm", "install", "-r",
+                                  "/data/local/tmp/bridge.apk"], timeout=60)
+                if r.returncode != 0:
+                    _log.warning("_install_bridge_assets: pm install 失败 "
+                                 "rc=%s: %s", r.returncode,
+                                 (r.stderr or "")[-300:])
     _push_user_jar()
 
 
@@ -413,36 +445,55 @@ def push_device_jar(data: bytes, device_path: str) -> bool:
     用于普通 csp_ 爬虫的多 jar 支持（每个订阅 spider jar 一个文件，bridge 的
     DexClassLoader 按 jar 路径缓存）。会广播到【全部】运行中的 redroid 池容器；
     无可用容器返回 False（下次启动可补推）。
+    串行化（_push_lock）+ 唯一临时文件（mkstemp，0600）：两线程并发推送
+    同名 jar 不再互相覆盖/提前删除。
     """
     if not data:
         return False
+    with _push_lock:
+        return _push_device_jar_locked(data, device_path)
+
+
+def _push_device_jar_locked(data: bytes, device_path: str) -> bool:
     containers = pool_containers()
     if not containers:
         return False
     tmp_name = os.path.basename(device_path) or "spider.jar"
-    host_tmp = f"/tmp/{tmp_name}.{os.getpid()}"
     d = os.path.dirname(device_path) or DEVICE_SPIDER_JAR_DIR
+    fd, host_tmp = tempfile.mkstemp(prefix="fnmedia-jar-",
+                                    suffix="-" + tmp_name)
     try:
-        with open(host_tmp, "wb") as fh:
+        with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        os.chmod(host_tmp, 0o644)
+        os.chmod(host_tmp, 0o600)
         ok_any = False
         for cname in containers:
             # 每台池容器都要一份：runner 会把调用负载到不同设备，缺 jar 的设备会
             # 抛 ClassNotFoundException(DexPathList 空)。
-            subprocess.run(["docker", "cp", host_tmp,
-                            f"{cname}:/data/local/tmp/{tmp_name}"],
-                           capture_output=True, text=True, timeout=180)
+            try:
+                subprocess.run(["docker", "cp", host_tmp,
+                                f"{cname}:/data/local/tmp/{tmp_name}"],
+                               capture_output=True, text=True, timeout=180)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                # 单容器下发失败只记 warning、该容器记失败，继续下一容器。
+                _log.warning("push_device_jar: docker cp 到 %s 失败：%s",
+                             cname, exc)
+                continue
             # 关键：jar 属主必须为 bridge App uid/gid（与 files 目录一致）。仅 666
             # 时文件仍 root:root，部分 redroid/SELinux 下 App 能 stat 却无法把 dex
             # mmap 进 ClassLoader（DexPathList 为空）。
-            r = subprocess.run(
-                ["docker", "exec", cname, "sh", "-c",
-                 f"mkdir -p {d}; cp /data/local/tmp/{tmp_name} {device_path}; "
-                 f"OWN=$(stat -c '%u:%g' /data/data/com.fnmedia.catvodbridge 2>/dev/null); "
-                 f"chown \"$OWN\" {device_path} 2>/dev/null; "
-                 f"chmod 600 {device_path} && echo ok"],
-                capture_output=True, text=True, timeout=40)
+            try:
+                r = subprocess.run(
+                    ["docker", "exec", cname, "sh", "-c",
+                     f"mkdir -p {d}; cp /data/local/tmp/{tmp_name} {device_path}; "
+                     f"OWN=$(stat -c '%u:%g' /data/data/com.fnmedia.catvodbridge 2>/dev/null); "
+                     f"chown \"$OWN\" {device_path} 2>/dev/null; "
+                     f"chmod 600 {device_path} && echo ok"],
+                    capture_output=True, text=True, timeout=40)
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                _log.warning("push_device_jar: docker exec %s 失败：%s",
+                             cname, exc)
+                continue
             if "ok" in (r.stdout or ""):
                 ok_any = True
         return ok_any
@@ -477,11 +528,20 @@ def save_user_jar(data: bytes, filename: str = "") -> dict:
     tmp.write_bytes(data)
     os.chmod(tmp, 0o600)
     tmp.replace(_USER_JAR)
-    pushed = _push_user_jar()
+    try:
+        pushed = _push_user_jar()
+        push_failed = False
+    except Exception:
+        # docker cp/exec 超时等下发异常不再上抛（管理页 500）：jar 已落盘，
+        # 下次启动自动补推。
+        _log.warning("save_user_jar: 下发失败（已保存，下次启动自动补推）",
+                     exc_info=True)
+        pushed, push_failed = False, True
+    hint = ("已保存并下发到运行中的 redroid" if pushed else
+            "已保存但下发失败，下次启动自动补推" if push_failed else
+            "已保存；redroid 未运行时会在下次启动/部署时自动下发")
     return {"ok": True, "size": len(data), "filename": filename or "guard.jar",
-            "pushed": pushed,
-            "hint": ("已保存并下发到运行中的 redroid" if pushed else
-                     "已保存；redroid 未运行时会在下次启动/部署时自动下发")}
+            "pushed": pushed, "hint": hint}
 
 
 def user_jar_status() -> dict:
@@ -588,17 +648,37 @@ def start_android(wait_ready: bool = False) -> dict:
                 return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
 
         def _bg():
+            global _last_start_error
             try:
                 _start_android_blocking()
-            except Exception:
-                _log.debug("_bg failed", exc_info=True)
-                pass
+                _last_start_error = {}
+            except Exception as exc:  # noqa: BLE001
+                _last_start_error = {
+                    "ok": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:200]}",
+                    "at": time.time(),
+                }
+                _log.warning("redroid 后台启动失败：%s",
+                             _last_start_error["error"])
             finally:
                 try:
                     _android_start_lock.release()
                 except RuntimeError:
                     pass
-        threading.Thread(target=_bg, name="redroid-start", daemon=True).start()
+        # Thread 对象先创建成功再 start()：start() 本身抛异常时立即释放锁，
+        # 否则锁泄漏、之后所有 start_android 恒报“已有启动任务在进行”。
+        _t = threading.Thread(target=_bg, name="redroid-start", daemon=True)
+        try:
+            _t.start()
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("start_android thread start failed", exc_info=True)
+            try:
+                _android_start_lock.release()
+            except RuntimeError:
+                pass
+            return {"ok": False,
+                    "error": f"启动线程失败：{type(exc).__name__}: "
+                             f"{str(exc)[:160]}"}
         pulling = (not _redroid_image_present()) and (not _container_exists())
         hint = ("正在首次拉取 redroid 镜像（约2GB）并启动，可能数分钟，稍后查看状态"
                 if pulling else "redroid 冷启约 10–30 秒，稍后查看 android 是否就绪")
@@ -728,9 +808,12 @@ def _load_sites() -> dict[str, dict]:
     """合并内置 sites.json 与用户导入 imported.json；同 key 以导入覆盖内置。
 
     每条带 `_builtin` 标记，便于前端区分与单独删除。
+    懒初始化加锁（_lock 已是 RLock，reload_sites 持锁重入安全）。
     """
     global _sites
-    if _sites is None:
+    with _lock:
+        if _sites is not None:
+            return _sites
         merged: dict[str, dict] = {}
         base = _read_json(_SITES)
         for s in base.get("sites", []):
@@ -743,7 +826,7 @@ def _load_sites() -> dict[str, dict]:
             s["_builtin"] = False
             merged[s["key"]] = s
         _sites = merged
-    return _sites
+        return _sites
 
 
 def reload_sites() -> dict[str, dict]:
@@ -812,6 +895,12 @@ def parse_tvbox(text_or_obj) -> dict:
         # 同 spider 多配置（不同加密 ext）→ 追加序号，保证 key 为 ASCII 且唯一
         count[base] = count.get(base, 0) + 1
         key = base if count[base] == 1 else f"{base}{count[base]}"
+        # key 只允许 [A-Za-z0-9_]：非法字符剔除（管理页 onclick 里插值 key，
+        # 含引号/尖括号可在管理页注入 JS）；剔除后为空则整条计入 skipped。
+        key = re.sub(r"[^A-Za-z0-9_]", "", key)
+        if not key:
+            skipped += 1
+            continue
         if key in seen:
             continue
         seen.add(key)
@@ -839,7 +928,7 @@ def parse_tvbox(text_or_obj) -> dict:
             "spider": obj.get("spider", ""), "total": len(obj.get("sites", []) or [])}
 
 
-def import_tvbox(text_or_obj, enable=None) -> dict:
+def import_tvbox(text_or_obj, enable=None, include_ext=False) -> dict:
     """解析并合并写入 imported.json。
 
     enable:
@@ -847,6 +936,8 @@ def import_tvbox(text_or_obj, enable=None) -> dict:
       None       —— 沿用旧行为（新源默认停用，等待手动勾选）；
       "smart"    —— 智能启用：安全源自动启用、风险源（risk=True）默认停用。
     已存在的源始终保留用户既有启用态，仅更新定义。
+    include_ext：返回的 sites 是否带 ext（加密配置串）。默认 False：
+    ext 只落盘进 imported.json，不回显给管理页/调用方；需要时显式传 True。
     返回 {added,updated,sites,enabled_keys,risk_keys,...}。
     """
     parsed = parse_tvbox(text_or_obj)
@@ -884,11 +975,15 @@ def import_tvbox(text_or_obj, enable=None) -> dict:
     _ASSET.mkdir(parents=True, exist_ok=True)
     tmp = _IMPORTED.with_suffix(".tmp")
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(_IMPORTED)
     reload_sites()
     enabled_keys = [k for k, v in cur.items() if v.get("enabled")]
     risk_keys = [s["key"] for s in incoming if s.get("risk")]
-    return {**parsed, "added": added, "updated": updated,
+    ret_sites = [dict(s) if include_ext else
+                 {k: v for k, v in s.items() if k != "ext"}
+                 for s in parsed["sites"]]
+    return {**parsed, "sites": ret_sites, "added": added, "updated": updated,
             "enabled_keys": enabled_keys, "risk_keys": risk_keys}
 
 
@@ -900,6 +995,7 @@ def remove_imported(key: str) -> bool:
     imp["sites"] = sites
     tmp = _IMPORTED.with_suffix(".tmp")
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(_IMPORTED)
     reload_sites()
     return True
@@ -926,6 +1022,7 @@ def set_enabled(key: str, on: bool) -> bool:
     imp["sites"] = list(cur.values())
     tmp = _IMPORTED.with_suffix(".tmp")
     tmp.write_text(json.dumps(imp, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.chmod(tmp, 0o600)
     tmp.replace(_IMPORTED)
     reload_sites()
     return True
@@ -1128,6 +1225,8 @@ def parse_episodes(detail: dict) -> list[dict]:
 
 # 每个源 home（分类表）短时缓存：key -> (ts, home_dict)，避免专区库每次打开都打真机。
 _HOME_CACHE: dict[str, tuple] = {}
+_HOME_CACHE_MAX = 200   # 每源一项，上限 200；超限按时间戳淘汰最旧 50 条。
+_HOME_CACHE_EVICT = 50
 # 专区库封面缓存：key -> [poster,...]；仅由后台预热填充，库列表接口绝不为此联网。
 _POSTER_CACHE: dict[str, list] = {}
 _POSTER_PREFETCHED: set[str] = set()
@@ -1172,6 +1271,10 @@ def home_cached(site_conf: dict, force: bool = False) -> dict:
     h = home(site_conf)
     with _lock:
         _HOME_CACHE[key] = (now, h)
+        if len(_HOME_CACHE) > _HOME_CACHE_MAX:
+            for k in sorted(_HOME_CACHE,
+                            key=lambda kk: _HOME_CACHE[kk][0])[:_HOME_CACHE_EVICT]:
+                _HOME_CACHE.pop(k, None)
     return h
 
 
@@ -1303,8 +1406,6 @@ def status() -> dict:
 # ============================================================
 # sidecar（重运行时）安装/状态管理 —— 供管理页“一键安装”调用。
 # ============================================================
-import shutil
-import subprocess
 
 _RUNNER_ROOT = Path(__file__).resolve().parent.parent / "spider-runner"
 _BOOTSTRAP = _RUNNER_ROOT / "deploy" / "bootstrap_sidecar.sh"
@@ -1313,6 +1414,11 @@ _INSTALL_LOG = _SIDECAR_STATE / "sidecar-install.log"
 
 _job_lock = threading.Lock()
 _job: dict | None = None   # {pid, proc, started, what, log, rc}
+# 安装任务超时（秒）：bootstrap 卡住超过此时长即视为陈旧，start_install
+# 允许覆盖旧任务（旧进程本身不杀，由 cancel_install 显式处理）。
+# 可用 FNM_SIDECAR_INSTALL_TIMEOUT_MIN 覆盖（默认 30 分钟）。
+_INSTALL_TIMEOUT_S = float(os.environ.get(
+    "FNM_SIDECAR_INSTALL_TIMEOUT_MIN", "30")) * 60
 
 
 def _container_up(name: str = REDROID_CONTAINER) -> bool:
@@ -1337,6 +1443,7 @@ def sidecar_status() -> dict:
         "android_manual_stop": _manual_stop_requested(),
         "android_manual": not REDROID_RESIDENT,  # 兼容旧字段
         "android_last_use": android_last_use(),
+        "android_last_start_error": dict(_last_start_error),
         "runner": RUNNER_URL,
         "java": False, "node": False, "android": False,
         "runner_ok": False, "error": "",
@@ -1351,9 +1458,9 @@ def sidecar_status() -> dict:
     except Exception as ex:  # noqa: BLE001
         _log.debug("sidecar_status failed", exc_info=True)
         out["error"] = str(ex)[:120]
+    out["installing"] = install_running()
+    out["install_timed_out"] = _install_timed_out()
     with _job_lock:
-        out["installing"] = bool(_job and _job.get("proc")
-                                 and _job["proc"].poll() is None)
         out["install_what"] = _job.get("what") if _job else ""
     return out
 
@@ -1367,9 +1474,53 @@ def install_log_tail(n: int = 200) -> str:
         return ""
 
 
+def _install_timed_out() -> bool:
+    """安装任务是否仍在跑但已超过时限（陈旧任务，可被覆盖/取消）。"""
+    with _job_lock:
+        if not _job or not _job.get("proc"):
+            return False
+        if _job["proc"].poll() is not None:
+            return False
+        return (time.time() - float(_job.get("started") or 0)
+                > _INSTALL_TIMEOUT_S)
+
+
 def install_running() -> bool:
     with _job_lock:
-        return bool(_job and _job.get("proc") and _job["proc"].poll() is None)
+        if not _job or not _job.get("proc"):
+            return False
+        if _job["proc"].poll() is not None:
+            return False
+        if time.time() - float(_job.get("started") or 0) > _INSTALL_TIMEOUT_S:
+            _job["timed_out"] = True
+            return False
+        return True
+
+
+def cancel_install() -> dict:
+    """取消正在运行的安装任务：terminate，10 秒不退出则 kill。"""
+    global _job
+    with _job_lock:
+        job = _job
+        if not job or not job.get("proc") or job["proc"].poll() is not None:
+            return {"ok": False, "error": "无安装任务在运行"}
+        proc = job["proc"]
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        _log.warning("sidecar install terminate 超时，kill 进程")
+        proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            _log.debug("cancel_install wait after kill failed",
+                       exc_info=True)
+            pass
+    with _job_lock:
+        if _job is job:
+            _job = None
+    return {"ok": True, "what": job.get("what", "")}
 
 
 def start_install(what: str = "all") -> dict:

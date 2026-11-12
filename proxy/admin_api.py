@@ -825,6 +825,36 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "guard_zone_enabled" in patch:
+        patch["guard_zone_enabled"] = bool(patch["guard_zone_enabled"])
+    if "guard_native_enabled" in patch:
+        patch["guard_native_enabled"] = bool(patch["guard_native_enabled"])
+    if "filter_junk" in patch:
+        patch["filter_junk"] = bool(patch["filter_junk"])
+    if "online_first" in patch:
+        patch["online_first"] = bool(patch["online_first"])
+    if "hot_library_enabled" in patch:
+        patch["hot_library_enabled"] = bool(patch["hot_library_enabled"])
+    if "catalog_library_enabled" in patch:
+        patch["catalog_library_enabled"] = bool(
+            patch["catalog_library_enabled"])
+    if "t4_library_enabled" in patch:
+        patch["t4_library_enabled"] = bool(patch["t4_library_enabled"])
+    if "welfare_library_enabled" in patch:
+        patch["welfare_library_enabled"] = bool(
+            patch["welfare_library_enabled"])
+    if "prefer_quality_source" in patch:
+        patch["prefer_quality_source"] = bool(patch["prefer_quality_source"])
+    if "line_fastest" in patch:
+        patch["line_fastest"] = bool(patch["line_fastest"])
+    if "line_autofail" in patch:
+        patch["line_autofail"] = bool(patch["line_autofail"])
+    if "fixed_line_direct" in patch:
+        patch["fixed_line_direct"] = bool(patch["fixed_line_direct"])
+    if "poster_speed_badge" in patch:
+        patch["poster_speed_badge"] = bool(patch["poster_speed_badge"])
+    if "pan_lib_enabled" in patch:
+        patch["pan_lib_enabled"] = bool(patch["pan_lib_enabled"])
     if "mid_playback_switch" in patch:
         patch["mid_playback_switch"] = bool(patch["mid_playback_switch"])
     if "linepredict_zero_race" in patch:
@@ -2191,7 +2221,15 @@ if features.GUARD:
         except Exception as exc:  # noqa: BLE001
             _log.debug("guard_jar_upload failed", exc_info=True)
             return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"}, status_code=400)
-        res = await asyncio.to_thread(_guard.save_user_jar, raw, str(body.get("name") or ""))
+        try:
+            res = await asyncio.to_thread(_guard.save_user_jar, raw, str(body.get("name") or ""))
+        except Exception as exc:  # noqa: BLE001
+            # 保存本身抛异常（如下发以外的落盘错误）：jar 可能已落盘，
+            # 下次启动自动补推，不返回 500。
+            _log.debug("guard_jar_upload failed", exc_info=True)
+            return JSONResponse(
+                {"code": 502, "msg": "已保存但下发失败，下次启动自动补推"},
+                status_code=502)
         if not res.get("ok"):
             return JSONResponse({"code": 400, "msg": res.get("error", "保存失败")}, status_code=400)
         return JSONResponse({"code": 0, "msg": "", "data": res})
