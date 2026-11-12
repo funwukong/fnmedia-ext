@@ -566,6 +566,224 @@ async def resolve_chart(guid: str) -> dict | None:
     return await fut
 
 
+# ------------------------------------------------- 二级目录冷片按需绑定（上游 bf16a3b + 447b452）
+# 资源站常见的“片名+年份/语言版本”后缀，如《美人余2026》《璀璨之城粤语》。
+# 仅允许短的年份或语言/清晰度词，避免《突如其来》误匹配《突如其来的假期》。
+_FOLDER_VARIANT_SUFFIX_RE = re.compile(
+    r"^(?:(?:19|20)\d{2}|普通话|国语|粤语|英语|日语|韩语|中字|中英双字|"
+    r"中文字幕|hd|高清|超清|蓝光|完整版|未删减|正片|版)+$", re.I)
+
+
+def _folder_title_rank(title: str, want_year: str, brief: dict) -> int:
+    """二级目录绑定的片名相关度：完全同名优先，其次语言/年份后缀，拒绝包含误绑。"""
+    want = _norm_title(title)
+    name = _norm_title(brief.get("title", ""))
+    if not want or not name:
+        return 99
+    brief_year = str(brief.get("year") or "")
+    if want_year and brief_year and want_year != brief_year:
+        return 99
+    if name == want:
+        return 0
+    if name.startswith(want):
+        suffix = name[len(want):]
+        if suffix and _FOLDER_VARIANT_SUFFIX_RE.fullmatch(suffix):
+            return 1
+    return 99
+
+
+def _pick_folder_brief(title: str, want_year: str, briefs: list[dict]) -> dict | None:
+    ranked = sorted(((_folder_title_rank(title, want_year, b), i, b)
+                     for i, b in enumerate(briefs)), key=lambda x: (x[0], x[1]))
+    return ranked[0][2] if ranked and ranked[0][0] < 99 else None
+
+
+# 二级目录绑定等待策略（上游 bf16a3b 原样：总等待窗口 8s；快源未命中即在
+# 同一请求内继续全源搜索直到命中或耗尽预算，后台兜底继续）。
+# fork 适配：等待预算做成配置项 folder_bind_wait（默认 8.0 秒，夹取 [0, 25]，
+# 0 = 本次请求不等待、只后台绑定），实时读取、改后即时生效；上游 beta.2 把
+# 窗口放宽到 25s 的改动不采纳（用户定：默认仍为 8.0）。
+# _FOLDER_BIND_WAIT 保留为默认值常量；其余常量与上游一致。
+_FOLDER_BIND_WAIT = 8.0
+_FOLDER_FAST_SOFT = 2.0
+# 快源搜索的硬超时（wait_for 上限）：并发争用时快源可能 1.5s+ 才返回，给 4s 防止
+# 本来能命中的搜索被短超时截断。正常情况下提前返回参数会让它在 ~0.5s 就收手。
+_FOLDER_FAST_HARD = 4.0
+# 二级目录快源搜索的提前返回参数：最快 CMS 源 ~0.46s 即返回 20 条，达到首屏量
+# （15 条）且过 0.4s 最小等待就提前收手；不满足时继续等满软超时，不会因早退而漏片。
+_FOLDER_EARLY_WAIT = 0.4
+_FOLDER_EARLY_RESULTS = 15
+
+
+def _folder_bind_wait() -> float:
+    """二级目录绑定等待预算（秒）：读配置 folder_bind_wait，夹取 [0, 25]。
+
+    配置缺失/非法时回落默认 8.0；0 表示本次请求不等待、只后台绑定。
+    """
+    try:
+        v = float(config.get().get("folder_bind_wait", _FOLDER_BIND_WAIT))
+    except (TypeError, ValueError):
+        return _FOLDER_BIND_WAIT
+    return max(0.0, min(25.0, v))
+
+
+# 二级目录按需搜索绑定的在途去重（guid -> Future），避免同片并发重复全网搜索
+_FOLDER_BIND_FUT: dict[str, asyncio.Future] = {}
+
+
+def _folder_title_hint(guid: str) -> str:
+    """零网络获取某 guid 的片名：chart 缓存 → catalog 内存反查 → store。"""
+    item = chart_cache.get_guid(guid)
+    if item and item.get("title"):
+        return item["title"]
+    cb = catalog.find_brief_by_guid(guid)
+    if cb and cb.get("title"):
+        return cb["title"]
+    b = store.get_title_by_guid(guid)
+    return (b or {}).get("title", "")
+
+
+# 二级目录快源未命中后的全源兜底在途去重（guid）
+_FOLDER_FULL_FB: set[str] = set()
+
+
+def _schedule_folder_full_fallback(guid: str, title: str, want_year: str) -> None:
+    """快源未命中时后台跑一次全源搜索并挂到该 guid，不阻塞当前请求。"""
+    if guid in _FOLDER_FULL_FB or store.get_title_by_guid(guid):
+        return
+    _FOLDER_FULL_FB.add(guid)
+
+    async def _job():
+        try:
+            briefs = await asyncio.wait_for(
+                _aggregate_briefs(title, 12), timeout=25)
+            pick = _pick_folder_brief(title, want_year, briefs)
+            if pick is not None:
+                bound = dict(pick)
+                bound["guid"] = guid
+                store.remember_merged([bound])
+        except Exception:
+            _log.debug("_schedule_folder_full_fallback failed", exc_info=True)
+            pass
+        finally:
+            _FOLDER_FULL_FB.discard(guid)
+
+    asyncio.create_task(_job())
+
+
+def _start_folder_bind(guid: str) -> asyncio.Future:
+    """启动（或复用）某 guid 的二级目录绑定单飞任务，返回其 Future。
+
+    fork 适配（与上游的差异）：
+    - 上游命中后调 schedule_prewarm_title(guid, 0)：fork 无此函数，跳过——
+      列表返回后的后台探活由解冻第 4 项 browse_probe 负责（只写
+      linepredict.remember），绑定预热与探活互补，不重复造轮子。
+    - 上游 _aggregate_briefs 用 soft_timeout 参数名、_CHART_BIND_MAXN 常量：
+      fork 用 timeout 参数名、沿用 start_resolve_chart 的字面量 12。
+    - 等待预算读配置 _folder_bind_wait()（默认 8.0），而非模块常量。
+    """
+    existing = store.get_title_by_guid(guid)
+    if existing:
+        f = asyncio.get_event_loop().create_future()
+        f.set_result(existing)
+        return f
+    fut = _FOLDER_BIND_FUT.get(guid)
+    if fut is not None:
+        return fut
+    fut = asyncio.get_event_loop().create_future()
+    _FOLDER_BIND_FUT[guid] = fut
+
+    async def _work():
+        _deadline = time.monotonic() + _folder_bind_wait()
+        try:
+            title = _folder_title_hint(guid)
+            if not title:
+                return
+            briefs = await asyncio.wait_for(
+                _aggregate_briefs(title, 12, fast_only=True,
+                                  timeout=_FOLDER_FAST_SOFT, include_t4=False,
+                                  # 二级目录交互入口：最快源(lzi ~0.46s)给够首屏量即提前
+                                  # 返回；同时给足硬超时（覆盖并发争用下的慢返回），
+                                  # 避免本来能命中的快源搜索被短超时截断而返回空。
+                                  early_min_wait=_FOLDER_EARLY_WAIT,
+                                  early_min_results=_FOLDER_EARLY_RESULTS),
+                timeout=_FOLDER_FAST_HARD)
+            want_year = str((chart_cache.get_guid(guid) or {}).get("year") or
+                            (catalog.find_brief_by_guid(guid) or {}).get("year") or "")
+            # 复用榜单匹配规则：允许国语/粤语等语言后缀，拒绝任意包含误绑。
+            pick = _pick_folder_brief(title, want_year, briefs)
+            # 快源未命中：在总预算的剩余窗口内立即补一次全源（含慢源），充分等待其返回，
+            # 避免短窗口提前放弃导致客户端先渲染“无数据”再自动重拉。超时才交给后台兜底。
+            if pick is None:
+                _left = _deadline - time.monotonic()
+                if _left > 0.3:
+                    try:
+                        full = await asyncio.wait_for(
+                            _aggregate_briefs(title, 12, timeout=_left),
+                            timeout=_left)
+                        pick = _pick_folder_brief(title, want_year, full)
+                    except Exception:
+                        _log.debug("_start_folder_bind full search failed",
+                                   exc_info=True)
+                        pick = None
+            if pick is not None:
+                bound = dict(pick)
+                bound["guid"] = guid
+                store.remember_merged([bound])
+                if not fut.done():
+                    fut.set_result(bound)
+            else:
+                # 实时预算耗尽仍无：后台静默跑全源（含慢源），命中后落库，
+                # 用户重进/客户端自动重拉即有，去重避免压源站。
+                _schedule_folder_full_fallback(guid, title, want_year)
+        except Exception:
+            _log.debug("_start_folder_bind failed", exc_info=True)
+            pass
+        finally:
+            _FOLDER_BIND_FUT.pop(guid, None)
+            if not fut.done():
+                fut.set_result(None)
+
+    asyncio.create_task(_work())
+    return fut
+
+
+def prefetch_folder_binding(guid: str) -> None:
+    """非阻塞预绑定：folder 详情请求时提前触发，利用详情→列表的时间窗完成搜索。
+
+    已绑定/已在途则直接复用，不重复扇出；调用方无需 await。
+    """
+    try:
+        if store.get_title_by_guid(guid):
+            return
+        _start_folder_bind(guid)
+    except Exception:
+        _log.debug("prefetch_folder_binding failed", exc_info=True)
+        pass
+
+
+async def ensure_folder_bound(guid: str) -> dict | None:
+    """二级线路墙按需绑定：保证该 guid 在 store 有可播放线路。
+
+    已绑定直接返回；否则按片名快速全网搜索（快源软超时，与二级目录等待窗口匹配），
+    命中后把结果身份换成该 guid 落库。单飞去重，第二次进入复用在途/已落库结果。
+    仅用同名同年匹配，绝不放宽到错片。等待预算读配置 folder_bind_wait
+    （0 = 不等待、只后台绑定）。
+    """
+    existing = store.get_title_by_guid(guid)
+    if existing:
+        return existing
+    fut = _start_folder_bind(guid)
+    wait = _folder_bind_wait()
+    if wait > 0:
+        try:
+            await asyncio.wait_for(asyncio.shield(fut), timeout=wait)
+        except asyncio.TimeoutError:
+            # 预算耗尽是预期路径：后台绑定继续跑，用户重进/重试即有。
+            pass
+    return store.get_title_by_guid(guid)
+
+
 def chart_guid_by_media(mg: str) -> str:
     """识别 media_guid 是否属于榜单/热门片（包括秒进时尚未绑定完成的）。"""
     og = _PENDING_MEDIA_CHART.get(mg) or store.online_guid_by_media(mg)
@@ -1245,7 +1463,9 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
                             timeout: float | None = None,
                             *, include_t4: bool = True,
                             refresh: bool = False,
-                            visible=None, viewer_key: str = "") -> list[dict]:
+                            visible=None, viewer_key: str = "",
+                            early_min_wait: float | None = None,
+                            early_min_results: int | None = None) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
 
     结果进绑定聚合缓存池（按 片名·fast·t4 区分），TTL 内同片名的多次绑定/回源/
@@ -1279,7 +1499,8 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     try:
         result = await __aggregate_briefs_inner(
             keyword, maxn, fast_only, timeout, include_t4=include_t4,
-            visible=visible)
+            visible=visible, early_min_wait=early_min_wait,
+            early_min_results=early_min_results)
         # remember_merged 幂等：命中缓存路径也已入库，这里再确保 store 有这些 brief
         try:
             store.remember_merged(result)
@@ -1306,7 +1527,9 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                                    fast_only: bool = False,
                                    timeout: float | None = None,
                                    *, include_t4: bool = True,
-                                   visible=None) -> list[dict]:
+                                   visible=None,
+                                   early_min_wait: float | None = None,
+                                   early_min_results: int | None = None) -> list[dict]:
     """聚合搜索所有启用源 → 跨源合并 → 去噪/去无直链 → brief 列表（已入库）。
     fast_only=True 时只查秒回的标准 CMS 直链源（跳过加固/drpy 等慢源），供播放
     失败时快速回源，避免被 redroid 慢源拖到网关超时。
@@ -1332,7 +1555,9 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     # search_all 内又会把 None 还原成 timeout。）
     budget = timeout if timeout is not None else _AGGREGATE_SEARCH_BUDGET
     titles = await providers.search_all(keyword, sources, budget=budget,
-                                        visible=visible)
+                                        visible=visible,
+                                        early_min_wait=early_min_wait,
+                                        early_min_results=early_min_results)
     if maxn is None:
         maxn = int(config.get().get("max_per_keyword", 12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
@@ -3181,21 +3406,35 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
     文件夹打开必须快速返回：已有绑定立即出线路；未绑定只给极短等待，后台单飞继续
     绑定，下一次轮询/重进即可显示完整线路，避免二级菜单卡 8 秒。
     """
+    # 强制刷新指令（上游 beta.2）：body 带 refresh=1/force=1 时清除该 guid 的
+    # 绑定缓存与在途任务，重新触发全网搜索绑定。用于「刷出空白/加载中」时手动
+    # 强制刷新出资源。
+    _force = str(body.get("refresh") or body.get("force") or "") in ("1", "true", "yes")
+    if _force:
+        try:
+            store._titles.pop(parent, None)
+            store._orig.pop(parent, None)
+            store._rebuild_index()
+            _FOLDER_BIND_FUT.pop(parent, None)
+        except Exception:  # noqa: BLE001
+            _log.debug("_vod_line_folder force refresh failed", exc_info=True)
+            pass
     brief = store.get_title_by_guid(parent)
-    if not brief and chart_cache.is_chart_guid(parent):
-        # 客户端不会在空目录上自动轮询，因此冷片首次进入必须在本次请求内等待
-        # 绑定完成。已绑定影片在函数开头即可直接出线路，仍保持毫秒级二级菜单。
-        start_resolve_chart(parent)
-        fut = _chart_resolving.get(parent)
-        if fut is not None:
-            try:
-                await asyncio.wait_for(asyncio.shield(fut), timeout=8.0)
-            except Exception:
-                _log.debug("_vod_line_folder failed", exc_info=True)
-                pass
-        brief = store.get_title_by_guid(parent)
-    title = (brief or chart_cache.get_guid(parent) or {}).get("title", "")
     if not brief:
+        # 冷片（榜单 chart 或海量分类 catalog，均可能尚未落库）：进入二级目录即
+        # 主动按片名快速搜索并在本次请求内短等待绑定，命中后直接列出可播线路，
+        # 无需用户手动下拉刷新。单飞去重，第二次进入复用在途/已落库结果。
+        # 等待预算读配置 folder_bind_wait（默认 8.0 秒）。
+        brief = await ensure_folder_bound(parent)
+        if not brief:
+            # fork 无上游的 _CHART_FAIL_LEVEL：只清短冷却，避免重进被冷却挡住持续空目录。
+            _CHART_FAILED_TS.pop(parent, None)
+    title = (brief or chart_cache.get_guid(parent) or
+             catalog.find_brief_by_guid(parent) or {}).get("title", "")
+    if not brief:
+        # 未命中：返回空列表让客户端继续显示「加载中」并自动重试；后台绑定
+        # （单飞 + 全源兜底）命中后，客户端重试/重进即出真实线路。
+        # 不塞占位卡——can_play=None 会被 TV 严格模型解析为「无数据/加载失败」。
         return JSONResponse({"code": 0, "msg": "", "data": {
             "mdb_name": title or "线路", "mdb_category": "Movie", "top_dir": "",
             "dir": parent, "total": 0, "list": [], "jump_list": None}})
@@ -3836,6 +4075,13 @@ async def item_detail(guid: str, request: Request):
         if line_detail is not None:
             return line_detail
     if _parse_line_folder_guid(guid):
+        # 详情请求与安卓的 item/list 几乎并发（间隔仅 ~0.3s）。这里只【非阻塞触发】
+        # 绑定任务（经 _FOLDER_BIND_FUT 单飞），绝不 await——否则详情响应被搜索拖慢
+        # 0.9~5s，而安卓要等详情返回才渲染页面，用户会先看到整页“无数据”。
+        # 详情秒回渲染页面骨架，真正的线路数据由并发的 item/list 在等待窗口内等出。
+        _folder_og = _parse_line_folder_guid(guid)
+        if _folder_og and not store.get_title_by_guid(_folder_og):
+            prefetch_folder_binding(_folder_og)
         folder_detail = _vod_folder_detail(guid, _client_of(request))
         if folder_detail is not None:
             return folder_detail
