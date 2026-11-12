@@ -22,6 +22,35 @@ import httpx
 
 _log = logging.getLogger("fnmedia")
 
+
+def _env_float(name: str, default: float) -> float:
+    """模块级 env 浮点解析：非法值记 warning 后用默认值，绝不让 import 失败。"""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        _log.warning("guard: invalid %s=%r, using default %s", name, raw, default)
+        return default
+
+
+def _env_int(name: str, default: int, minimum: int | None = None) -> int:
+    """模块级 env 整数解析：非法值记 warning 后用默认值；可 clamp 下限。"""
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            _log.warning("guard: invalid %s=%r, using default %s",
+                         name, raw, default)
+            value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    return value
+
 _ASSET = Path(__file__).resolve().parent / "assets" / "guard"
 _SITES = _ASSET / "sites.json"
 # 用户通过“导入 TVBox 配置”加入的加固源（私有、gitignore，不随公开构建分发）。
@@ -34,13 +63,14 @@ MAX_JAR_BYTES = 60 * 1024 * 1024
 DEVICE_JAR = "/data/data/com.fnmedia.catvodbridge/files/jars/guard.jar"
 RUNNER_URL = os.environ.get("FNM_GUARD_RUNNER_URL",
                             os.environ.get("FNM_RUNNER_URL", "http://127.0.0.1:9100")).rstrip("/")
-TIMEOUT = float(os.environ.get("FNM_GUARD_TIMEOUT", "150"))
+TIMEOUT = _env_float("FNM_GUARD_TIMEOUT", 150.0)
 
 _lock = threading.Lock()
 # redroid 以“多实例池”提供并发：runner（android_pool）对每台设备各持一把锁保证
 # 设备内严格串行，设备之间真并发。代理侧只做有界并发（默认 2，可按池大小自动放宽），
 # 避免极端扇出在池前堆积；不再像单实例时代那样全局串行。
-_bridge_sem = threading.BoundedSemaphore(int(os.environ.get("FNM_GUARD_CONCURRENCY", "2")))
+_bridge_sem = threading.BoundedSemaphore(
+    _env_int("FNM_GUARD_CONCURRENCY", 2, minimum=1))
 # 仅用于串行化“看门狗重启桥 app”这一动作，不包裹正常调用。
 _bridge_restart_lock = threading.Lock()
 _sites: dict[str, dict] | None = None
@@ -861,7 +891,7 @@ def parse_tvbox(text_or_obj) -> dict:
     count: dict[str, int] = {}
     for s in obj.get("sites", []) or []:
         api = str(s.get("api", ""))
-        if s.get("type") != 3 or not (api.startswith("csp_") and api.endswith("Guard")):
+        if str(s.get("type")) != "3" or not (api.startswith("csp_") and api.endswith("Guard")):
             skipped += 1
             continue
         spider = api[4:]                 # e.g. BttwooGuard / AppSxGuard

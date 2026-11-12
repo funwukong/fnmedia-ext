@@ -1236,7 +1236,7 @@ async def _dispatch_search(client, source, keyword):
     # >>> PRIVATE:GUARD
     if features.GUARD and source.get("guard"):
         return await guard_search_source(client, source, keyword)
-    if source.get("spider_src"):
+    if features.GUARD and source.get("spider_src"):
         return await spider_search_source(client, source, keyword)
     # <<< PRIVATE:GUARD
     # >>> PRIVATE:DDUO
