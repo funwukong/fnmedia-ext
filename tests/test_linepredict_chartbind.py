@@ -1,8 +1,10 @@
 """上游 v0.2.68/69 移植：linepredict + chartbind。
 
 覆盖：模块行为、配置默认值、管理端点注册、chartbind 持久化往返、
-以及冻结清单——竞速 first-success wins / 吞吐打分 / 最快线记忆三项未变，
-预测线只作竞速优先种子，持久化绑定只作起播种子。
+以及竞速 / 吞吐打分 / 最快线记忆三项未变：竞速 first-success wins、
+吞吐打分第一排序键、最快线记忆只由竞速胜者写；竞速内的预测线仍只作
+优先种子（可信预测的零竞速直出在 _ensure_playable 入口先于竞速发生，
+见 tests/test_linepredict_zero_race.py），持久化绑定只作起播种子。
 """
 import asyncio
 import json
@@ -207,7 +209,10 @@ def test_restore_chart_bindings(tmp_path, monkeypatch):
     assert seen and seen[0]["guid"] == "abc123"
 
 
-# ---------------- 冻结清单：竞速 / 吞吐打分 / 最快线记忆 ----------------
+# ---------------- 竞速 / 吞吐打分 / 最快线记忆（零竞速解冻后仍成立的部分） ----------------
+# 零竞速解冻（第 2 项）只改 _ensure_playable 的自动起播入口：可信预测线直出、
+# 跳过竞速；以下三项不变——竞速 first-success wins、吞吐打分第一排序键、
+# 最快线记忆只由竞速胜者写；竞速内的预测线仍只作 tiebreak。
 
 def test_prediction_never_writes_fastest_memory():
     """预测结果不能覆盖/改写最快线记忆：只记 linepredict，_LINE_FAST 不动。"""
@@ -258,12 +263,16 @@ def test_race_candidates_prediction_only_tiebreak(monkeypatch):
     assert order.index("预测线") < order.index("其他线")
 
 
-def test_ensure_playable_still_races(monkeypatch):
-    """起播仍跑竞速：即使预测缓存里有线，_ensure_playable 也必须调竞速，
-    且竞速胜者（而非预测线）决定播放线路。"""
+def test_ensure_playable_races_when_predicted_line_not_a_candidate(monkeypatch):
+    """起播回退竞速：预测缓存里有线、但该线不是本集候选时，_ensure_playable
+    必须调竞速，且竞速胜者（而非预测线）决定播放线路。
+    （可信记忆直出的正向用例见 tests/test_linepredict_zero_race.py。）"""
     picked = {"online_guid": "og", "index": 0, "line": "原线",
               "title": "测试片"}
     linepredict.remember("og|0", "预测线", 0.2)
+    monkeypatch.setattr(appmod, "_episode_candidates",
+                        lambda p: [{"line": "其他线",
+                                    "url": "http://x/o.m3u8"}])
     called = {}
 
     async def _fake_race(p, request):

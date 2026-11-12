@@ -778,6 +778,7 @@ async def ext_set_config(request: Request):
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
         "line_fastest_prefer", "line_autofail",
+        "linepredict_zero_race",  # 可信预测零竞速直出开关（默认开）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
@@ -821,6 +822,8 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "linepredict_zero_race" in patch:
+        patch["linepredict_zero_race"] = bool(patch["linepredict_zero_race"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}
@@ -2020,8 +2023,8 @@ async def source_health_reset(request: Request):
 
 
 # ---------------- 本片线路预测（linepredict）：海报预热→本片最快线→秒播 ----------------
-# 上游 v0.2.68/69 移植。冻结适配：reset 只清预测缓存，不动 _LINE_FAST（turbo 最快线
-# 记忆）；状态里的 chart_bindings 为 chartbind 持久化绑定计数。
+# 上游 v0.2.68/69 移植。reset 只清预测缓存，不动竞速最快线记忆；
+# 状态里的 chart_bindings 为 chartbind 持久化绑定计数。
 @admin_router.get("/v/api/ext/linepredict")
 async def linepredict_status():
     """返回当前已预测的本片最快线数与在途预热数（调试/管理页用）。"""
@@ -2036,6 +2039,7 @@ async def linepredict_status():
             "enabled": bool(config.get().get("linepredict_enabled", True)),
             "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
             "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
+            "zero_race": bool(config.get().get("linepredict_zero_race", True)),
             "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
             "chart_bindings": chartbind.bind_store.status()}}})
 
@@ -2058,6 +2062,9 @@ async def linepredict_config(request: Request):
             patch["linepredict_ttl_min"] = min(120, max(5, int(body["ttl_min"])))
         except (TypeError, ValueError):
             pass
+    if "zero_race" in body:
+        # 零竞速直出开关：关时恢复旧行为（预测线只作竞速候选排序种子）。
+        patch["linepredict_zero_race"] = bool(body["zero_race"])
     if patch:
         config.save(patch)
     return JSONResponse({"code": 0, "data": patch})

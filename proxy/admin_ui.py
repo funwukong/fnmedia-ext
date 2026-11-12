@@ -789,7 +789,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
           <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
         <label class="switch-row"><input type="checkbox" id="linePredict"/>
-          <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，起播优先用已探到的最快线（只作竞速种子，不固定线路）</span></span></label>
+          <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，记下本片最快线；可信时起播直接用该线、跳过竞速</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="linePredictZeroRace"/>
+          <span>可信预测零竞速直出<span class="sub">记忆新鲜且够快时点播放直接用预测线、跳过竞速；关时恢复全量竞速（预测线只作排序种子）</span></span></label>
         <label class="field" style="max-width:260px"><span>预测线路数（1-3）</span>
           <input type="number" id="linePredictMax" min="1" max="3" style="width:100%"/></label>
         <label class="field" style="max-width:260px"><span>预测缓存有效期（分钟，5-120）</span>
@@ -2338,9 +2340,10 @@ async function saveLines(){
 async function saveLinePredict(){
   const body={enabled:$("linePredict").checked,
     max_lines:Math.max(1,Math.min(3,parseInt($("linePredictMax").value)||3)),
-    ttl_min:Math.max(5,Math.min(120,parseInt($("linePredictTtl").value)||30))};
+    ttl_min:Math.max(5,Math.min(120,parseInt($("linePredictTtl").value)||30)),
+    zero_race:$("linePredictZeroRace").checked};
   const r=await jpost("/v/api/ext/linepredict/config",body);
-  if(r.code===0){toast("预测设置已保存");Object.assign(CFG,{linepredict_enabled:body.enabled,linepredict_max_lines:body.max_lines,linepredict_ttl_min:body.ttl_min});}
+  if(r.code===0){toast("预测设置已保存");Object.assign(CFG,{linepredict_enabled:body.enabled,linepredict_max_lines:body.max_lines,linepredict_ttl_min:body.ttl_min,linepredict_zero_race:body.zero_race});}
   else toast("保存失败 "+(r.msg||""),"fail");
 }
 async function resetLinePredict(){
@@ -2689,6 +2692,7 @@ async function init(){
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
   $("linePredict").checked=CFG.linepredict_enabled!==false;
+  $("linePredictZeroRace").checked=CFG.linepredict_zero_race!==false;
   $("linePredictMax").value=CFG.linepredict_max_lines||3;
   $("linePredictTtl").value=CFG.linepredict_ttl_min||30;
   renderKw();renderSources();initSrcProxy();loadCacheStatus();

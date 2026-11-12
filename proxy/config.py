@@ -231,6 +231,9 @@ DEFAULTS = {
     "linepredict_max_lines": 3,
     # 预热结果记忆时长（分钟）
     "linepredict_ttl_min": 30,
+    # 可信预测线零竞速直出（默认开）：记忆新鲜且够快时点播放直接用该线、
+    # 跳过竞速；关时恢复旧行为（预测线只作竞速候选排序种子）。
+    "linepredict_zero_race": True,
     # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
     # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
     "prewarm_mode": "realtime",
