@@ -62,6 +62,15 @@ _BUILD_BATCH = 4          # 后台构建每轮并发展开的目录数
 _BUILD_PACE = 0.35        # 每批目录之间的节流秒，避免高频 fs/list
 _QUEUE_SAVE_EVERY = 5     # 每隔几轮持久化一次待展开队列
 _FILE_CACHE_TTL = 300.0   # 播放时懒取的目录文件列表缓存
+_XLIB_CACHE_MAX = 2000  # xlib 各缓存上限：_doh/_ip/_file/_raw/_raw_denied 均只存
+# 可再生的派生内容（DNS 结果、直链、文件列表、风控冷却戳），超限删最旧
+
+
+def _bounded_put(d: dict, key, value, cap: int = _XLIB_CACHE_MAX) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap（分摊 O(1)，见 hls_race 同名函数）。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
 # 小雅 STRM 播放：冷文件首次播放时容器边“转存到用户网盘”边生成直链，/d 代理会
 # 同步阻塞到转存完成（常见 6~25s，4K 原盘偶发更久）。这里给足等待，避免客户端超时。
 _TRANSFER_TIMEOUT = 75.0
@@ -104,7 +113,7 @@ def _real_ips(host: str) -> list[str]:
         _log.debug("_real_ips failed: host=%s", host, exc_info=True)
         ips = []
     if ips:
-        _doh_cache[host] = (now, ips)
+        _bounded_put(_doh_cache, host, (now, ips))
     return ips
 
 
@@ -124,7 +133,7 @@ def _patched_media_client() -> httpx.AsyncClient:
                 if ip is None:
                     ips = _real_ips(host)
                     ip = ips[0] if ips else ""
-                    _ip_cache[host] = ip
+                    _bounded_put(_ip_cache, host, ip)
                 if ip:
                     host = ip
             return await super().connect_tcp(
@@ -485,7 +494,7 @@ class XiaoyaLibrary:
                 url = await self._signed_via_fsget(path)
             if not url:
                 raise RuntimeError("小雅取直链失败: " + path[-80:])
-            self._raw_cache[path] = (time.time(), url)
+            _bounded_put(self._raw_cache, path, (time.time(), url))
             fut.set_result(url)
             return url
         except Exception as exc:
@@ -499,7 +508,7 @@ class XiaoyaLibrary:
         return time.time() < self._raw_denied.get(path, 0.0)
 
     def mark_raw_denied(self, path: str) -> None:
-        self._raw_denied[path] = time.time() + _RAW_DENIED_TTL
+        _bounded_put(self._raw_denied, path, time.time() + _RAW_DENIED_TTL)
         self._raw_cache.pop(path, None)
 
     async def open_media(self, path: str, range_header: Optional[str] = None):
@@ -563,7 +572,7 @@ class XiaoyaLibrary:
                     sv, _ = await ls_files(sd)
                     files.extend(sv)
         files = sorted(set(files), key=lambda f: _natural_key(os.path.basename(f)))
-        self._file_cache[sid] = (time.time(), files)
+        _bounded_put(self._file_cache, sid, (time.time(), files))
         return files
 
     # ---------- 海报后台补全 ----------

@@ -31,11 +31,24 @@ _log = get_logger("chartbind")
 
 STATE = Path(__file__).resolve().parent.parent / "state" / "chart_bindings.json"
 
-# 绑定保鲜期：超过后视为“需懒校验”，恢复进内存但不强制信任，播放失败会重搜。
+# 绑定保鲜期：超过后 get() 返回 None（由后台预热重搜，不再当作起播种子
+# 恢复进内存）；is_fresh()/status() 仍可区分新鲜/过期条目。
 BIND_TTL = 6 * 3600
 # 单文件条数上限（防止无限增长；超出丢最旧）
 _MAX_ENTRIES = 2000
+# 落盘文件字节上限：2000 条重 brief 最坏 224MB；32MB 可容约 280 条重 brief
+# 或数千条常规 brief。绑定只是起播种子，可重新 resolve 生成，超限删最旧。
+_MAX_BYTES = 32 * 1024 * 1024
 _FLUSH_DEBOUNCE = 5.0
+
+
+def _entry_bytes(rec: dict) -> int:
+    """一条绑定记录的落盘字节估算（与 _persist_locked 同一序列化口径）。"""
+    try:
+        return len(json.dumps(rec, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return 0
 
 
 class ChartBindStore:
@@ -43,6 +56,7 @@ class ChartBindStore:
         self._lock = threading.RLock()
         # guid -> {"ts": float, "brief": dict}
         self._data: dict[str, dict] = {}
+        self._bytes = 0  # 当前落盘字节估算（运行值）
         self._dirty = False
         self._flush_at = 0.0
         self._flusher: threading.Timer | None = None
@@ -62,6 +76,20 @@ class ChartBindStore:
             except Exception:
                 _log.debug("load failed", exc_info=True)
                 self._data = {}
+            self._bytes = sum(_entry_bytes(v)
+                              for v in self._data.values())
+            # 旧文件超限：删最旧至上限内，并把裁剪结果落盘
+            trimmed = False
+            while (len(self._data) > _MAX_ENTRIES
+                   or self._bytes > _MAX_BYTES) \
+                    and len(self._data) > 1:
+                _old_k, _old_v = next(iter(self._data.items()))
+                self._data.pop(_old_k, None)
+                self._bytes -= _entry_bytes(_old_v)
+                trimmed = True
+            if trimmed:
+                self._dirty = True
+                self._schedule_flush_locked()
 
     def _persist_locked(self) -> None:
         try:
@@ -112,18 +140,35 @@ class ChartBindStore:
         if not guid or not isinstance(brief, dict):
             return
         with self._lock:
-            self._data[guid] = {"ts": time.time(), "brief": brief}
-            # 超容量丢最旧（dict 保序）
-            if len(self._data) > _MAX_ENTRIES:
-                for old in list(self._data)[:len(self._data) - _MAX_ENTRIES]:
-                    self._data.pop(old, None)
+            old = self._data.get(guid)
+            if old is not None:
+                self._bytes -= _entry_bytes(old)
+            rec = {"ts": time.time(), "brief": brief}
+            self._data[guid] = rec
+            self._bytes += _entry_bytes(rec)
+            # 超容量丢最旧（dict 保序）：条数 2000 + 字节 32MB 双上限；
+            # 单条本身超限时保留该条，不清空整表
+            while (len(self._data) > _MAX_ENTRIES
+                   or self._bytes > _MAX_BYTES) \
+                    and len(self._data) > 1:
+                _old_k, _old_v = next(iter(self._data.items()))
+                self._data.pop(_old_k, None)
+                self._bytes -= _entry_bytes(_old_v)
             self._schedule_flush_locked()
 
     def get(self, guid: str) -> dict | None:
-        """返回绑定 brief；不存在返回 None。是否过期由 is_fresh 区分。"""
+        """返回绑定 brief；不存在或已过期返回 None（过期条目同时从内存
+        删掉并安排落盘同步；是否新鲜仍可由 is_fresh/status 区分）。"""
         with self._lock:
             rec = self._data.get(guid)
-            return dict(rec["brief"]) if rec else None
+            if not rec:
+                return None
+            if (time.time() - float(rec.get("ts") or 0)) >= BIND_TTL:
+                self._data.pop(guid, None)
+                self._bytes = max(0, self._bytes - _entry_bytes(rec))
+                self._schedule_flush_locked()
+                return None
+            return dict(rec["brief"])
 
     def is_fresh(self, guid: str) -> bool:
         with self._lock:
@@ -142,12 +187,15 @@ class ChartBindStore:
 
     def forget(self, guid: str) -> None:
         with self._lock:
-            if self._data.pop(guid, None) is not None:
+            rec = self._data.pop(guid, None)
+            if rec is not None:
+                self._bytes = max(0, self._bytes - _entry_bytes(rec))
                 self._schedule_flush_locked()
 
     def clear(self) -> None:
         with self._lock:
             self._data.clear()
+            self._bytes = 0
             self._dirty = True
             self._persist_locked()
             self._dirty = False

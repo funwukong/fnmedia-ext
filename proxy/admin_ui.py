@@ -796,6 +796,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span>手动选线直接出流<span class="sub">手动选定某条线路后直接播放，不再先探活；已知坏线仍自动换到可用线路，自动起播不受影响</span></span></label>
         <label class="switch-row"><input type="checkbox" id="midPlaybackSwitch"/>
           <span>播放中静默换线<span class="sub">自动起播的线路在播放中变慢时，按已实测的分片耗时/吞吐静默切到同集更快的线，不打断播放；手动选线不受影响，30 秒内最多换一次</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="skipIntroEnabled"/>
+          <span>跳过片头<span class="sub">剧集点播时从播放清单剪掉片头分片，从片头后开始播；只对剧集生效，电影/直播不剪</span></span></label>
+        <label class="field" style="max-width:260px"><span>片头跳过（秒，0-300）</span>
+          <input type="number" id="skipIntroSeconds" min="0" max="300" style="width:100%"/></label>
+        <label class="switch-row"><input type="checkbox" id="skipOutroEnabled"/>
+          <span>跳过片尾<span class="sub">剧集点播时从播放清单剪掉片尾分片；片长小于片头+片尾时不剪</span></span></label>
+        <label class="field" style="max-width:260px"><span>片尾跳过（秒，0-300）</span>
+          <input type="number" id="skipOutroSeconds" min="0" max="300" style="width:100%"/></label>
         <label class="switch-row"><input type="checkbox" id="linePredict"/>
           <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，记下本片最快线；可信时起播直接用该线、跳过竞速</span></span></label>
         <label class="switch-row"><input type="checkbox" id="browseProbe"/>
@@ -2346,6 +2354,10 @@ async function saveLines(){
     line_autofail:$("lineAutofail").checked,
     fixed_line_direct:$("fixedLineDirect").checked,
     mid_playback_switch:$("midPlaybackSwitch").checked,
+    skip_intro_enabled:$("skipIntroEnabled").checked,
+    skip_intro_seconds:Math.max(0,Math.min(300,parseInt($("skipIntroSeconds").value)||0)),
+    skip_outro_enabled:$("skipOutroEnabled").checked,
+    skip_outro_seconds:Math.max(0,Math.min(300,parseInt($("skipOutroSeconds").value)||0)),
     poster_speed_badge:$("posterSpeedBadge").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
@@ -2707,6 +2719,10 @@ async function init(){
   $("lineAutofail").checked=CFG.line_autofail!==false;
   $("fixedLineDirect").checked=CFG.fixed_line_direct!==false;
   $("midPlaybackSwitch").checked=CFG.mid_playback_switch!==false;
+  $("skipIntroEnabled").checked=CFG.skip_intro_enabled===true;
+  $("skipIntroSeconds").value=CFG.skip_intro_seconds||0;
+  $("skipOutroEnabled").checked=CFG.skip_outro_enabled===true;
+  $("skipOutroSeconds").value=CFG.skip_outro_seconds||0;
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
   $("folderBindWait").value=(CFG.folder_bind_wait??8);

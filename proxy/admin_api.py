@@ -782,6 +782,8 @@ async def ext_set_config(request: Request):
         "mid_playback_switch",  # 播放中静默换线开关（默认开）
         "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
         "poster_speed_badge",  # 海报速度角标开关（默认开）
+        "skip_intro_enabled", "skip_intro_seconds",  # 跳过片头（默认关/0）
+        "skip_outro_enabled", "skip_outro_seconds",  # 跳过片尾（默认关/0）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "folder_bind_wait",  # 二级目录冷片绑定等待预算（秒），默认 8.0，夹取 [0, 25]
         "prewarm_mode",
@@ -838,6 +840,16 @@ async def ext_set_config(request: Request):
         patch["linepredict_zero_race"] = bool(patch["linepredict_zero_race"])
     if "browse_probe" in patch:
         patch["browse_probe"] = bool(patch["browse_probe"])
+    if "skip_intro_enabled" in patch:
+        patch["skip_intro_enabled"] = bool(patch["skip_intro_enabled"])
+    if "skip_outro_enabled" in patch:
+        patch["skip_outro_enabled"] = bool(patch["skip_outro_enabled"])
+    if "skip_intro_seconds" in patch:
+        patch["skip_intro_seconds"] = cfgmod.clamp_skip_seconds(
+            patch["skip_intro_seconds"])
+    if "skip_outro_seconds" in patch:
+        patch["skip_outro_seconds"] = cfgmod.clamp_skip_seconds(
+            patch["skip_outro_seconds"])
     sources_changed = False
     if "sources" in body and isinstance(body["sources"], list):
         cur = {s["id"]: s for s in config.all_sources()}

@@ -125,12 +125,16 @@ def _cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
     now = time.time()
     with _dns_lock:
         hit = _dns_cache.get(key)
-        if hit is not None and now - hit[0] < _DNS_TTL:
-            return hit[1]
+        if hit is not None:
+            if now - hit[0] < _DNS_TTL:
+                return hit[1]
+            _dns_cache.pop(key, None)  # 过期命中立即删
     res = _real_getaddrinfo(host, port, family, type, proto, flags)
     with _dns_lock:
         if len(_dns_cache) >= _DNS_MAX:
-            _dns_cache.clear()
+            # 满了删最旧一半而非全清：避免全清后所有域名同时冷解析抖动
+            for _old in list(_dns_cache)[:len(_dns_cache) // 2]:
+                _dns_cache.pop(_old, None)
         _dns_cache[key] = (now, res)
     return res
 
@@ -157,6 +161,71 @@ _AGG_CACHE: dict[str, tuple[float, list]] = {}
 _AGG_INFLIGHT: dict[str, asyncio.Future] = {}
 AGG_CACHE_TTL = 180
 _AGG_CACHE_MAX = 800
+_AGG_CACHE_MAX_BYTES = 128 * 1024 * 1024  # 128MB：800 条 × 10 剧集重 brief
+# 最坏 897MB；字节上限兜底。128MB 可容数百次典型搜索（重 brief 约 112KB/条
+# 为最坏估算，常规 brief 远小于此）；TTL 仅 180 秒，条目可重新聚合生成。
+_AGG_BYTES: dict[str, int] = {}  # cache_key -> 该条字节估算
+_AGG_BYTES_TOTAL = 0             # 当前总量（运行值）
+
+
+def _agg_entry_bytes(result) -> int:
+    """聚合结果的字节估算：字符串按长度、dict 固定 64B、list/tuple 固定 16B、
+    其余标量 16B，迭代遍历不递归。估算只用于淘汰决策，不要求精确。"""
+    total = 0
+    stack = [result]
+    while stack:
+        o = stack.pop()
+        if isinstance(o, str):
+            total += len(o)
+        elif isinstance(o, dict):
+            total += 64
+            stack.extend(o.keys())
+            stack.extend(o.values())
+        elif isinstance(o, (list, tuple)):
+            total += 16
+            stack.extend(o)
+        else:
+            total += 16
+    return total
+
+
+def _agg_cache_drop(cache_key: str) -> None:
+    """删一条聚合缓存，并同步扣减字节记账。"""
+    global _AGG_BYTES_TOTAL
+    if _AGG_CACHE.pop(cache_key, None) is not None:
+        _AGG_BYTES_TOTAL = max(0, _AGG_BYTES_TOTAL - _AGG_BYTES.pop(cache_key, 0))
+
+
+def _rebuild_agg_bytes() -> None:
+    """外部直接改动 _AGG_CACHE（如管理端 clear）后重建字节记账。"""
+    global _AGG_BYTES_TOTAL
+    _AGG_BYTES.clear()
+    total = 0
+    for k, (_ts, val) in _AGG_CACHE.items():
+        s = _agg_entry_bytes(val)
+        _AGG_BYTES[k] = s
+        total += s
+    _AGG_BYTES_TOTAL = total
+
+
+def _agg_cache_put(cache_key: str, result: list) -> None:
+    """有界写聚合缓存：条数 800 + 字节 128MB 双上限，真 LRU。
+
+    dict 按插入序：新条天然在队尾；超限从队首删最旧。单条超限时保留该条。
+    淘汰是分摊 O(1)：每条目最多被 pop 一次，写路径不做全表排序/扫描。"""
+    global _AGG_BYTES_TOTAL
+    _AGG_CACHE[cache_key] = (time.time(), result)
+    if cache_key in _AGG_BYTES:
+        _AGG_BYTES_TOTAL -= _AGG_BYTES[cache_key]
+    s = _agg_entry_bytes(result)
+    _AGG_BYTES[cache_key] = s
+    _AGG_BYTES_TOTAL += s
+    if len(_AGG_BYTES) != len(_AGG_CACHE):
+        _rebuild_agg_bytes()  # 外部直接改过缓存：重建记账（含本条）
+    while (len(_AGG_CACHE) > _AGG_CACHE_MAX
+           or _AGG_BYTES_TOTAL > _AGG_CACHE_MAX_BYTES) \
+            and len(_AGG_CACHE) > 1:
+        _agg_cache_drop(next(iter(_AGG_CACHE)))
 # 旧名字保留为同一对象的别名（不产生第二层存储）：既有测试、管理端点
 # （缓存计数/清空）仍引用 _search_cache / _search_inflight。
 _search_cache = _AGG_CACHE
@@ -436,8 +505,8 @@ def _persist_chart_binding(guid: str, bound: dict) -> None:
 def _restore_chart_bindings() -> int:
     """方案B：启动时从磁盘恢复榜单绑定到 store（返回恢复条数）。
 
-    过期绑定也恢复进内存（避免冷点），但播放链若发现死链仍会重新 resolve；
-    同时后台预热会对失效片刷新。
+    只恢复新鲜绑定（chartbind.get() 对过期返回 None）；失效片由后台预热
+    重新 resolve 刷新，不再把过期绑定当作起播种子恢复进内存。
     """
     try:
         if not prewarm_persist_mode():
@@ -1494,8 +1563,12 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         cache_key += f"\x00{viewer_key}"
     loop = asyncio.get_event_loop()
     _hit = None if refresh else _AGG_CACHE.get(cache_key)
-    if _hit and (time.time() - _hit[0]) < AGG_CACHE_TTL:
-        return [dict(b) for b in _hit[1]]
+    if _hit:
+        if (time.time() - _hit[0]) < AGG_CACHE_TTL:
+            # 真 LRU：命中即移到队尾（pop 后重插，O(1)），下次超限先淘汰别人
+            _AGG_CACHE[cache_key] = _AGG_CACHE.pop(cache_key)
+            return [dict(b) for b in _hit[1]]
+        _agg_cache_drop(cache_key)  # 过期命中立即删，不再占名额/字节
     _fut = None if refresh else _AGG_INFLIGHT.get(cache_key)
     if _fut is not None and not _fut.done():
         try:
@@ -1516,10 +1589,7 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         except Exception:
             _log.debug("_aggregate_briefs failed", exc_info=True)
             pass
-        _AGG_CACHE[cache_key] = (time.time(), result)
-        if len(_AGG_CACHE) > _AGG_CACHE_MAX:
-            for _old in list(_AGG_CACHE)[:_AGG_CACHE_MAX // 2]:
-                _AGG_CACHE.pop(_old, None)
+        _agg_cache_put(cache_key, result)
         if not fut.done():
             fut.set_result(result)
         return [dict(b) for b in result]
@@ -4666,6 +4736,7 @@ async def _stream_list_impl(guid: str, request: Request):
         vs = sl.get("video_streams") or []
         if vs:
             dur = int(vs[0].get("duration") or 0)
+            dur_from_probe = False
             probe_target = None
             if target and target.get("url"):
                 probe_target = target
@@ -4683,6 +4754,8 @@ async def _stream_list_impl(guid: str, request: Request):
             if not dur and probe_target and not probe_target.get("t4"):
                 mg = vs[0].get("media_guid") or ""
                 dur = _cached_playlist_seconds(probe_target)
+                if dur:
+                    dur_from_probe = True
                 if not dur and mg:
                     try:
                         body = await asyncio.wait_for(
@@ -4693,12 +4766,22 @@ async def _stream_list_impl(guid: str, request: Request):
                         body = None
                     if body and body is not _NOT_HLS:
                         dur = _playlist_total_seconds(body)
+                        if dur:
+                            dur_from_probe = True
             if dur and probe_target and probe_target.get("online_guid"):
-                vs[0]["duration"] = dur
-                sl["duration"] = dur
+                # 集记录里存原始时长（探测值本身已是裁剪后时间线上的值，
+                # CMS 值则是原始时长；上报给客户端前再扣减，避免二次扣减）。
                 _remember_episode_duration(
                     probe_target.get("online_guid", ""),
                     probe_target.get("index", 0), dur)
+                if not dur_from_probe:
+                    # CMS/集记录来源是原始时长：仅剧集目标扣掉已剪掉的
+                    # 片头片尾；电影/开关关时原样返回。
+                    _brief = store.get_title_by_guid(
+                        probe_target.get("online_guid", "")) or {}
+                    dur = _skip_adjusted_duration(dur, _brief)
+                vs[0]["duration"] = dur
+                sl["duration"] = dur
     except Exception:
         _log.debug("_stream_list_impl failed: guid=%s", guid, exc_info=True)
         pass
@@ -6853,7 +6936,7 @@ async def _resolve_spider(picked: dict) -> bool:
 # 302/下发，从不校验死活，播放器一直报错；坏线也不会被记忆，退出重放仍黏在该线。
 # 方案：①坏线短时记忆 ②起播/取流前并行探测同集各候选线路，自动切到首个可用线路。
 # P2 拆分：HLS 播放链路与线路竞速：探活、复活、竞速、播放列表、HLS 路由。已移入 proxy/hls_race.py；以下重导出（对外 import 名称不变）。
-from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _source_health_enabled, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
+from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _skip_adjusted_duration, _skip_seconds, _source_health_enabled, _trim_playlist, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
 app.router.routes.extend(hls_router.routes)
 
 

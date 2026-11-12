@@ -64,10 +64,46 @@ _AD_URL_HINTS = (
     "sponsor", "redtraffic", "guanggao", "/gg/", "preroll", "/promo/",
     "adsegment", "/adevent", "/vast", "openx", "/insertad", "adservice",
 )
-# SCTE-35 / 标准广告插播标记
-_CUE_OUT = ("#EXT-X-CUE-OUT", "#EXT-X-CUE-OUT-CONT", "#EXT-X-DATERANGE",
+# 广告投放域名后缀（仅 host 后缀匹配，不扫整个 URL）。这些是纯广告投放
+# 域（Google Ad Manager/AdSense、AppNexus、The Trade Desk、PubMatic、
+# Criteo、Moat、Amazon Ads、腾讯广点通、阿里 Tanx），正片分片不可能
+# 托管其上；形似域名（如 mydoubleclick.net、doubleclick.net.evil.com）
+# 因要求整段相等或 "." 分隔后缀而不命中。
+_AD_HOST_SUFFIXES = (
+    "doubleclick.net",
+    "googlesyndication.com",
+    "googleadservices.com",
+    "adnxs.com",
+    "adsrvr.org",
+    "pubmatic.com",
+    "criteo.com",
+    "moatads.com",
+    "amazon-adsystem.com",
+    "gdt.qq.com",
+    "tanx.com",
+)
+
+
+def _is_ad_host(host: str) -> bool:
+    """host 是否属于广告投放域：整段相等，或以 "." 分隔的后缀命中。"""
+    h = (host or "").strip().lower()
+    if not h:
+        return False
+    return any(h == s or h.endswith("." + s) for s in _AD_HOST_SUFFIXES)
+
+
+# SCTE-35 / 标准广告插播标记。注意 #EXT-X-DATERANGE 不在此列：只有带
+# SCTE35-OUT/SCTE35-CMD/插播 CLASS 的 DATERANGE 才算广告区间（见
+# _DATERANGE_AD_MARKERS），普通 DATERANGE 是章节/定时元数据，见
+# RFC 8216 §4.3.2.7——一律当广告会把其后正片整个吞掉。
+_CUE_OUT = ("#EXT-X-CUE-OUT", "#EXT-X-CUE-OUT-CONT",
             "#EXT-X-SCTE35", "#EXT-OATCLS-SCTE35", "#EXT-X-CUE-SPAN")
 _CUE_IN = ("#EXT-X-CUE-IN",)
+# DATERANGE 是广告区间的充分条件：含 SCTE35-OUT/SCTE35-CMD/CUE-OUT，或
+# Apple 插播广告 CLASS；含 SCTE35-IN 的 DATERANGE 结束区间。
+_DATERANGE_AD_MARKERS = ("SCTE35-OUT", "SCTE35-CMD", "CUE-OUT",
+                         'CLASS="COM.APPLE.HLS.INTERSTITIAL"')
+_DATERANGE_END_MARKERS = ("SCTE35-IN",)
 _CUE_SKIP_TAGS = ("#EXT-X-ASSET", "#EXT-X-CUE", "#EXT-X-SCTE35",
                   "#EXT-OATCLS-SCTE35")
 # 纯时长：匹配 5.480000 这类数字（允许整数/小数）
@@ -260,6 +296,22 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
         ln = lines[i]
         s = ln.strip()
 
+        # DATERANGE 单独处理：只有带广告标记的才开/关区间，普通 DATERANGE
+        #（章节、定时元数据）原样保留，不进广告区间。
+        if s.startswith("#EXT-X-DATERANGE"):
+            up = s.upper()
+            if any(m in up for m in _DATERANGE_END_MARKERS):
+                in_cue = False
+                i += 1
+                continue
+            if any(m in up for m in _DATERANGE_AD_MARKERS):
+                in_cue = True
+                i += 1
+                continue
+            out.append(ln)
+            i += 1
+            continue
+
         # SCTE-35 广告区间
         if any(s.startswith(t) for t in _CUE_OUT):
             in_cue = True
@@ -281,12 +333,13 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
             i += 1
             continue
 
-        # 广告 URL 关键字：删 EXTINF+URL
+        # 广告 URL 关键字 / 广告投放域名：删 EXTINF+URL
         if s.startswith("#EXTINF"):
             j = next_url_index(i + 1)
             if j < n:
                 url = lines[j].strip().lower()
-                if any(k in url for k in _AD_URL_HINTS):
+                if any(k in url for k in _AD_URL_HINTS) or \
+                        _is_ad_host(_host_of(url)):
                     removed += 1
                     # 连带紧邻的 DISCONTINUITY 由后续孤立标签清理
                     i = j + 1
@@ -413,6 +466,10 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
         has_kw = any(kw in url_blob for kw in _AD_URL_HINTS)
         if has_kw:
             score += 3
+        # 广告投放域名：整块分片 host 切到广告域，与关键字同等强信号
+        has_ad_host = any(_is_ad_host(h) for h in hosts)
+        if has_ad_host:
+            score += 3
 
         # aimimang 同款：片源方标注的固定广告时长。若主体块够长且某非主体块
         # 总时长命中 KNOWN_AD_DURS（容差 0.05s），整块剔除。
@@ -420,7 +477,8 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
                                                 for v in KNOWN_AD_DURS):
             score += 5
 
-        if (has_kw and _ad_like_duration(total)) or score >= 4:
+        if ((has_kw or has_ad_host) and _ad_like_duration(total)) \
+                or score >= 4:
             drop.update(blk)
         pre_duration += total
 
@@ -460,6 +518,98 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
     return "\n".join(cleaned) + ("\n" if text.endswith("\n") else ""), len(drop)
 
 
+def _segment_urls(text: str) -> list[str]:
+    """清单里的媒体分片 URL（按出现序，不含 # 标签行）。"""
+    return [ln.strip() for ln in text.splitlines()
+            if ln.strip() and not ln.strip().startswith("#")]
+
+
+_MEDIA_SEQ_RE = re.compile(r"#EXT-X-MEDIA-SEQUENCE:\s*(\d+)")
+_DISC_SEQ_RE = re.compile(r"#EXT-X-DISCONTINUITY-SEQUENCE:\s*(\d+)")
+
+
+def _disc_before_first_seg(lines: list[str]) -> int:
+    """首个分片前的 #EXT-X-DISCONTINUITY 个数。"""
+    c = 0
+    for ln in lines:
+        s = ln.strip()
+        if s and not s.startswith("#"):
+            break
+        if s == "#EXT-X-DISCONTINUITY":
+            c += 1
+    return c
+
+
+def _fix_sequence_tags(original: str, filtered: str) -> str:
+    """剥离分片后修正序号标签（RFC 8216 §4.3.3.2/§4.3.3.5）。
+
+    - #EXT-X-MEDIA-SEQUENCE：按前导删除的分片数递增；原表无此标签且删
+      了前导分片时补一个（值 = 前导删除数，即首个保留分片的真实序号）。
+    - #EXT-X-DISCONTINUITY-SEQUENCE：按首片前间断标记数的变化量调整；
+      原表无此标签时不补。
+    - 对齐失败（订阅正则改写过分片 URL、新表不是原表的子序列）时原样
+      返回，绝不因修正损坏清单。零网络、纯字符串操作，不拖慢起播。
+    """
+    try:
+        orig_segs = _segment_urls(original)
+        new_segs = _segment_urls(filtered)
+        if not orig_segs or not new_segs:
+            return filtered
+        # 子序列对齐：新表分片须按序出现在原表里
+        p = 0
+        first_idx = None
+        for u in new_segs:
+            while p < len(orig_segs) and orig_segs[p] != u:
+                p += 1
+            if p >= len(orig_segs):
+                return filtered
+            if first_idx is None:
+                first_idx = p
+            p += 1
+        leading_removed = first_idx or 0
+        d_orig = _disc_before_first_seg(original.splitlines())
+        d_new = _disc_before_first_seg(filtered.splitlines())
+        if leading_removed == 0 and d_new == d_orig:
+            return filtered
+
+        lines = filtered.splitlines()
+        trailing_nl = filtered.endswith("\n")
+        out: list[str] = []
+        media_fixed = False
+        disc_fixed = False
+        for ln in lines:
+            s = ln.strip()
+            if not media_fixed:
+                m = _MEDIA_SEQ_RE.search(s)
+                if m:
+                    out.append(_MEDIA_SEQ_RE.sub(
+                        "#EXT-X-MEDIA-SEQUENCE:"
+                        f"{int(m.group(1)) + leading_removed}", s, count=1))
+                    media_fixed = True
+                    continue
+            if not disc_fixed:
+                m = _DISC_SEQ_RE.search(s)
+                if m:
+                    out.append(_DISC_SEQ_RE.sub(
+                        "#EXT-X-DISCONTINUITY-SEQUENCE:"
+                        f"{max(0, int(m.group(1)) + (d_new - d_orig))}",
+                        s, count=1))
+                    disc_fixed = True
+                    continue
+            out.append(ln)
+        if leading_removed > 0 and not media_fixed:
+            ins = f"#EXT-X-MEDIA-SEQUENCE:{leading_removed}"
+            if out and out[0].strip() == "#EXTM3U":
+                out.insert(1, ins)
+            else:
+                out.insert(0, ins)
+        body = "\n".join(out)
+        return body + ("\n" if trailing_nl else "")
+    except Exception:
+        _log.debug("_fix_sequence_tags failed", exc_info=True)
+        return filtered
+
+
 def filter_hls(text: str | None, media_url: str = "",
                use_heuristic: bool = True) -> tuple[str, int]:
     """对一份 m3u8 文本去广告（同步、不探测分片）。
@@ -485,23 +635,23 @@ def filter_hls(text: str | None, media_url: str = "",
             if patterns:
                 text = _apply_host_regex(text, patterns)
 
-        # 2) 通用启发式（SCTE35/关键字）
+        # 2) 通用启发式（SCTE35/关键字/广告域名）
         if use_heuristic:
-            text, removed_h = _apply_heuristic(text)
-        else:
-            removed_h = 0
+            text, _removed_h = _apply_heuristic(text)
         # 3) 播放时动态检测（无 rules 时按分段+时长+CDN 识别广告段）
-        removed_dyn = 0
         if _dynamic_enabled() and _segment_url_count(text) >= 8:
-            text, removed_dyn = _detect_ad_blocks(text)
+            text, _removed_dyn = _detect_ad_blocks(text)
 
         after = _segment_url_count(text)
-        removed = max(0, before - after) + removed_h
+        # before-after 即实际删除数（各层各自的计数不再另加，否则同一批
+        # 分片会被重复计入）。
+        removed = max(0, before - after)
 
         # 安全护栏：媒体分片被清空说明规则误伤，回退
         if before > 0 and _segment_url_count(text) == 0:
             return original, 0
-        return text, removed
+        # 剥离后修正序号标签（前导删除才动 MEDIA-SEQUENCE）
+        return _fix_sequence_tags(original, text), removed
     except Exception:
         _log.debug("filter_hls failed", exc_info=True)
         return original, 0
@@ -563,7 +713,9 @@ def _sps_cache_put(url: str, prof: dict) -> None:
         return
     with _sps_cache_lock:
         if len(_sps_cache) >= _SPS_CACHE_LIMIT:
-            _sps_cache.clear()
+            # 满了删最旧一半而非全清：避免全清后所有分片指纹同时重探抖动
+            for _old in list(_sps_cache)[:len(_sps_cache) // 2]:
+                _sps_cache.pop(_old, None)
         _sps_cache[url] = (prof, time.time())
 
 
@@ -795,7 +947,8 @@ async def filter_hls_async(text, media_url, fetch_head, use_heuristic=True):
         new_text = _rebuild_without_blocks(tokens, drop, text.endswith("\n"))
         if _segment_url_count(new_text) == 0:
             return text, removed
-        return new_text, removed + drop_n
+        # SPS 层又剥了块：相对规则层输出再修正一次序号标签
+        return _fix_sequence_tags(text, new_text), removed + drop_n
     except Exception:
         _log.debug("filter_hls_async failed", exc_info=True)
         return text, removed
