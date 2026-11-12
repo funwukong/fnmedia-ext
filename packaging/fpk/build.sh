@@ -28,6 +28,7 @@ mkdir -p "${STAGE}/app/repo" "${STAGE}/app/ui"
 rsync -a --delete \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
+  --exclude='tests/' \
   --exclude='.tools/' --exclude='.pytest_cache/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \

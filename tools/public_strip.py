@@ -73,6 +73,12 @@ BLOCK_RE = re.compile(
 )
 CLOSE_RE = re.compile(r"<<<\s*PRIVATE:(?P<tag>[A-Z_]+)")
 
+# 拼接式动态导入 guard 的写法（把模块名拆成两段绕过字面扫描）。
+# 只对剥离版 proxy/guard_native.py 断言：唯一合法入口是该文件的 _guard_mod()，
+# 它用字面模块名，不含此拼接写法，故不命中；其余调用点若漏改会在这里被抓住。
+# 不做全树扫描：测试脚本与其它模块里的同款拼接另有归属，全树扫会误报。
+_GUARD_SPLICE_RE = re.compile(r"""["']gua["']\s*\+\s*["']rd["']""")
+
 # 公开构建里直接写成不带任何标记的普通常量（不残留 PRIVATE 字样）
 PY_FLAGS = "# 可选特性在公开构建中均关闭\nDDUO = False\nADULT = False\nCATVOD = False\nDRPY = False\nGUARD = False"
 JS_FLAGS = "const FEAT_DDUO=false,FEAT_ADULT=false;"
@@ -578,7 +584,8 @@ def main(root: str) -> int:
     # updater.py 合法引用 assets/{guard,spiders,catvod,drpy} 路径——仅用于
     # 热替换时备份/保留用户自导入数据，并非内置私有构件；豁免其路径名误报。
     _SCAN_SKIP_REL = {"proxy/updater.py"}
-    _SCAN_SKIP_DIRS = set(_WALK_SKIP) | {"packaging", "deploy", ".github", "docs"}
+    _SCAN_SKIP_DIRS = set(_WALK_SKIP) | {"packaging", "deploy", ".github", "docs",
+                                         ".pytest_cache"}
     for dirpath, drnames, filenames in os.walk(base):
         drnames[:] = [d for d in drnames if d not in _SCAN_SKIP_DIRS]
         for fn in filenames:
@@ -609,6 +616,16 @@ def main(root: str) -> int:
                            "PRIVATE:"):
                 if needle in t:
                     leaks.append((rel, needle))
+
+    # 剥离版 guard_native.py 不得再有拼接式动态导入：见 _GUARD_SPLICE_RE 注释。
+    gn = base / "proxy" / "guard_native.py"
+    if gn.is_file():
+        try:
+            gt = gn.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            gt = ""
+        if _GUARD_SPLICE_RE.search(gt):
+            leaks.append(("proxy/guard_native.py", "spliced dynamic import"))
 
     print(f"[public-strip] 根目录: {base}")
     print(f"[public-strip] 删除文件: {dropped or '无'}")
