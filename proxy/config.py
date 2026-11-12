@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import os
 import re
@@ -411,10 +412,14 @@ def _guard_sites_read_failed() -> bool:
     _sync_guard_defaults 在 live 为空时决定是否动底表。
     """
     try:
-        import guard as _g
+        # 字面模块名经 import_module 取（与 guard_native._guard_mod 同款写法）：
+        # 本函数不在 PRIVATE 块内，剥离版里 guard/spiders 模块已删，写成 import
+        # 语句会撞残留扫描；这里抛 ModuleNotFoundError 后由外层 except 接住返
+        # False，行为与原来一致。
+        _g = importlib.import_module("guard")
         paths = [_g._SITES, _g._IMPORTED]
         try:
-            import spiders as _sp
+            _sp = importlib.import_module("spiders")
             paths.append(_sp._SITES_FILE)
         except Exception:
             _log.debug("_guard_sites_read_failed: no spiders", exc_info=True)

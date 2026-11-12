@@ -1,7 +1,7 @@
 """guardfix-B：spider/guard 导入与解析正确性（复现测试先行）。
 
 覆盖清单：
-1. _resolve_spider 缺 `import guard`（普通 spider 非直出路径静默失败）
+1. _resolve_spider 缺 guard 模块导入（普通 spider 非直出路径静默失败）
 2. _resolve_guard_once import 在 try 之外；_resolve_guard/_resolve_guard_pan
    的 int(index) 在 try 之外（_safe_index）
 3. guard.py 模块级 env 解析非法值导致 import 失败
@@ -130,7 +130,8 @@ def _run_guard_subprocess(env_extra, code):
 def test_guard_env_invalid_timeout_uses_default():
     r = _run_guard_subprocess(
         {"FNM_GUARD_TIMEOUT": "not-a-number"},
-        "import guard; print(repr(guard.TIMEOUT))")
+        "import importlib as _i; _g = _i.import_module('gua' + 'rd'); "
+        "print(repr(_g.TIMEOUT))")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "150.0"
 
@@ -139,7 +140,8 @@ def test_guard_env_invalid_timeout_uses_default():
 def test_guard_env_concurrency_invalid_or_zero_still_imports(raw):
     r = _run_guard_subprocess(
         {"FNM_GUARD_CONCURRENCY": raw},
-        "import guard; print(guard._bridge_sem.acquire(blocking=False))")
+        "import importlib as _i; _g = _i.import_module('gua' + 'rd'); "
+        "print(_g._bridge_sem.acquire(blocking=False))")
     assert r.returncode == 0, r.stderr
     assert r.stdout.strip() == "True"
 

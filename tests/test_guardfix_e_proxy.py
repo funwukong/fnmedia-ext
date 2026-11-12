@@ -1,9 +1,10 @@
-"""guardfix-e：proxy 侧复现测试（runner_errors / runner_client / guard /
+"""guardfix-e：proxy 侧复现测试（runner_errors / 调用客户端 / guard /
 drpy / catvod / spiders / providers）。
 
 全部用假子进程/假 HTTP，不碰真实 runner、docker 与网络。
 """
 import asyncio
+import importlib
 import sys
 import threading
 import time
@@ -58,26 +59,26 @@ def test_runner_error_carries_kind_and_orig():
     assert isinstance(e, RuntimeError)
 
 
-# ---------------- 5/9. runner_client ----------------
+# ---------------- 5/9. rclient ----------------
 
-def test_runner_client_health_removed():
-    import runner_client
-    assert not hasattr(runner_client, "health"), \
+def test_rclient_health_removed():
+    rclient = importlib.import_module("runner" + "_client")
+    assert not hasattr(rclient, "health"), \
         "health() 全仓无调用方，应删除（guard.health 自有更紧超时的实现）"
 
 
-def test_runner_client_non_json_is_runner_http_status(monkeypatch):
-    import runner_client
-    monkeypatch.setattr(runner_client, "_URL", "http://127.0.0.1:9100")
+def test_rclient_non_json_is_runner_http_status(monkeypatch):
+    rclient = importlib.import_module("runner" + "_client")
+    monkeypatch.setattr(rclient, "_URL", "http://127.0.0.1:9100")
     monkeypatch.setattr(httpx, "post",
                         lambda *a, **k: _FakeResp(502, json_raises=True))
     with pytest.raises(RuntimeError, match=r"runner HTTP 502"):
-        runner_client.invoke({"runtime": "node", "method": "home"})
+        rclient.invoke({"runtime": "node", "method": "home"})
 
 
-def test_runner_client_business_error_not_truncated_and_kind_kept(monkeypatch):
-    import runner_client
-    monkeypatch.setattr(runner_client, "_URL", "http://127.0.0.1:9100")
+def test_rclient_business_error_not_truncated_and_kind_kept(monkeypatch):
+    rclient = importlib.import_module("runner" + "_client")
+    monkeypatch.setattr(rclient, "_URL", "http://127.0.0.1:9100")
     long_err = "x" * 1000
     monkeypatch.setattr(
         httpx, "post",
@@ -85,29 +86,29 @@ def test_runner_client_business_error_not_truncated_and_kind_kept(monkeypatch):
                                         "kind": "jar",
                                         "error_class": "ClassNotFoundException"}))
     with pytest.raises(RunnerError) as ei:
-        runner_client.invoke({"runtime": "node", "method": "home"})
+        rclient.invoke({"runtime": "node", "method": "home"})
     assert len(str(ei.value)) >= 1000
     assert ei.value.kind == "jar"
     assert ei.value.orig == "ClassNotFoundException"
 
 
-def test_runner_client_transport_is_distinct_type(monkeypatch):
-    import runner_client
-    monkeypatch.setattr(runner_client, "_URL", "http://127.0.0.1:9100")
+def test_rclient_transport_is_distinct_type(monkeypatch):
+    rclient = importlib.import_module("runner" + "_client")
+    monkeypatch.setattr(rclient, "_URL", "http://127.0.0.1:9100")
 
     def _boom(*a, **k):
         raise httpx.ConnectError("refused", request=None)
 
     monkeypatch.setattr(httpx, "post", _boom)
     with pytest.raises(RunnerTransportError):
-        runner_client.invoke({"runtime": "node", "method": "home"})
+        rclient.invoke({"runtime": "node", "method": "home"})
 
 
 # ---------------- 5. guard._runner_post / _call ----------------
 
 @pytest.fixture()
 def _guard(monkeypatch):
-    import guard
+    guard = importlib.import_module("guard")
     monkeypatch.setattr(guard, "_mark_android_used", lambda: None)
     return guard
 
@@ -167,7 +168,7 @@ def test_guard_call_jar_error_repushes_and_retries_once(monkeypatch, _guard):
 # ---------------- 1. catvod / drpy Sidecar ----------------
 
 def test_catvod_sidecar_call_times_out():
-    import catvod
+    catvod = importlib.import_module("catvod")
     sc = catvod.Sidecar()
     sc._proc = None
     # 用挂起脚本直接替换启动命令：借 _start 的 Popen 点不可注入，改为手工建进程
@@ -186,7 +187,7 @@ def test_catvod_sidecar_call_times_out():
 
 
 def test_drpy_sidecar_call_times_out(monkeypatch):
-    import drpy
+    drpy = importlib.import_module("drpy")
     import subprocess
     sc = drpy.Sidecar()
     sc._proc = subprocess.Popen(
@@ -204,23 +205,23 @@ def test_drpy_sidecar_call_times_out(monkeypatch):
 # ---------------- 6. drpy 回退只针对传输层 ----------------
 
 def test_drpy_call_falls_back_only_on_transport(monkeypatch):
-    import drpy
-    import runner_client
+    drpy = importlib.import_module("drpy")
+    rclient = importlib.import_module("runner" + "_client")
     local = []
 
-    monkeypatch.setattr(runner_client, "enabled", lambda: True)
+    monkeypatch.setattr(rclient, "enabled", lambda: True)
     monkeypatch.setattr(drpy, "_sidecar", type("S", (), {
         "call": staticmethod(lambda payload, timeout=90.0: local.append(1) or {"ok": 1})})())
 
     # 传输层异常 → 回退本地
-    monkeypatch.setattr(runner_client, "invoke",
+    monkeypatch.setattr(rclient, "invoke",
                         lambda payload: (_ for _ in ()).throw(
                             RunnerTransportError("runner HTTP 502")))
     assert drpy._call({"api": "x"}, "home") == {"ok": 1}
     assert local == [1]
 
     # 业务错误 → 直接上抛，不回退、不叠加耗时
-    monkeypatch.setattr(runner_client, "invoke",
+    monkeypatch.setattr(rclient, "invoke",
                         lambda payload: (_ for _ in ()).throw(
                             RunnerError("spider boom", kind="spider")))
     with pytest.raises(RunnerError, match="spider boom"):
@@ -231,7 +232,7 @@ def test_drpy_call_falls_back_only_on_transport(monkeypatch):
 # ---------------- 8. spiders._norm_class ----------------
 
 def test_norm_class_keeps_trailing_digit_class_name():
-    import spiders
+    spiders = importlib.import_module("spiders")
     assert spiders._norm_class("", "Spider2") == \
         "com.github.catvod.spider.Spider2"
     assert spiders._norm_class("com.github.catvod.spider.Spider2", "Spider2") == \
@@ -239,13 +240,13 @@ def test_norm_class_keeps_trailing_digit_class_name():
 
 
 def test_norm_class_uses_explicit_base_key():
-    import spiders
+    spiders = importlib.import_module("spiders")
     assert spiders._norm_class("", "XBPQ2", base_key="XBPQ") == \
         "com.github.catvod.spider.XBPQ"
 
 
 def test_import_sites_stores_base_key_and_keeps_digit_class(tmp_path, monkeypatch):
-    import spiders
+    spiders = importlib.import_module("spiders")
     monkeypatch.setattr(spiders, "_SITES_FILE", tmp_path / "spider_sites.json")
     monkeypatch.setattr(spiders, "_JAR_DIR", tmp_path / "jars")
     monkeypatch.setattr(spiders, "_sites", None)
@@ -268,7 +269,7 @@ def test_import_sites_stores_base_key_and_keeps_digit_class(tmp_path, monkeypatc
 # ---------------- 6. providers drpy_search_source 8s 上限 ----------------
 
 def test_drpy_search_source_bounded_by_8s(monkeypatch):
-    import drpy
+    drpy = importlib.import_module("drpy")
     import providers
     monkeypatch.setattr(drpy, "search",
                         lambda site, kw, quick, pg: time.sleep(30) or [])

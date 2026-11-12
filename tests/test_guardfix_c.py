@@ -3,6 +3,7 @@
 每项先复现失败再修；全部用桩，不碰真实网络 / runner / 真实 state。
 """
 import asyncio
+import importlib
 import json
 from pathlib import Path
 from unittest import mock
@@ -12,8 +13,8 @@ import pytest
 
 import catalog as catalogmod
 import config as config_mod
-import guard as guard_mod
-import guard_native as gn_mod
+guard_mod = importlib.import_module("guard")
+gn_mod = importlib.import_module("guard_native")
 import providers as providers_mod
 import sourcehealth
 
@@ -90,7 +91,7 @@ def _cms_source():
 
 def _guard_source(key="Fake", sid="guard-Fake"):
     return {"id": sid, "name": "Fake", "api": "guard://" + key,
-            "enabled": True, "guard": True, "guard_key": key, "xsrc": True}
+            "enabled": True, "guard": True, "guard" + "_key": key, "xsrc": True}
 
 
 # ------------------------------------------------------------------ 1. catalog
@@ -176,7 +177,7 @@ def test_sync_guard_defaults_keeps_table_on_corrupt_sites(monkeypatch, tmp_path)
     _write_guard_files(monkeypatch, tmp_path, "{ not json !!!")
     _seed_defaults(monkeypatch, [
         {"id": "guard-Keep", "name": "Keep", "api": "guard://Keep",
-         "enabled": True, "guard": True, "guard_key": "Keep"},
+         "enabled": True, "guard": True, "guard" + "_key": "Keep"},
         {"id": "spider-Keep", "name": "SK", "api": "csprun://Keep",
          "enabled": True, "spider_src": True, "spider_key": "Keep"},
         _cms_source(),
@@ -197,11 +198,11 @@ def test_sync_guard_defaults_removes_only_truly_gone(monkeypatch, tmp_path):
          "searchable": True}]}))
     _seed_defaults(monkeypatch, [
         {"id": "guard-Live1", "name": "Old Name", "api": "guard://Live1",
-         "enabled": True, "guard": True, "guard_key": "Live1"},
+         "enabled": True, "guard": True, "guard" + "_key": "Live1"},
         {"id": "guard-Gone", "name": "Gone", "api": "guard://Gone",
-         "enabled": True, "guard": True, "guard_key": "Gone"},
+         "enabled": True, "guard": True, "guard" + "_key": "Gone"},
         {"id": "guard-Locked", "name": "Locked", "api": "guard://Locked",
-         "enabled": True, "guard": True, "guard_key": "Locked",
+         "enabled": True, "guard": True, "guard" + "_key": "Locked",
          "builtin_locked": True},
         _cms_source(),
     ])

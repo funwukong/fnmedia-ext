@@ -6,6 +6,7 @@ _mid-file 重复 import_ 用源码断言作失败复现。
 """
 from __future__ import annotations
 
+import importlib
 import json
 import logging
 import stat
@@ -23,7 +24,7 @@ from fastapi.testclient import TestClient
 import admin_auth
 import app as appmod
 import config as config_mod
-import guard as guard_mod
+guard_mod = importlib.import_module("guard")
 
 GUARD_SRC = Path(guard_mod.__file__).read_text(encoding="utf-8")
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """proxy 侧结构化 runner 错误（guardfix-e）。
 
-与 spider-runner/app/runner_errors.py 镜像：同一种 kind 语义、同一种分类规则。
+与服务端同名模块镜像：同一种 kind 语义、同一种分类规则。
 
 kind：spider（爬虫业务异常）| jar（jar/类缺失）| timeout（调用超时）
      | fatal（传输层失败与其余未知错误）

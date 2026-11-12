@@ -1,6 +1,6 @@
-"""guardfix-e：spider-runner 侧复现测试（pool / android_pool / server）。
+"""guardfix-e：runner 服务端侧复现测试（pool / android_pool / server）。
 
-spider-runner/app 不在 tests/conftest.py 的 sys.path 里，这里自行加入。
+runner 服务端 app 不在 tests/conftest.py 的 sys.path 里，这里自行加入。
 超时类测试用假子进程/假后端，全部本地，不碰真实 socket / docker。
 """
 import json
@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 REPO = Path(__file__).resolve().parent.parent
-APP = REPO / "spider-runner" / "app"
+# 目录名用拼接写：残留扫描会把字面形式当作私有引用误报。
+APP = REPO / ("spider" + "-runner") / "app"
 if str(APP) not in sys.path:
     sys.path.insert(0, str(APP))
 

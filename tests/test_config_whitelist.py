@@ -1,6 +1,6 @@
 """F 组第 5 项：config 白名单全量分类 + 布尔归一化覆盖。
 
-- 每个 config DEFAULTS 键（74 个）必须恰好属于一类：
+- 每个 config DEFAULTS 键（78 个）必须恰好属于一类：
   WHITELIST（ext_set_config 的 allowed 集，可写）、
   DEDICATED（有专用端点/专用方法写）、
   NOT_WRITABLE（故意不可写：内部版本/元数据/无管理端点的只读默认）。
@@ -24,7 +24,7 @@ import config as config_mod
 
 ADMIN_API = Path(__file__).resolve().parent.parent / "proxy" / "admin_api.py"
 
-# ---------------- 分类表（调查组核实，74 键全量） ----------------
+# ---------------- 分类表（调查组核实，78 键全量：74 + 跳过片头/片尾 4 键） ----------------
 
 WHITELIST = {
     "max_per_keyword", "filter_junk", "junk_keywords", "online_first",
@@ -36,6 +36,8 @@ WHITELIST = {
     "line_fastest_prefer", "line_autofail", "fixed_line_direct",
     "linepredict_zero_race", "mid_playback_switch", "browse_probe",
     "poster_speed_badge", "main_ready_budget", "prewarm_mode",
+    "skip_intro_enabled", "skip_intro_seconds",
+    "skip_outro_enabled", "skip_outro_seconds",
     "pan_cache_cleanup_enabled", "pan_cache_ttl_hours", "update_proxy",
     "pan_lib_enabled", "guard_zone_enabled", "guard_native_enabled",
 }
@@ -132,7 +134,7 @@ def _extract_allowed_and_boolnorm() -> tuple[set[str], set[str]]:
 
 def test_defaults_fully_classified():
     keys = set(config_mod.DEFAULTS)
-    assert len(keys) == 74
+    assert len(keys) == 78
     assert WHITELIST & DEDICATED == set()
     assert WHITELIST & NOT_WRITABLE == set()
     assert DEDICATED & NOT_WRITABLE == set()

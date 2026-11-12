@@ -74,10 +74,13 @@ BLOCK_RE = re.compile(
 CLOSE_RE = re.compile(r"<<<\s*PRIVATE:(?P<tag>[A-Z_]+)")
 
 # 拼接式动态导入 guard 的写法（把模块名拆成两段绕过字面扫描）。
-# 只对剥离版 proxy/guard_native.py 断言：唯一合法入口是该文件的 _guard_mod()，
-# 它用字面模块名，不含此拼接写法，故不命中；其余调用点若漏改会在这里被抓住。
+# 只对剥离版 proxy/guard_native.py 与 proxy/lib_inject.py 断言：唯一合法入口
+# 是 guard_native._guard_mod()，它用字面模块名，不含此拼接写法，故不命中；
+# 其余调用点若漏改会在这里被抓住。
 # 不做全树扫描：测试脚本与其它模块里的同款拼接另有归属，全树扫会误报。
 _GUARD_SPLICE_RE = re.compile(r"""["']gua["']\s*\+\s*["']rd["']""")
+# 拼接断言覆盖的剥离后仍保留的文件（guard.py 本身已被整文件删除）。
+_GUARD_SPLICE_FILES = ("proxy/guard_native.py", "proxy/lib_inject.py")
 
 # 公开构建里直接写成不带任何标记的普通常量（不残留 PRIVATE 字样）
 PY_FLAGS = "# 可选特性在公开构建中均关闭\nDDUO = False\nADULT = False\nCATVOD = False\nDRPY = False\nGUARD = False"
@@ -617,15 +620,17 @@ def main(root: str) -> int:
                 if needle in t:
                     leaks.append((rel, needle))
 
-    # 剥离版 guard_native.py 不得再有拼接式动态导入：见 _GUARD_SPLICE_RE 注释。
-    gn = base / "proxy" / "guard_native.py"
-    if gn.is_file():
-        try:
-            gt = gn.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            gt = ""
-        if _GUARD_SPLICE_RE.search(gt):
-            leaks.append(("proxy/guard_native.py", "spliced dynamic import"))
+    # 剥离版 guard_native.py / lib_inject.py 不得再有拼接式动态导入：
+    # 见 _GUARD_SPLICE_RE 注释。
+    for _rel in _GUARD_SPLICE_FILES:
+        _p = base / _rel
+        if _p.is_file():
+            try:
+                _t = _p.read_text(encoding="utf-8")
+            except (UnicodeDecodeError, OSError):
+                _t = ""
+            if _GUARD_SPLICE_RE.search(_t):
+                leaks.append((_rel, "spliced dynamic import"))
 
     print(f"[public-strip] 根目录: {base}")
     print(f"[public-strip] 删除文件: {dropped or '无'}")

@@ -388,7 +388,8 @@ def test_gn_category_page_timeout_does_not_cancel_inflight(monkeypatch):
         monkeypatch.setattr(gnmod, "_gn_catalog_max_page", lambda *a, **k: 0)
         monkeypatch.setattr(gnmod, "_gn_class_is_tv", lambda *a, **k: False)
         out = await gnmod._gn_category_page("K1", "t1", "电影", 1)
-        assert out == ([], True, True)
+        # D 组修复：失败返回 handled=False（原 True 会让客户端无尽翻页）。
+        assert out == ([], False, True)
         assert seen and seen[0] is not task, "wait_for 必须包 shield，不能直接等共享任务"
         assert not task.done() and not task.cancelled(), "超时不能取消共享 inflight 任务"
         task.cancel()

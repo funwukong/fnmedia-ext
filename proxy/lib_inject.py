@@ -69,7 +69,13 @@ async def _guard_browse_rows(glib: dict, body: dict) -> tuple[list[dict], int]:
     用 body 里的 parent_guid/dir 编码具体分类（"g:<tid>"），缺省用第一个分类。
     """
     from app import _apply_marks, guard_lib_guid, guard_lib_name, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    _g = importlib.import_module("gua" + "rd")
+    # 唯一合法入口 guard_native._guard_mod()（见其 docstring）：剥离构建里
+    # guard 模块已删，返回 None，这里直接返回空结果；不要用拼接式动态导入，
+    # 否则剥离扫描无法确认它已被集中门控。
+    from guard_native import _guard_mod  # noqa: E402 延迟导入：避免与 app.py 循环导入
+    _g = _guard_mod()
+    if _g is None:
+        return [], 0
     source, conf = glib["source"], glib["conf"]
     page = max(1, int(body.get("page") or body.get("page_index") or 1))
     page_size = max(1, min(int(body.get("page_size") or 22), 100))
