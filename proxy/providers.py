@@ -976,7 +976,10 @@ async def drpy_search_source(client, source: dict,
     import drpy
     try:
         site = _drpy_site(source)
-        lst = await asyncio.to_thread(drpy.search, site, keyword, False, 1)
+        fut = asyncio.to_thread(drpy.search, site, keyword, False, 1)
+        # 与 guard 搜索同一上限：8s 内无结果即放弃（shield：超时只断开等待，
+        # 不取消底层的 to_thread 任务本身）。
+        lst = await asyncio.wait_for(asyncio.shield(fut), timeout=8)
     except Exception:
         _log.debug("drpy_search_source failed: source=%s", source, exc_info=True)
         return []
@@ -1243,7 +1246,7 @@ async def _dispatch_search(client, source, keyword):
     # >>> PRIVATE:GUARD
     if features.GUARD and source.get("guard"):
         return await guard_search_source(client, source, keyword)
-    if source.get("spider_src"):
+    if features.GUARD and source.get("spider_src"):
         return await spider_search_source(client, source, keyword)
     # <<< PRIVATE:GUARD
     # >>> PRIVATE:DDUO

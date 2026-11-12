@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import os
 import re
 import threading
 from pathlib import Path
@@ -170,6 +172,7 @@ def _backup_config() -> Path | None:
             dst = d / f"config-{ts}-{i}.json"
             i += 1
         dst.write_bytes(_STATE.read_bytes())
+        os.chmod(dst, 0o600)
         # 按新旧删最旧：见 _backup_order_key，同秒备份只按名字会误删新备份。
         for old in sorted(d.glob("config-*.json"),
                           key=_backup_order_key)[: -BACKUP_KEEP]:
@@ -405,6 +408,36 @@ _DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources"
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
+def _guard_sites_read_failed() -> bool:
+    """任一 guard/spider 源文件存在但 JSON 解析失败 → True。
+
+    guard._read_json / spiders._read_json 吞错返 {}，调用方无法从空结果
+    区分“确实无源”和“文件损坏”；这里直接重读文件判一次，供
+    _sync_guard_defaults 在 live 为空时决定是否动底表。
+    """
+    try:
+        # 字面模块名经 import_module 取（与 guard_native._guard_mod 同款写法）：
+        # 本函数不在 PRIVATE 块内，剥离版里 guard/spiders 模块已删，写成 import
+        # 语句会撞残留扫描；这里抛 ModuleNotFoundError 后由外层 except 接住返
+        # False，行为与原来一致。
+        _g = importlib.import_module("guard")
+        paths = [_g._SITES, _g._IMPORTED]
+        try:
+            _sp = importlib.import_module("spiders")
+            paths.append(_sp._SITES_FILE)
+        except Exception:
+            _log.debug("_guard_sites_read_failed: no spiders", exc_info=True)
+        for path in paths:
+            try:
+                if path.exists():
+                    json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return True
+    except Exception:
+        _log.debug("_guard_sites_read_failed failed", exc_info=True)
+    return False
+
+
 class Config:
     def __init__(self):
         self._cfg: dict = {}
@@ -417,6 +450,10 @@ class Config:
 
         导入 TVBox 配置后调用，使新源无需重启即进入源列表/聚合；旧的导入源若
         已删除则从底表移除（用户配置中的 enabled 等仍按 saved_by_id 合并）。
+
+        读失败保护：live 为空时先分清是“确实无源”还是“源文件损坏读不出”
+        ——后者（_read_json 吞错返 {}）不得删底表，否则一次损坏就清空全部
+        guard/spider 源。
         """
         if features.GUARD:
             try:
@@ -429,10 +466,17 @@ class Config:
                 except Exception:
                     _log.debug("_sync_guard_defaults failed", exc_info=True)
                     _sp = None
-                # 移除已不存在的 guard/普通爬虫底表项（保留其它与内置项）
+                if not live and _guard_sites_read_failed():
+                    _log.warning(
+                        "_sync_guard_defaults: guard/spider 源文件解析失败，"
+                        "视为读失败、底表不动")
+                    return
+                # 移除已不存在的 guard/普通爬虫底表项（保留其它与内置项）；
+                # 只删明确不在 live 里的源。builtin_locked 是死条件（全仓仅
+                # 此一处引用、从未被置位），已删除。
                 for s in list(DEFAULT_SOURCES):
                     if (s.get("guard") or s.get("spider_src")) and \
-                            s["id"] not in live and not s.get("builtin_locked"):
+                            s["id"] not in live:
                         DEFAULT_SOURCES.remove(s)
                 for d in live.values():
                     ex = next((s for s in DEFAULT_SOURCES if s["id"] == d["id"]), None)
@@ -532,8 +576,12 @@ class Config:
                     m["xsrc"] = True
                 # <<< PRIVATE:GUARD
                 merged.append(m)
+            # 运行中导入的 guard/spider 源已进 DEFAULT_SOURCES（第一循环已合入
+            # merged），save 后落盘进 saved_by_id；第二循环只追加“非内置”的
+            # 用户自定义源，须跳过 merged 已有的 id，否则 reload 后重复出现。
+            merged_ids = {s["id"] for s in merged}
             for sid, s in saved_by_id.items():
-                if sid in _BUILTIN_IDS or sid in removed:
+                if sid in _BUILTIN_IDS or sid in removed or sid in merged_ids:
                     continue
                 m = {k: s.get(k) for k in ("id", "name", "api", "enabled")}
                 m["enabled"] = bool(s.get("enabled", True))
@@ -551,12 +599,15 @@ class Config:
                 # >>> PRIVATE:GUARD
                 m["guard"] = bool(s.get("guard", False)) if features.GUARD else False
                 m["guard_key"] = s.get("guard_key", "") if features.GUARD else ""
+                m["spider_src"] = bool(s.get("spider_src", False)) if features.GUARD else False
+                m["spider_key"] = s.get("spider_key", "") if features.GUARD else ""
                 # <<< PRIVATE:GUARD
                 m["builtin"] = bool(s.get("builtin", False))
                 for key in ("kind", "site_key", "ext", "searchable", "filterable", "indexs", "method"):
                     if key in s:
                         m[key] = s[key]
                 merged.append(m)
+                merged_ids.add(sid)
             cfg["sources"] = merged
             cfg["removed_ids"] = sorted(removed)
             # 旧版本（单库/小数量）保存过的热门参数自动升级到深度爬取规模；
@@ -775,6 +826,7 @@ class Config:
         tmp = _STATE.with_suffix(".tmp")
         tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
                        encoding="utf-8")
+        os.chmod(tmp, 0o600)
         tmp.replace(_STATE)
         # 成功写入后再备份：备份 = 最近一次已知的完好配置，
         # 主配置日后被外部写坏时可直接恢复到它。load() 里首次生成令牌
@@ -971,6 +1023,8 @@ class Config:
                 return False, "源不存在"
             if target.get("kind") == "t4" and on:
                 return False, "T4 来源统一显示在「T4 选片」，无需逐插件建立独立库"
+            if target.get("guard") and on:
+                return False, "加固源请用加固专区/🛡加固影视聚合库，无需逐源建立独立库"
             target["standalone"] = bool(on)
             self._persist(cfg)
             return True, "ok"

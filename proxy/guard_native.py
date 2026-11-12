@@ -115,6 +115,18 @@ def guard_lib_guid(gkey: str) -> str:
 
 
 
+def _guard_mod():
+    """集中取 guard 模块：剥离构建里该模块已被删，返回 None 而不是抛错。
+
+    唯一允许动态导入该模块的地方；调用方按 None 处理（返回空结果）。
+    用字面模块名而不用拼接写法，否则剥离扫描无法确认它已被集中门控。
+    """
+    try:
+        return importlib.import_module("guard")
+    except ModuleNotFoundError:
+        return None
+
+
 def guard_lib_source(lib_guid: str) -> dict | None:
     """库 guid 反查加固源定义；非专区库/源不可用/专区关闭返回 None。"""
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -123,7 +135,9 @@ def guard_lib_source(lib_guid: str) -> dict | None:
     if not bool(config.get().get("guard_zone_enabled", False)):
         return None
     try:
-        _g = importlib.import_module("gua" + "rd")
+        _g = _guard_mod()
+        if _g is None:
+            return None
         for s in config.enabled_sources():
             if not s.get("guard"):
                 continue
@@ -145,7 +159,11 @@ _GUARD_POSTER_QUEUED: set[str] = set()
 
 
 async def _guard_prefetch(key: str) -> None:
-    _g = importlib.import_module("gua" + "rd")
+    if not features.GUARD:
+        return
+    _g = _guard_mod()
+    if _g is None:
+        return
     conf = _g.site(key)
     if not conf:
         return
@@ -164,8 +182,8 @@ def guard_libs_active() -> list[dict]:
     if not bool(config.get().get("guard_zone_enabled", False)):
         return []
     try:
-        _g = importlib.import_module("gua" + "rd")
-        if not _g.available():
+        _g = _guard_mod()
+        if _g is None or not _g.available():
             return []
         out = []
         for s in config.enabled_sources():
@@ -220,8 +238,9 @@ _GN_CATALOG_GAP = 0.8               # 每页之间的喘息，保护唯一 redro
 # —— 高质量真机加固源的“适度深预拉”（OK影视 式点开即满墙、翻页秒开）——
 # 与片单源不同：这些是 jar/spider 真机源，每页都要打 redroid，故只深拉前若干页、
 # 低并发（池有 3 台设备）并留喘息；结果同样落 guard_catalog.json，翻页全部命中本地。
-_GN_DEEP_ENABLED = False            # 默认关闭：实测批量深拉会把 redroid 桥压进慢等，
-#                                   拖慢加固搜索/热榜起播；需要时在配置 guard_native_deep=true 手动开
+# 深预拉恒关闭：纯常量控制，无配置开关。实测批量深拉会把 redroid 桥压进慢等，
+# 拖慢加固搜索/热榜起播；不要再接 config 开关把它打开。
+_GN_DEEP_ENABLED = False
 _GN_DEEP_SRCS = (                   # 高价值“秒播/多线/不卡”真机源（内部 key）
     "Nmyswv",   # 🍓糯米·多线
     "AppSx",    # 🐻剧圈·多线
@@ -371,7 +390,9 @@ def _gn_catalog_detect_keys() -> list[str]:
 
     判定结果持久化（键为当前候选源集合），避免每轮重复探测那些初始化慢的镜像源。
     播放时这些源统一走 _resolve_guard_msearch 跨源聚合，与是否预拉无关。"""
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
+    if _g is None:
+        return []
     groups = _gn_sources()
     # 候选：启用、有 site、且站点配置标记为不可搜索（纯片单聚合源的典型特征）
     cand = []
@@ -428,8 +449,10 @@ async def _gn_catalog_worker() -> None:
 
     片单源每页 0.2~0.8s 且总量小（约数百部）；抓全后浏览/翻页全部命中本地缓存，
     播放时才走 msearch 跨源聚合。刻意串行 + 每页留 gap，绝不并发压桥。"""
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
     try:
+        if _g is None:
+            return
         groups = {g["conf"]["key"]: g for g in _gn_sources()}
         # 自动发现当前订阅里所有纯片单源（探测只读元数据+取首页，结果持久化）
         src_keys = list(_GN_CATALOG_SRCS)
@@ -520,10 +543,8 @@ async def _gn_catalog_worker() -> None:
 
 
 def _gn_deep_enabled() -> bool:
-    """真机加固源“适度深预拉”开关：总开关 + 配置可关。"""
-    from app import config, guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    return bool(_GN_DEEP_ENABLED and guard_native_enabled()
-                and config.get().get("guard_native_deep", True))
+    """真机加固源“适度深预拉”开关：纯常量控制，恒关闭（无配置项可开）。"""
+    return bool(_GN_DEEP_ENABLED)
 
 
 def _gn_deep_all_fresh() -> bool:
@@ -556,8 +577,10 @@ async def _gn_deep_worker() -> None:
 
     池有 3 台设备：用 _GN_DEEP_CONC(=2) 路并发取页，给前台播放始终留 1 台；
     每页留 _GN_DEEP_GAP 喘息，空两页即停。结果落 guard_catalog.json，翻页全命中本地。"""
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
     try:
+        if _g is None:
+            return
         groups = {g["conf"]["key"]: g for g in _gn_sources()}
         have = set(_gn_classes_meta().keys())
         keys = [k for k in _GN_DEEP_SRCS if k in have and groups.get(k)
@@ -720,8 +743,12 @@ def _gn_folder_row(guid: str, title: str, subtitle: str = "",
 
 def _gn_sources() -> list[dict]:
     """可浏览（有影视分类）的启用加固源，附 conf。"""
+    if not features.GUARD:
+        return []
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
+    if _g is None:
+        return []
     out = []
     if not _g.available():
         return out
@@ -822,7 +849,11 @@ def _gn_map_cards(group: dict, vods: list, n: int, anc_name: str,
 
 def _gn_refresh_hot() -> None:
     """后台：并发取各加固源首页推荐/首个分类，混合去重成聚合墙并入库。"""
-    _g = importlib.import_module("gua" + "rd")
+    if not features.GUARD:
+        return
+    _g = _guard_mod()
+    if _g is None:
+        return
 
     async def _fetch(group: dict):
         """返回 (items, ok)；items=[(vod, cname|None),...]。
@@ -936,84 +967,92 @@ def _gn_ensure_meta() -> None:
 
     redroid 单实例对调用串行，22 源并发只会互相排队、各自超时；顺序取反而最快，
     且 browse_classes 命中缓存后约 1s/源。失败源沿用旧分类（按源保留）。"""
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
+    if _g is None:
+        return
 
     async def run():
-        deadline = time.time() + 420.0   # 自驱续扫总时限（源多/有慢源时给足时间）
-        empty_backoff = 25.0            # “空分类”快速重试（多为暂时未初始化/冷启）
-        fail_backoff = 90.0             # 真异常（超时/报错）冷却
-        while time.time() < deadline:
-            groups = _gn_sources()
-            with _gn_lock:
-                fail = dict(_gn_state["meta_fail"])
-                empt = dict(_gn_state.get("meta_empty") or {})
-                have = set(_gn_state["cls"].keys())
-            now_l = time.time()
-            # 区分对待：真失败冷却 90s；返回空分类只等 25s 就重试（这类源初始化完成前
-            # 会短暂返回空，不能像 v0.2.17 那样重罚 2 分钟，否则多线源迟迟进不了库）。
-            pending = []
-            for g in groups:
-                k = g["conf"]["key"]
-                if k in have:
-                    continue
-                if now_l - fail.get(k, 0) < fail_backoff:
-                    continue
-                if now_l - empt.get(k, 0) < empty_backoff:
-                    continue
-                pending.append(g)
-            if not pending:
-                break
-
-            round_start = time.time()
-            progressed = False
-            for group in pending:
-                if time.time() - round_start > 300:
-                    break  # 单轮预算放宽，尽量一轮扫完；剩余下一轮续扫
-                key = group["conf"]["key"]
-                try:
-                    meta = await asyncio.wait_for(
-                        asyncio.to_thread(_g.browse_meta, group["conf"]),
-                        timeout=12)
-                    errored = False
-                    err_reason = ""
-                except Exception as _exc:  # noqa: BLE001
-                    _log.debug("run failed", exc_info=True)
-                    meta, errored = {}, True
-                    err_reason = repr(_exc)[:160]
-                # 健康源约 1s；保留极小喘息，避免高频连续调用把单设备压挂。
-                await asyncio.sleep(0.2)
-                c = meta.get("classes") if isinstance(meta, dict) else []
-                flt = meta.get("filters") if isinstance(meta, dict) else {}
+        try:
+            deadline = time.time() + 420.0   # 自驱续扫总时限（源多/有慢源时给足时间）
+            empty_backoff = 25.0            # “空分类”快速重试（多为暂时未初始化/冷启）
+            fail_backoff = 90.0             # 真异常（超时/报错）冷却
+            while time.time() < deadline:
+                groups = _gn_sources()
                 with _gn_lock:
-                    empt_map = _gn_state.setdefault("meta_empty", {})
-                    if c:
-                        progressed = True
-                        _gn_state["cls"][key] = {
-                            "name": group["source"].get("name")
-                                    or group["conf"]["key"],
-                            "classes": c,
-                            "filters": flt or {}}
-                        _gn_state["meta_ok"][key] = time.time()
-                        _gn_state["meta_ts"] = time.time()
-                        empt_map.pop(key, None)
-                        _gn_state["meta_fail"].pop(key, None)
-                        _gn_persist()
-                    elif errored:
-                        _gn_state["meta_fail"][key] = time.time()
-                        _gn_state.setdefault("meta_fail_reason", {})[key] = err_reason
-                    else:
-                        empt_map[key] = time.time()
+                    fail = dict(_gn_state["meta_fail"])
+                    empt = dict(_gn_state.get("meta_empty") or {})
+                    have = set(_gn_state["cls"].keys())
+                now_l = time.time()
+                # 区分对待：真失败冷却 90s；返回空分类只等 25s 就重试（这类源初始化完成前
+                # 会短暂返回空，不能像 v0.2.17 那样重罚 2 分钟，否则多线源迟迟进不了库）。
+                pending = []
+                for g in groups:
+                    k = g["conf"]["key"]
+                    if k in have:
+                        continue
+                    if now_l - fail.get(k, 0) < fail_backoff:
+                        continue
+                    if now_l - empt.get(k, 0) < empty_backoff:
+                        continue
+                    pending.append(g)
+                if not pending:
+                    break
+
+                round_start = time.time()
+                progressed = False
+                for group in pending:
+                    if time.time() - round_start > 300:
+                        break  # 单轮预算放宽，尽量一轮扫完；剩余下一轮续扫
+                    key = group["conf"]["key"]
+                    try:
+                        meta = await asyncio.wait_for(
+                            asyncio.to_thread(_g.browse_meta, group["conf"]),
+                            timeout=12)
+                        errored = False
+                        err_reason = ""
+                    except Exception as _exc:  # noqa: BLE001
+                        _log.debug("run failed", exc_info=True)
+                        meta, errored = {}, True
+                        err_reason = repr(_exc)[:160]
+                    # 健康源约 1s；保留极小喘息，避免高频连续调用把单设备压挂。
+                    await asyncio.sleep(0.2)
+                    c = meta.get("classes") if isinstance(meta, dict) else []
+                    flt = meta.get("filters") if isinstance(meta, dict) else {}
+                    with _gn_lock:
+                        empt_map = _gn_state.setdefault("meta_empty", {})
+                        if c:
+                            progressed = True
+                            _gn_state["cls"][key] = {
+                                "name": group["source"].get("name")
+                                        or group["conf"]["key"],
+                                "classes": c,
+                                "filters": flt or {}}
+                            _gn_state["meta_ok"][key] = time.time()
+                            _gn_state["meta_ts"] = time.time()
+                            empt_map.pop(key, None)
+                            _gn_state["meta_fail"].pop(key, None)
+                            _gn_persist()
+                        elif errored:
+                            _gn_state["meta_fail"][key] = time.time()
+                            _gn_state.setdefault("meta_fail_reason", {})[key] = err_reason
+                        else:
+                            empt_map[key] = time.time()
+                with _gn_lock:
+                    _gn_state["meta_ts"] = time.time()
+                if not progressed:
+                    # 没有新进展也别立刻放弃：空分类源很快就能初始化好，等一个 backoff 再扫
+                    await asyncio.sleep(empty_backoff)
+                    continue
+                await asyncio.sleep(3)
             with _gn_lock:
                 _gn_state["meta_ts"] = time.time()
-            if not progressed:
-                # 没有新进展也别立刻放弃：空分类源很快就能初始化好，等一个 backoff 再扫
-                await asyncio.sleep(empty_backoff)
-                continue
-            await asyncio.sleep(3)
-        with _gn_lock:
-            _gn_state["meta_ts"] = time.time()
-            _gn_state["meta_refreshing"] = False
-        _gn_persist()
+                _gn_state["meta_refreshing"] = False
+            _gn_persist()
+        finally:
+            # 无论成败都必须复位，否则一次异常会让分类元数据永久
+            # 不再刷新（与 _gn_refresh_hot 的 hot_refreshing 复位同款写法）。
+            with _gn_lock:
+                _gn_state["meta_refreshing"] = False
 
     with _gn_lock:
         if _gn_state.get("meta_refreshing"):
@@ -1070,7 +1109,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
                       extend: dict | None = None,
                       force_type: str | None = None):
     """返回该分类页的在途取数任务（去重、持久，不被等待方超时取消）。"""
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
     ext = dict(extend or {})
     ckey = f"{key}|{tid}|{pg}{_gn_ext_key(ext)}"
     with _gn_lock:
@@ -1080,7 +1119,7 @@ def _gn_category_task(key: str, tid: str, pg: int = 1,
             return existing
         groups = {g["conf"]["key"]: g for g in _gn_sources()}
         group = groups.get(key)
-        if not group:
+        if _g is None or not group:
             async def _empty():
                 return [], False
             tsk = asyncio.ensure_future(_empty())
@@ -1340,6 +1379,8 @@ async def _gn_category_page(key: str, tid: str, cname: str, pg: int = 1,
     """单一源分类某一页：先读缓存即时返回，未命中在有界窗口内等持久在途任务。
 
     返回 (rows, handled=True, more)；调用方超时不取消真正取数，结果落缓存下次秒回。
+    本次快速失败时返回 (rows=[], handled=False, more=True)：空页不代表“已处理”，
+    调用方不得把“失败待重试”当成“分类本来就是空的”。
     整类 Movie/TV 由分类名强制，修正电视剧被识别成电影。"""
     force_type = "TV" if _gn_class_is_tv(cname) else "Movie"
     ext = _gn_area_extend(key, tid, area) if area is not None else {}
@@ -1356,13 +1397,19 @@ async def _gn_category_page(key: str, tid: str, cname: str, pg: int = 1,
     if hit_rows:
         return hit_rows, True, more
     try:
+        # shield：超时只取消等待方，不取消共享的 inflight 取数任务
+        # （docstring 承诺“调用方超时不取消真正取数”，旧代码直接 wait_for
+        # 任务本身，超时即取消它，承诺是假的）。
+        task = _gn_category_task(key, tid, pg, ext, force_type)
         cards, more = await asyncio.wait_for(
-            _gn_category_task(key, tid, pg, ext, force_type), timeout=9)
+            asyncio.shield(task), timeout=9)
         return cards or [], True, bool(more)
     except Exception:  # noqa: BLE001
-        # 本次快速失败，但持久任务仍在后台取数（结果落缓存，下次秒回）
-        _log.debug("_gn_category_page failed: tid=%s", tid, exc_info=True)
-        return [], True, True
+        # 本次快速失败，但持久任务仍在后台取数（结果落缓存，下次秒回）；
+        # handled=False：本次未产出有效页，与“分类本来就是空的”区分开。
+        _log.warning("_gn_category_page failed: key=%s tid=%s pg=%s",
+                     key, tid, pg, exc_info=True)
+        return [], False, True
 
 
 def _gn_source_name(key: str) -> str:
@@ -1520,8 +1567,10 @@ async def _gn_warm_worker() -> None:
                     continue
                 ftype = "TV" if _gn_class_is_tv(cname) else "Movie"
                 try:
+                    # 同上：shield 共享 inflight 任务，超时只放弃本次等待。
+                    task = _gn_category_task(key, tid, 1, None, ftype)
                     await asyncio.wait_for(
-                        _gn_category_task(key, tid, 1, None, ftype), timeout=24)
+                        asyncio.shield(task), timeout=24)
                 except Exception:  # noqa: BLE001
                     _log.debug("_gn_warm_worker failed", exc_info=True)
                     pass
@@ -1537,7 +1586,9 @@ async def _gn_warm_worker() -> None:
 async def _gn_prefetch_loop(stop: asyncio.Event) -> None:
     """后台周期性预热加固原生聚合库：安卓运行时就绪后刷新源分类与聚合墙。"""
     guard_native_enabled = importlib.import_module("app").guard_native_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    _g = importlib.import_module("gua" + "rd")
+    _g = _guard_mod()
+    if _g is None:
+        return
     await asyncio.sleep(20)
     while not stop.is_set():
         wait_s = 600  # 默认 10 分钟巡检

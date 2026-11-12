@@ -1129,6 +1129,43 @@ async def lifespan(app: FastAPI):
             pass
 
 
+# 内存工人 3：海量首屏预热并发度与每轮总预算。旧版 10 类串行、每类
+# 25s 超时，理论最坏 10x25=250s/轮，队尾分类要等前面慢源；4 路并
+# 发 + 120s 总预算后，慢源最多拖住一轮预算，不再拖垮整轮。信号量
+# 只限流、不多发请求，不放大对源站的压力。
+HOT_PREWARM_CONCURRENCY = 4
+HOT_PREWARM_BUDGET_SECONDS = 120.0
+
+
+async def _prewarm_catalog(budget: float = HOT_PREWARM_BUDGET_SECONDS) -> None:
+    """预热海量首屏：各分类 gather + 信号量并发，不再串行等慢源。
+
+    每类仍是 get_window(cat, 0, 22) + 25s 单类超时；整轮再加总预算，
+    超时后未完成的分类直接取消、本轮已预热的分类保留，下轮再试。
+    """
+    sem = asyncio.Semaphore(HOT_PREWARM_CONCURRENCY)
+
+    async def warm_one(cat: str) -> None:
+        async with sem:
+            try:
+                if catalog.available(cat):
+                    await asyncio.wait_for(catalog.get_window(cat, 0, 22),
+                                           timeout=25)
+            except Exception:
+                _log.debug("_prewarm_catalog failed", exc_info=True)
+                pass
+
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(
+                *[warm_one(c) for c, _t, _x in catalogmod.CATALOG_CATEGORIES],
+                return_exceptions=True),
+            timeout=budget)
+    except asyncio.TimeoutError:
+        _log.warning("catalog prewarm exceeded %.0fs budget; "
+                     "keeping warmed categories", budget)
+
+
 async def _hot_worker(app: FastAPI):
     """榜单 + 海量库路由后台刷新。启动先读旧缓存，稍等再刷新；之后按配置轮询。"""
     await asyncio.sleep(4)
@@ -1154,15 +1191,9 @@ async def _hot_worker(app: FastAPI):
                 _log.warning("catalog routes failed: %s", exc)
         # 预热海量四库首屏：首次打开现抓多源页面要 6~19s，超过客户端等待就会
         # 显示“加载失败/空海报墙”。后台先抓一次，页面缓存命中后秒开。
+        # 内存工人 3：gather + 信号量并发 + 每轮总预算（见 _prewarm_catalog）。
         if catalog_on:
-            for _cat, _t, _x in catalogmod.CATALOG_CATEGORIES:
-                try:
-                    if catalog.available(_cat):
-                        await asyncio.wait_for(catalog.get_window(_cat, 0, 22),
-                                               timeout=25)
-                except Exception:
-                    _log.debug("_hot_worker failed", exc_info=True)
-                    pass
+            await _prewarm_catalog()
         try:
             await asyncio.wait_for(app.state.stop_hot.wait(), timeout=300)
         except asyncio.TimeoutError:
@@ -4887,15 +4918,30 @@ def _attach_related(data: dict, brief: dict) -> None:
         _log.debug("related config check failed: %s", type(exc).__name__)
         return
     try:
-        from related import DEFAULT_LIMIT, related_for, related_for_with_dense
+        from related import (DEFAULT_LIMIT, related_cache_lookup,
+                             related_cache_store, related_for,
+                             related_for_with_dense)
         pool = list(store._titles.values())
-        items = related_for(brief, pool)
-        if len(items) < DEFAULT_LIMIT:
-            dense: list[dict] = []
-            for _cat in catalogmod.CATS:
-                dense.extend(catalog.cached_dense(_cat, 40))
-            if dense:
-                items = related_for_with_dense(brief, pool, dense)
+        # 内存工人 3：按 guid 缓存。失效依据 = 标题池代际 + dense 指纹；
+        # 命中时不再全池扫描，dense 列表也不用现拼。
+        pool_version = getattr(store, "titles_version", 0)
+        dense_fp = catalog.dense_fingerprint()
+        dense_len = sum(dense_fp)
+        items = related_cache_lookup(
+            brief, pool_version=pool_version, dense_fingerprint=dense_fp,
+            pool_len=len(pool), dense_len=dense_len)
+        if items is None:
+            items = related_for(brief, pool)
+            if len(items) < DEFAULT_LIMIT:
+                dense: list[dict] = []
+                for _cat in catalogmod.CATS:
+                    dense.extend(catalog.cached_dense(_cat, 40))
+                if dense:
+                    items = related_for_with_dense(brief, pool, dense)
+            related_cache_store(
+                brief, items, pool_version=pool_version,
+                dense_fingerprint=dense_fp, pool_len=len(pool),
+                dense_len=dense_len)
     except Exception as exc:
         _log.debug("related failed: %s", type(exc).__name__)
         return
@@ -6499,9 +6545,20 @@ def _guard_source_for(picked: dict) -> dict | None:
 
 
 _MSEARCH_CACHE: dict[str, tuple] = {}   # 片名 -> (ts, source_key, vod_id, line)
+_MSEARCH_MAX = 1000    # 上限：超限按时间戳淘汰最旧 200 条，避免长期运行无限增长
+_MSEARCH_EVICT = 200
 _MSEARCH_TTL = 1800
 _MSEARCH_MAX_SRCS = 3   # 并发扇出的源数（=redroid 设备数，保证每源独占一台、零排队）
 _MSEARCH_SEARCH_TIMEOUT = 14.0  # 单源搜索超时：设备偶被预热占用时给足排队+出片时间（<播放端~20s窗口）
+
+
+def _msearch_cache_put(title: str, value: tuple) -> None:
+    """写入片名命中缓存；超 1000 条按时间戳淘汰最旧 200 条。"""
+    _MSEARCH_CACHE[title] = value
+    if len(_MSEARCH_CACHE) > _MSEARCH_MAX:
+        for k in sorted(_MSEARCH_CACHE,
+                        key=lambda kk: _MSEARCH_CACHE[kk][0])[:_MSEARCH_EVICT]:
+            _MSEARCH_CACHE.pop(k, None)
 
 
 def _msearch_parse(vod_id: str) -> tuple[str, str]:
@@ -6513,36 +6570,73 @@ def _msearch_parse(vod_id: str) -> tuple[str, str]:
     return title, poster
 
 
+def _msearch_health_weight(sid: str, key: str) -> tuple:
+    """某 guard 源的健康排序权重（越小越优先）：等级 → 平均延迟 → 失败率。
+
+    sourcehealth 的画像键以源 id（guard-<key>）为主；个别老路径用裸 key
+    记账，故两键都查，取样本更多的那份画像；都没有则取中性值。
+    """
+    best = None
+    for cand in (sid, key):
+        st = sourcehealth.stats(cand)
+        if st.get("samples"):
+            if best is None or st["samples"] > best[0]:
+                best = (st["samples"], sourcehealth.weight(cand))
+    return best[1] if best else sourcehealth.weight(sid)
+
+
 def _msearch_targets() -> list[dict]:
     """可用于扇出聚合的【可搜索加固源】，按“易命中/出片快”优先排序。
 
-    redroid 池通常只有 2~3 台、每台设备内仍串行，因此扇出必须收敛到少量真正
-    不同的快源（8 个源里塞 6 个同后端的 AppSx 镜像只会重复排队）。优先级：
-    多线秒播主力 → 秒播单站；同前缀镜像只留一个（AppSx2..6 与 AppSx 同后端）。"""
+    动态取数：全部已启用、可搜索的 guard 源都参与候选，按
+    providers.source_priority（用户覆盖优先，否则内省默认档）降序、再按
+    sourcehealth 最近成功率/健康度升序排序，取前 _MSEARCH_MAX_SRCS 个；
+    硬编码 PREF 只作并列时的排序种子。失效源（死亡冷却、等级最末）自然
+    沉底，由健康源自动替补，不再只认 PREF 里的 10 个源。
+    同前缀镜像去重（AppSx / AppSx2..7 视为一族，只取一个）。
+    """
     import guard as _g
-    # 主力多线源（2026-10-31 实测重排）：按“能搜到 + 能解出真实 m3u8 + 出片快”排序。
-    # 实测 Bttwoo(字节CDN)/Jpys(PP视频) 搜索与 play 均稳定秒出地址；Hmys 有结果但 play
-    # 偶发空、JPJ/KkSs/Seedhub 详情易超时，故它们作为补充/兜底，不放最前。
-    # （原先置顶的 AppSx/Nmyswv/AppTT/Auete/NewCz 等已实测对大众片返回 0 条，移出主力。）
-    # 前 3 个是实测“能搜到且能解出真实 m3u8”的主力（正好对应 _MSEARCH_MAX_SRCS=3，
-    # 每源独占一台 redroid 不排队）；其余作为缓存命中或扩容时的后备。
+    # 主力多线源（2026-10-31 实测重排）只作排序种子：Bttwoo(字节CDN)/
+    # Jpys(PP视频) 搜索与 play 均稳定秒出地址；Hmys 有结果但 play 偶发空、
+    # JPJ/KkSs/Seedhub 详情易超时，故作补充/兜底；原先置顶的 AppSx/Nmyswv/
+    # AppTT/Auete/NewCz 等已实测对大众片返回 0 条，移出主力种子（仍可凭
+    # 健康度/优先级从动态候选中入选）。
     PREF = ["Bttwoo", "Jpys", "Hmys", "JPJ", "YpanSo",
             "KkSs", "Seedhub", "NewCz", "YCyz", "T42"]
+    pref_rank = {key: i for i, key in enumerate(PREF)}
+    try:
+        overrides = config.get().get("source_priority") or {}
+    except Exception:  # noqa: BLE001
+        _log.debug("_msearch_targets failed", exc_info=True)
+        overrides = {}
+    cands = []
+    for key, conf in (_g._load_sites() or {}).items():
+        if not conf.get("enabled", True):
+            continue
+        if not conf.get("searchable", True):
+            continue
+        sid = "guard-" + key
+        prio = providers.source_priority(
+            {"id": sid, "guard": True, "guard_key": key}, overrides)
+        health = _msearch_health_weight(sid, key)
+        cands.append({"key": key, "conf": conf,
+                      "name": conf.get("name") or key,
+                      "multi": ("多线" in str(conf.get("name") or "")),
+                      "_sort": (-prio, health, pref_rank.get(key, len(PREF)))})
+    cands.sort(key=lambda c: c["_sort"])
     seen_prefix: set[str] = set()
     out = []
-    for key in PREF:
-        conf = _g.site(key)
-        if not conf or not conf.get("searchable", True):
-            continue
+    for c in cands:
         # 同后端镜像去重（AppSx / AppSx2..7 视为一族，只取一个）
-        prefix = "AppSx" if key.startswith("AppSx") else key
+        prefix = "AppSx" if c["key"].startswith("AppSx") else c["key"]
         if prefix in seen_prefix:
             continue
         seen_prefix.add(prefix)
-        name = conf.get("name") or key
-        out.append({"key": key, "conf": conf, "name": name,
-                    "multi": ("多线" in str(name))})
-    return out[:_MSEARCH_MAX_SRCS]
+        out.append({"key": c["key"], "conf": c["conf"], "name": c["name"],
+                    "multi": c["multi"]})
+        if len(out) >= _MSEARCH_MAX_SRCS:
+            break
+    return out
 
 
 async def _msearch_resolve_one(key: str, vid: str, want_idx: int,
@@ -6558,10 +6652,12 @@ async def _msearch_resolve_one(key: str, vid: str, want_idx: int,
         det = await asyncio.wait_for(
             asyncio.to_thread(guard.detail, conf, vid),
             timeout=_MSEARCH_SEARCH_TIMEOUT)
+        # 畸形详情（parse_episodes 抛错）也在 try 内：一个源坏了只丢该分支，
+        # 不毒死整个多源竞速。
+        eps = guard.parse_episodes(det) if det else []
     except Exception:  # noqa: BLE001
         _log.debug("_msearch_resolve_one failed: vid=%s", vid, exc_info=True)
         return None
-    eps = guard.parse_episodes(det) if det else []
     if not eps:
         return None
     groups: dict[str, list] = {}
@@ -6639,7 +6735,13 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         winner = None
         try:
             for fut in asyncio.as_completed(tasks):
-                r = await fut
+                try:
+                    r = await fut
+                except Exception:  # noqa: BLE001
+                    # 单个源分支异常只丢该分支，继续等其他源竞速。
+                    _log.debug("_resolve_guard_msearch branch failed",
+                               exc_info=True)
+                    continue
                 if r:
                     winner = r
                     break
@@ -6660,13 +6762,20 @@ async def _resolve_guard_msearch(picked: dict) -> bool:
         picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
         picked["_guard_parse"] = int(res.get("parse", 0) or 0)
         picked["play_from"] = f"guard-{key}:{line}"
-        _MSEARCH_CACHE[title] = (now, key, vid, line)
+        _msearch_cache_put(title, (now, key, vid, line))
         return True
     except Exception:  # noqa: BLE001
         _log.debug("_resolve_guard_msearch failed", exc_info=True)
         return False
 
 
+def _safe_index(picked: dict) -> int:
+    """集序号容错取值：缺失/非数字/负数一律按 0 集处理，绝不抛错。
+    集序号读取统一走这里。"""
+    try:
+        return max(0, int(picked.get("index", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def _resolve_guard_pan(picked: dict) -> bool:
@@ -6716,7 +6825,7 @@ async def _resolve_guard_pan(picked: dict) -> bool:
     items = [x for x in (r.get("items") or []) if x.get("url")]
     if not items:
         return False
-    idx = int(picked.get("index", 0) or 0)
+    idx = _safe_index(picked)
     item = items[min(idx, len(items) - 1)]
     # 根相对地址：播放器与本服务同源（quark 走旧路径，UC 走 /pan/uc/play）。
     play_path = "/v/api/ext/pan/play" if key == "quark" else f"/v/api/ext/pan/{key}/play"
@@ -6740,6 +6849,9 @@ class _GuardPanUnsupported(Exception):
 _GUARD_RES_INFLIGHT: dict[str, asyncio.Future] = {}
 _GUARD_RES_CACHE: dict[str, tuple[float, dict]] = {}
 _GUARD_RES_TTL = 120.0
+# 加固 detail/play 单步外层超时：guard._call 内部已是 22s 调用超时，
+# 这里再包一层 30s，避免裸 to_thread 在设备端异常时无限拖住播放链。
+_GUARD_RESOLVE_TIMEOUT = 30.0
 
 
 async def _resolve_guard(picked: dict) -> bool:
@@ -6752,7 +6864,7 @@ async def _resolve_guard(picked: dict) -> bool:
     if cacheable:
         source = _guard_source_for(picked) or {}
         key = "%s|%s|%s" % (source.get("key") or picked.get("play_from", ""),
-                           vod_id, int(picked.get("index", 0) or 0))
+                           vod_id, _safe_index(picked))
         ent = _GUARD_RES_CACHE.get(key)
         if ent:
             ts, snap = ent
@@ -6782,56 +6894,64 @@ async def _resolve_guard(picked: dict) -> bool:
 async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
     """加固爬虫：搜索结果只持有 vod_id；播放前动态取详情，再调用
     Android runner 的 playerContent 取得真实 m3u8/mp4。"""
-    import guard
-    # 片单/元搜索源（豆豆片单等）的影片 id 形如 "msearch:###片名###海报"，自身不提供
-    # 线路；其在 OK影视 里由加密 mergeguard + 宿主本地聚合服务扇出到订阅内各源。我们的
-    # 精简 bridge host 没有该本地服务，故这里用片名在“可搜索的加固兄弟源”里自助扇出，
-    # 等价实现“自动聚合各订阅线路、优先能秒解的那条”。
-    if str(picked.get("url", "")).startswith("msearch:"):
-        return await _resolve_guard_msearch(picked)
-    # 网盘分享型（夸克 / UC / 阿里 / 百度 / 迅雷 / 115 / 天翼 / 移动，或四盘
-    # 聚合的 /link_start/?redirect_to=pan_id_xxx 占位）。已适配的家（夸克）转存→
-    # 原画→cookie 注入播放代理；识别到但未适配的家给可读提示，不再静默走普通加固
-    # （普通加固对网盘链接必然失败，错误信息无意义）。
-    pv = _pan_match(str(picked.get("url", ""))) or (
-        _PAN_LINKSTART_RE.search(str(picked.get("url", ""))) and _PAN_PROVIDERS[0])
-    if pv:
-        if not any(_PAN_MODS.values()):
-            picked["pan_error"] = "识别到网盘资源，但本构建不含网盘播放模块"
-            return False
-        try:
-            pan_hit = await _resolve_guard_pan(picked)
-        except _GuardPanUnsupported as exc:
-            picked["pan_error"] = str(exc)
-            _log.info("网盘资源暂不支持：%s 《%s》 %s",
-                      picked.get("line"), picked.get("title"), exc)
-            return False
-        if pan_hit:
-            picked.pop("pan_error", None)
-            return True
-    source = _guard_source_for(picked)
-    conf = providers._guard_conf(source) if source else None
-    if not conf:
-        return False
-    vod_id = picked.get("url", "")
-    if not vod_id:
-        return False
+    # import guard 与前置分支（msearch/网盘）都在 try 内：guard 模块导入失败时返回 False，不把异常抛到播放接口。
     try:
+        import guard
+        # 片单/元搜索源（豆豆片单等）的影片 id 形如 "msearch:###片名###海报"，自身不提供
+        # 线路；其在 OK影视 里由加密 mergeguard + 宿主本地聚合服务扇出到订阅内各源。我们的
+        # 精简 bridge host 没有该本地服务，故这里用片名在“可搜索的加固兄弟源”里自助扇出，
+        # 等价实现“自动聚合各订阅线路、优先能秒解的那条”。
+        if str(picked.get("url", "")).startswith("msearch:"):
+            return await _resolve_guard_msearch(picked)
+        # 网盘分享型（夸克 / UC / 阿里 / 百度 / 迅雷 / 115 / 天翼 / 移动，或四盘
+        # 聚合的 /link_start/?redirect_to=pan_id_xxx 占位）。已适配的家（夸克）转存→
+        # 原画→cookie 注入播放代理；识别到但未适配的家给可读提示，不再静默走普通加固
+        # （普通加固对网盘链接必然失败，错误信息无意义）。
+        pv = _pan_match(str(picked.get("url", ""))) or (
+            _PAN_LINKSTART_RE.search(str(picked.get("url", ""))) and _PAN_PROVIDERS[0])
+        if pv:
+            if not any(_PAN_MODS.values()):
+                picked["pan_error"] = "识别到网盘资源，但本构建不含网盘播放模块"
+                return False
+            try:
+                pan_hit = await _resolve_guard_pan(picked)
+            except _GuardPanUnsupported as exc:
+                picked["pan_error"] = str(exc)
+                _log.info("网盘资源暂不支持：%s 《%s》 %s",
+                          picked.get("line"), picked.get("title"), exc)
+                return False
+            if pan_hit:
+                picked.pop("pan_error", None)
+                return True
+        source = _guard_source_for(picked)
+        conf = providers._guard_conf(source) if source else None
+        if not conf:
+            return False
+        vod_id = picked.get("url", "")
+        if not vod_id:
+            return False
         want_line = (picked.get("play_from", "").split(":", 1)[1]
                      if ":" in picked.get("play_from", "") else "")
         # 详情已绑定的集（play_from 带真实线路，url 是完整 episode id，可能形如
         # "{play_id=..,playUrl=..}"）直接播放，不必再按 vod_id 取详情；
         # 只有搜索占位（url 是裸 vod_id、无线路）才需要先 detail 解析集列表。
+        if want_line and "playUrl=" not in vod_id and not vod_id.startswith("{"):
+            _log.warning(
+                "_resolve_guard_once: want_line=%r but vod_id=%r has no "
+                "episode shape; resolving via detail", want_line, vod_id)
         direct_ep = bool(want_line) and (
-            "playUrl=" in vod_id or vod_id.startswith("{") or "/" not in vod_id[:1])
+            "playUrl=" in vod_id or vod_id.startswith("{"))
         if direct_ep:
             chosen = {"line": want_line, "id": vod_id}
         else:
-            det = await asyncio.to_thread(guard.detail, conf, vod_id)
+            det = await asyncio.wait_for(
+                asyncio.to_thread(guard.detail, conf, vod_id),
+                timeout=_GUARD_RESOLVE_TIMEOUT)
             episodes = guard.parse_episodes(det)
             if not episodes:
+                picked["guard_error"] = "加固详情无选集"
                 return False
-            idx = int(picked.get("index", 0) or 0)
+            idx = _safe_index(picked)
             same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
             chosen = None
             if idx < len(same_line):
@@ -6846,15 +6966,19 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
                         chosen = eps[idx]
                         break
                 chosen = chosen or episodes[0]
-        res = await asyncio.to_thread(guard.play, conf, chosen["line"], chosen["id"])
+        res = await asyncio.wait_for(
+            asyncio.to_thread(guard.play, conf, chosen["line"], chosen["id"]),
+            timeout=_GUARD_RESOLVE_TIMEOUT)
         url = (res or {}).get("url", "")
         if not url:
+            picked["guard_error"] = "加固播放未返回地址"
             return False
         picked["url"] = url
         picked["guard"] = False
         picked["headers"] = res.get("_headers") or {"User-Agent": "Mozilla/5.0"}
         picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
         picked["_guard_parse"] = int(res.get("parse", 0) or 0)
+        picked.pop("guard_error", None)
         if rkey:
             snap = {"ok": True, "url": url, "guard": False,
                     "headers": picked["headers"], "m3u8": picked["m3u8"],
@@ -6865,7 +6989,10 @@ async def _resolve_guard_once(picked: dict, rkey: str = "") -> bool:
                                   key=lambda k: _GUARD_RES_CACHE[k][0])[:200]:
                     _GUARD_RES_CACHE.pop(old, None)
         return True
-    except Exception:
+    except Exception as exc:
+        # 加固运行时不可用（超时/传输失败等）：像网盘路径的 pan_error 一样，
+        # 把原因写进 picked，让播放链能透传给客户端，而不是静默 False。
+        picked["guard_error"] = f"{type(exc).__name__}: {str(exc)[:200]}"
         _log.debug("_resolve_guard_once failed", exc_info=True)
         return False
 # <<< PRIVATE:GUARD
@@ -6883,6 +7010,7 @@ def _spider_source_for(picked: dict) -> dict | None:
 async def _resolve_spider(picked: dict) -> bool:
     """普通 csp_ 爬虫（订阅导入）：按各自 jar 经 redroid 解析真实播放地址。"""
     import spiders
+    import guard
     source = _spider_source_for(picked)
     conf = providers._spider_conf(source) if source else None
     if not conf:
@@ -6893,8 +7021,12 @@ async def _resolve_spider(picked: dict) -> bool:
     try:
         want_line = (picked.get("play_from", "").split(":", 1)[1]
                      if ":" in picked.get("play_from", "") else "")
+        if want_line and "playUrl=" not in vod_id and not vod_id.startswith("{"):
+            _log.warning(
+                "_resolve_spider: want_line=%r but vod_id=%r has no "
+                "episode shape; resolving via detail", want_line, vod_id)
         direct_ep = bool(want_line) and (
-            "playUrl=" in vod_id or vod_id.startswith("{") or "/" not in vod_id[:1])
+            "playUrl=" in vod_id or vod_id.startswith("{"))
         if direct_ep:
             chosen = {"line": want_line, "id": vod_id}
         else:
@@ -6902,7 +7034,7 @@ async def _resolve_spider(picked: dict) -> bool:
             episodes = guard.parse_episodes(det)
             if not episodes:
                 return False
-            idx = int(picked.get("index", 0) or 0)
+            idx = _safe_index(picked)
             same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
             if idx < len(same_line):
                 chosen = same_line[idx]

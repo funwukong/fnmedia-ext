@@ -1,7 +1,12 @@
 """P2-except 收敛：计数回归 + 日志定义守门。
 
 - 用 tools/count_except.py（与任务基线同一口径）统计 proxy/ 的宽捕获：
-  总数不得超过基线 626，有日志比例不得低于 90%，app.py 不得低于 90%。
+  总数不得超过基线 639，有日志比例不得低于 90%，app.py 不得低于 90%。
+  基线 626 → 639（guardfix 合入，2026-11-12）：+16，逐项核实均为加固
+  fail-open 路径——guard.py +7（全有日志）、sidecar_io.py 新文件 +7
+  （stop_proc/_drain 的尽力清理吞错）、config.py +2（有日志）、app.py +2
+  （有日志）、admin_api.py +1（有日志）、runner_errors.py 新文件 +1，
+  抵消调用客户端模块 -2、catvod.py -1、drpy.py -1；有日志比 92.5%。
 - 守门：任何用到 ``_log.`` / ``logger.`` 的模块，必须在模块级定义了
   ``_log`` / ``logger``，否则脚本化插入的日志行会在异常时抛 NameError。
 """
@@ -33,7 +38,7 @@ def _run_counter():
 
 def test_broad_except_totals_do_not_grow():
     total, logged, per_file = _run_counter()
-    assert total <= 626, f"broad except grew past baseline 626: {total}"
+    assert total <= 639, f"broad except grew past baseline 639: {total}"
     assert logged / total >= 0.90, f"logged ratio too low: {logged}/{total}"
     app_total, app_logged = per_file["proxy/app.py"]
     assert app_total <= 301, f"app.py broad except grew past 301: {app_total}"

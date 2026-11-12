@@ -18,7 +18,7 @@ App 与 jar 的安装/下发由 setup_redroid.sh 完成。未就绪时 available
 
 环境变量：
   ANDROID_BRIDGE_URL   模拟器内 bridge App 经端口映射暴露的 HTTP 地址
-                       （默认 http://127.0.0.1:9101）
+                       （默认 http://127.0.0.1:9110）
   ANDROID_ADB_SERIAL   可选 adb serial（默认 emulator-5554）
 """
 from __future__ import annotations
@@ -28,13 +28,15 @@ import logging
 import os
 import urllib.request
 
+import runner_errors
+
 log = logging.getLogger("runner.android")
 
 # 模拟器 bridge 一定是本机/容器内网地址，绝不走环境里的 HTTP(S)_PROXY
 # （urllib 不识别 NO_PROXY 的 CIDR 写法，会误走外网代理导致 502/超时）。
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-BRIDGE_URL = os.environ.get("ANDROID_BRIDGE_URL", "http://127.0.0.1:9101").rstrip("/")
+BRIDGE_URL = os.environ.get("ANDROID_BRIDGE_URL", "http://127.0.0.1:9110").rstrip("/")
 ADB_SERIAL = os.environ.get("ANDROID_ADB_SERIAL", "emulator-5554")
 
 
@@ -66,5 +68,5 @@ def call(payload: dict, timeout: float = 120.0):
     """转发一次 catvod 调用，返回 result；bridge 内部完成 ClassLoader 缓存。"""
     j = _http("/call", payload, timeout=timeout)
     if j.get("error"):
-        raise RuntimeError(str(j["error"])[:600])
+        raise runner_errors.from_envelope(j)
     return j.get("result")

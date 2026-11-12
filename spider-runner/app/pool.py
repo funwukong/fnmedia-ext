@@ -19,12 +19,17 @@
 """
 from __future__ import annotations
 
+import collections
 import json
 import logging
 import os
+import queue
 import subprocess
 import threading
 import time
+
+import runner_errors
+from runner_errors import RunnerError, RunnerTimeoutError
 
 log = logging.getLogger("runner.pool")
 
@@ -61,9 +66,18 @@ class Sidecar:
         self._seq = 0
         self._last_use = time.time()
         self._started_at = 0.0
+        self._stderr_tail: collections.deque = collections.deque(maxlen=20)
 
     def _alive(self) -> bool:
         return bool(self.proc and self.proc.poll() is None)
+
+    def _drain_stderr(self, stream):
+        """stderr 排空线程：只留最后 20 行，避免子进程写满管道阻塞。"""
+        try:
+            for line in stream:
+                self._stderr_tail.append(line.rstrip("\n"))
+        except Exception:  # noqa: BLE001
+            pass
 
     def _start(self):
         if self._alive():
@@ -75,8 +89,36 @@ class Sidecar:
         self.proc = subprocess.Popen(
             self.cmd, cwd=self.cwd, env=full_env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, text=True, bufsize=1)
+            stderr=subprocess.PIPE, text=True, bufsize=1)
+        self._stderr_tail = collections.deque(maxlen=20)
+        threading.Thread(target=self._drain_stderr, args=(self.proc.stderr,),
+                         name=f"{self.name}-stderr", daemon=True).start()
         self._started_at = time.time()
+
+    def _readline(self, timeout: float) -> str:
+        """读线程 + queue.get(timeout=...)：timeout 再也不是摆设。
+
+        超时后读线程仍阻塞在 readline 上——随后 stop() 杀掉进程，
+        stdout 关闭，读线程即退出，不泄漏。
+        """
+        q: queue.Queue = queue.Queue(maxsize=1)
+
+        def _read():
+            try:
+                q.put(("line", self.proc.stdout.readline()))
+            except Exception as exc:  # noqa: BLE001
+                q.put(("err", exc))
+
+        threading.Thread(target=_read, name=f"{self.name}-read",
+                         daemon=True).start()
+        try:
+            kind, val = q.get(timeout=timeout)
+        except queue.Empty:
+            raise RunnerTimeoutError(
+                f"{self.name} sidecar 超时（{timeout:g}s 未返回）") from None
+        if kind == "err":
+            raise val
+        return val
 
     def call(self, payload: dict, timeout: float = 120.0):
         with self._lock:
@@ -87,9 +129,13 @@ class Sidecar:
                 payload = {"id": cid, **payload}
                 self.proc.stdin.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 self.proc.stdin.flush()
-                line = self.proc.stdout.readline()
+                line = self._readline(timeout)
                 if not line:
-                    raise RuntimeError(f"{self.name} sidecar 无响应（已退出）")
+                    rc = self.proc.poll()
+                    tail = " | ".join(self._stderr_tail)
+                    raise RuntimeError(
+                        f"{self.name} sidecar 无响应（已退出，exit={rc}"
+                        + (f"，stderr: {tail}" if tail else "") + ")")
                 resp = json.loads(line)
             except Exception:
                 self.stop()
@@ -97,17 +143,34 @@ class Sidecar:
             finally:
                 self._last_use = time.time()
             if "error" in resp:
-                raise RuntimeError(str(resp["error"])[:600])
+                raise runner_errors.from_envelope(resp)
             return resp.get("result")
 
     def stop(self):
+        """关 stdin → terminate → wait(5s) → 还活着就 kill。"""
+        proc, self.proc = self.proc, None
+        if proc is None:
+            return
         try:
-            if self.proc:
-                self.proc.stdin.close()
-                self.proc.terminate()
-        except Exception:
+            if proc.stdin:
+                try:
+                    proc.stdin.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            proc.terminate()
+        except Exception:  # noqa: BLE001
             pass
-        self.proc = None
+        try:
+            proc.wait(timeout=5)
+        except Exception:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                proc.wait(timeout=2)
+            except Exception:  # noqa: BLE001
+                pass
 
     def reap_if_idle(self, idle_for: float) -> bool:
         """空闲超时则结束。调用进行中（拿不到锁）直接跳过，绝不打断真实请求。"""

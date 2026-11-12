@@ -214,18 +214,32 @@ def _ensure_device_jar(jar_url: str) -> bool:
         return False
 
 
-def _norm_class(cls: str, key: str = "") -> str:
+def _class_short(cls: str) -> str:
+    """从全限定类名取短名（如 com.github.catvod.spider.XBPQ -> XBPQ）。"""
+    c = _norm_class(cls or "")
+    prefix = "com.github.catvod.spider."
+    return c[len(prefix):] if c.startswith(prefix) else ""
+
+
+def _norm_class(cls: str, key: str = "", base_key: str | None = None) -> str:
     """规范化爬虫 Java 类名。
 
     TVBox 里站点 spider 标识写作 csp_Xxx，但纯 dex jar 中真实类是
     com.github.catvod.spider.Xxx（csp_ 只是“来自自定义 jar”的标记，不是类名）。
     这里修正历史误存为 ...spider.csp_Xxx 的数据；非 catvod 全限定名保持原样。
+
+    数字后缀：绝不直接对 key 做 rstrip('0123456789')——类名本身可能以数字
+    结尾（如 Spider2），会被截断。计数后缀只认调用方显式给的 base_key
+    （import_sites 从分类器给出的 cls 短名里取出并存进源记录）；没有
+    base_key 时 key 原样使用，不猜、不剥离。
     """
     c = (cls or "").strip()
     if c.startswith("com.github.catvod.spider.csp_"):
         c = "com.github.catvod.spider." + c[len("com.github.catvod.spider.csp_"):]
-    if not c and key:
-        c = f"com.github.catvod.spider.{key.rstrip('0123456789')}"
+    if not c:
+        base = (base_key or "").strip() or key
+        if base:
+            c = f"com.github.catvod.spider.{base}"
     return c
 
 
@@ -247,11 +261,18 @@ def import_sites(items: list[dict], enable: str = "smart") -> dict:
         jar_url = (it.get("jar") or "").strip()
         name = str(it.get("name") or key).strip() or key
         risky = bool(risk_re.search(name))
+        # base_key：分类器追加计数后缀前的原始类短名。优先用调用方显式给的
+        # base_key，其次从分类器给出的 cls 全限定名取短名；两者都没有时
+        # 不猜（key 原样用，_norm_class 不再 rstrip 数字）。
+        base_key = str(it.get("base_key") or "").strip() \
+            or _class_short(it.get("cls") or "")
         rec = {
             "key": key,
-            "spider": it.get("spider") or f"csp_{key.rstrip('0123456789')}",
+            "base_key": base_key or key,
+            "spider": it.get("spider") or f"csp_{base_key or key}",
             "name": name,
-            "class": _norm_class(it.get("cls") or f"com.github.catvod.spider.csp_{key}", key),
+            "class": _norm_class(it.get("cls") or "", key,
+                                 base_key=base_key or None),
             "ext": it.get("ext") or "",
             "jar_url": jar_url,
             "searchable": bool(it.get("searchable", 1)),
@@ -379,7 +400,8 @@ def _call(site_conf: dict, method: str, **params):
     payload = {
         "runtime": "android",
         "jar": _device_jar_path(jar_url),
-        "class": _norm_class(site_conf.get("class", ""), site_conf.get("key", "")),
+        "class": _norm_class(site_conf.get("class", ""), site_conf.get("key", ""),
+                             base_key=site_conf.get("base_key") or None),
         "ext": site_conf.get("ext") or "",
         "method": method,
         **params,
