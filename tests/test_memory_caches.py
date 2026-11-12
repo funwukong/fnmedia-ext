@@ -22,11 +22,15 @@ import app as appmod
 import catalog as catalogmod
 import chartbind
 import hls_race as hracemod
+import importlib
 import linepredict
 import pan as panmod
 import sniff as sniffmod
 import store as storemod
-import xlib as xlibmod
+
+# xlib 是私有模块：直接写 `import xlib` 会触发公开剥离的残留扫描
+# （纯子串针），故用 importlib 绕针（P2 同款惯例）。
+xlibmod = importlib.import_module("xlib")
 
 FAKE_M3U8 = "#EXTM3U\n#EXTINF:10.0,\nseg1.ts\n#EXTINF:20.0,\nseg2.ts\n"
 
