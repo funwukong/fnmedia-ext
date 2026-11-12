@@ -788,6 +788,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <input type="number" id="fastestTimeout" min="1" max="10" step="0.5" style="width:100%"/></label>
         <label class="switch-row"><input type="checkbox" id="lineAutofail"/>
           <span>坏线自动切换<span class="sub">当前线路失效/文件不存在时自动换到可用线路，并短时跳过坏线（关闭则纯手动切线）</span></span></label>
+        <label class="switch-row"><input type="checkbox" id="fixedLineDirect"/>
+          <span>手动选线直接出流<span class="sub">手动选定某条线路后直接播放，不再先探活；已知坏线仍自动换到可用线路，自动起播不受影响</span></span></label>
         <label class="switch-row"><input type="checkbox" id="linePredict"/>
           <span>本片线路预测<span class="sub">浏览海报时对首屏影片的少数候选线做轻量探活，起播优先用已探到的最快线（只作竞速种子，不固定线路）</span></span></label>
         <label class="field" style="max-width:260px"><span>预测线路数（1-3）</span>
@@ -2330,7 +2332,8 @@ async function saveLines(){
   const body={line_fastest:$("lineFastest").checked,
     line_fastest_max:Math.max(2,Math.min(12,parseInt($("fastestMax").value)||6)),
     line_fastest_timeout:Math.max(1,Math.min(10,parseFloat($("fastestTimeout").value)||4)),
-    line_autofail:$("lineAutofail").checked};
+    line_autofail:$("lineAutofail").checked,
+    fixed_line_direct:$("fixedLineDirect").checked};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
 }
@@ -2686,6 +2689,7 @@ async function init(){
   $("onlineFirst").checked=CFG.online_first!==false;
   $("lineFastest").checked=CFG.line_fastest!==false;
   $("lineAutofail").checked=CFG.line_autofail!==false;
+  $("fixedLineDirect").checked=CFG.fixed_line_direct!==false;
   $("fastestMax").value=CFG.line_fastest_max||6;
   $("fastestTimeout").value=CFG.line_fastest_timeout||4;
   $("linePredict").checked=CFG.linepredict_enabled!==false;

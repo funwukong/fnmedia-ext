@@ -591,6 +591,20 @@ def _fastest_on() -> bool:
         return True
 
 
+def _fixed_line_direct_on() -> bool:
+    """固定线直出开关（config.fixed_line_direct，默认 True）。
+
+    开时：用户手动选线直接用该线，不再先探活（见 _ensure_playable）；
+    自动起播不受此开关影响，仍走竞速流程。
+    """
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        return bool(config.get().get("fixed_line_direct", True))
+    except Exception:
+        _log.debug("_fixed_line_direct_on failed", exc_info=True)
+        return True
+
+
 # --- 线路实测吞吐（KB/s，指数滑动平均） ------------------------------------
 # 竞速只比"首字节延迟"，会挑中"响应快、吞吐烂"的线：实测同一部片里既有 250 KB/s
 # 的线，也有 26 KB/s 的坑，延迟上看不出差别，播起来差 10 倍。播放时顺便把每条线
@@ -687,9 +701,11 @@ async def _ensure_playable(picked: dict, request: Request,
     """取流前确保目标可播。
 
     - auto=True（播放器自动起播，非用户手动切线）且开启最快线：并行竞速选最快线。
-    - 否则（用户手动选了某条线）：先探当前线，失败才记忆坏线并故障切换到首个可用线。
+    - 否则（用户手动选了某条线）且固定线直出开（默认）：直接用该线，不先探活；
+      已知坏线仍故障切换到首个可用线。开关关时恢复旧行为：先探当前线，
+      失败才记忆坏线并故障切换到首个可用线。
     返回应播放的 picked（可能已换成另一线路）。"""
-    from app import _autofail_on, _fastest_on, _line_is_bad, _race_fastest, _resolve_if_needed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import _autofail_on, _fastest_on, _fixed_line_direct_on, _line_is_bad, _race_fastest, _resolve_if_needed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     if not picked or not picked.get("online_guid"):
         return picked
     if auto and _autofail_on() and _fastest_on():
@@ -699,6 +715,18 @@ async def _ensure_playable(picked: dict, request: Request,
         # 竞速全失败：退回常规故障切换（探当前线/换线）
     if not _autofail_on():
         await _resolve_if_needed(picked, request)
+        return picked
+    if not auto and _fixed_line_direct_on():
+        # 固定线直出（解冻第 1 项）：用户手动选线直接用该线，不再先探活，
+        # 零新增同步网络等待；已知坏线仍按现有故障切换走 _find_playable，
+        # 绝不返回已知死链。未探过的线不预判死活，真正死活由下游取清单
+        # 失败换线（_serve_normal）与首分片验活兜底。
+        if _line_is_bad(picked):
+            good = await _find_playable(picked, request, skip_current=True)
+            if good is not None:
+                _log.info("手动选线为已知坏线，切换到可用线路: %s -> %s",
+                          picked.get("line"), good.get("line"))
+                return good
         return picked
     cur_bad = _line_is_bad(picked)
     if not cur_bad:

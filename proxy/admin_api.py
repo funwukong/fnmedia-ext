@@ -777,7 +777,7 @@ async def ext_set_config(request: Request):
         "welfare_library_enabled",
         "prefer_quality_source",
         "line_fastest", "line_fastest_max", "line_fastest_timeout",
-        "line_fastest_prefer", "line_autofail",
+        "line_fastest_prefer", "line_autofail", "fixed_line_direct",
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
