@@ -1871,6 +1871,7 @@ async function importSubscription(kind){
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
 }
+// >>> PRIVATE:GUARD
 async function subToggleGuard(key,on){
   try{
     const r=await jpost("/v/api/ext/guard/toggle",{key,enabled:!!on});
@@ -1878,6 +1879,7 @@ async function subToggleGuard(key,on){
     else toast(r.msg||"操作失败","fail");
   }catch(e){toast(String(e),"fail");}
 }
+// <<< PRIVATE:GUARD
 async function importFantaiying(){
   const out=$("subResult");
   out.innerHTML='<div class="muted sm">正在拉取内置「饭太硬」官方订阅（多镜像自动切换、自动解密），请稍候…</div>';
