@@ -177,6 +177,11 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/pan/cookie'),
     (('POST',), '/v/api/ext/pan/uc/cookie'),
     (('POST',), '/v/api/ext/pan/ali/cookie'),
+    (('GET',), '/v/api/ext/bilibili/status'),
+    (('POST',), '/v/api/ext/bilibili/qr/start'),
+    (('POST',), '/v/api/ext/bilibili/qr/poll'),
+    (('POST',), '/v/api/ext/bilibili/cookie'),
+    (('POST',), '/v/api/ext/bilibili/clear'),
     (('POST',), '/v/api/ext/pan/resolve'),
     (('POST',), '/v/api/ext/pan/uc/resolve'),
     (('POST',), '/v/api/ext/pan/ali/resolve'),
@@ -221,7 +226,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 127  # 上游 121（去 guard +6 探活/订阅）+ 海阔 6 条
+    assert len(admin_api.admin_router.routes) == 132  # 上游 121（去 guard +6 探活/订阅）+ 海阔 6 条 + B站 5 条
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable

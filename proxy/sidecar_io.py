@@ -20,6 +20,10 @@ import threading
 
 from runner_errors import RunnerTimeoutError
 
+import logging
+
+_log = logging.getLogger("fnmedia.sidecar_io")
+
 
 def readline_timeout(proc, timeout: float, name: str) -> str:
     """在读线程里读一行，`queue.get(timeout=...)` 实现真超时。
@@ -33,6 +37,7 @@ def readline_timeout(proc, timeout: float, name: str) -> str:
         try:
             q.put(("line", proc.stdout.readline()))
         except Exception as exc:  # noqa: BLE001
+            _log.debug("sidecar io cleanup failed: %s", exc, exc_info=True)
             q.put(("err", exc))
 
     t = threading.Thread(target=_read, name=f"{name}-read", daemon=True)
@@ -56,20 +61,22 @@ def stop_proc(proc, wait_s: float = 5.0) -> None:
             try:
                 proc.stdin.close()
             except Exception:  # noqa: BLE001
-                pass
+                _log.debug("sidecar io stdin close failed", exc_info=True)
         proc.terminate()
     except Exception:  # noqa: BLE001
-        pass
+        _log.debug("sidecar io terminate failed", exc_info=True)
     try:
         proc.wait(timeout=wait_s)
     except Exception:  # noqa: BLE001
         try:
             proc.kill()
         except Exception:  # noqa: BLE001
-            pass
+            _log.debug("sidecar io kill failed", exc_info=True)
         try:
             proc.wait(timeout=2.0)
         except Exception:  # noqa: BLE001
+            _log.debug("sidecar io cleanup step failed", exc_info=True)
+            pass
             pass
 
 
@@ -91,6 +98,8 @@ class StderrTail:
             for line in self._stream:
                 self.lines.append(line.rstrip("\n"))
         except Exception:  # noqa: BLE001
+            _log.debug("sidecar io cleanup step failed", exc_info=True)
+            pass
             pass
 
     def text(self) -> str:

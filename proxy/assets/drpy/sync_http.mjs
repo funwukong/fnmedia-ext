@@ -81,7 +81,8 @@ export function syncRequest(url, obj) {
 
   // 阻塞等待 worker 完成（信号 ctl[2] 递增）
   const waitRes = Atomics.wait(ctl, 2, before, timeoutMs);
-  let content = "", meta = { status: 0, headers: {}, error: "", contentHex: "" };
+  let content = "", meta = { status: 0, headers: {}, error: "", contentHex: "",
+    contentBase64: "" };
   try {
     if (waitRes === "timed out" || Atomics.load(ctl, 2) === before) {
       meta.error = "sync http timeout (" + timeoutMs + "ms)";
@@ -102,6 +103,7 @@ export function syncRequest(url, obj) {
     ...(meta.url ? { url: meta.url } : {}),
     redirected: !!meta.redirected,
     contentHex: meta.contentHex || "",
+    contentBase64: meta.contentBase64 || "",
   };
 }
 

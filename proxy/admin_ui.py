@@ -189,12 +189,12 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <button class="nav-item" data-page="quality">片源质量</button>
       <button class="nav-item" data-page="sources">资源站</button>
       <button class="nav-item" data-page="importsub">导入订阅</button>
+      <!-- >>> PRIVATE:SCANLOGIN -->
+      <button class="nav-item" data-page="scanlogin">扫码登录</button>
+      <!-- <<< PRIVATE:SCANLOGIN -->
       <!-- >>> PRIVATE:CATVOD -->
       <button class="nav-item" data-page="xiaoya">小雅 / JS</button>
       <!-- <<< PRIVATE:CATVOD -->
-      <!-- >>> PRIVATE:BILIBILI -->
-      <button class="nav-item" data-page="bilibili">哔哩哔哩</button>
-      <!-- <<< PRIVATE:BILIBILI -->
       <button class="nav-item" data-page="search">搜索</button>
       <button class="nav-item" data-page="about">关于</button>
     </nav>
@@ -590,6 +590,45 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <!-- <<< PRIVATE:HAIKUO -->
     </section>
 
+    <!-- >>> PRIVATE:SCANLOGIN -->
+    <!-- ============ 扫码登录（第三方网盘 + B 站） ============ -->
+    <section class="page" id="page-scanlogin">
+      <h2 class="page-title">扫码登录</h2>
+      <p class="page-desc">各站点的登录入口集中在这里。第三方网盘登录后网盘高清线路才能自动转存；B 站登录后可拉取高清与会员内容。</p>
+
+      <!-- >>> PRIVATE:BILIBILI -->
+      <div class="card">
+        <div class="card-title">哔哩哔哩 <span class="pill off" id="biliPill">未登录</span></div>
+        <div class="hint" id="biliStatus">读取中…</div>
+        <div class="btn-row">
+          <button class="btn primary small" onclick="startBiliQr()">生成扫码入口</button>
+          <button class="btn danger small" onclick="clearBiliCookie()">退出登录</button>
+        </div>
+        <div id="biliQrBox" style="display:none;text-align:center">
+          <img id="biliQr" alt="B站登录二维码" style="width:240px;height:240px;background:#fff;border-radius:12px"/>
+          <div class="hint">用哔哩哔哩 App 扫码并确认登录。</div>
+        </div>
+        <details style="margin-top:12px"><summary>手工填入 Cookie</summary>
+          <textarea id="biliCookie" rows="4" placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."></textarea>
+          <div class="btn-row"><button class="btn small" onclick="saveBiliCookie()">保存 Cookie</button></div>
+        </details>
+      </div>
+      <!-- <<< PRIVATE:BILIBILI -->
+
+      <div class="card">
+        <div class="card-title">第三方网盘 <span class="pill off" id="panScanPill">未登录</span></div>
+        <p class="card-sub">夸克 / UC / 阿里云盘。登录后「网盘高清」兜底线路才能自动转存并出原画。</p>
+        <div class="btn-row">
+          <button class="btn primary small" onclick="openPanScan()">打开网盘扫码登录</button>
+          <button class="btn small" onclick="refreshPanScan()">刷新登录状态</button>
+        </div>
+        <div class="hint" id="panScanMsg">未加载</div>
+        <iframe id="panScanFrame" title="第三方网盘扫码登录" data-src="/v/api/ext/pan/page"
+          style="display:none;width:100%;height:640px;border:1px solid var(--line);border-radius:12px;margin-top:10px"></iframe>
+      </div>
+    </section>
+    <!-- <<< PRIVATE:SCANLOGIN -->
+
 
     <!-- >>> PRIVATE:CATVOD -->
     <!-- ============ 小雅 / JS（CATVOD） ============ -->
@@ -628,31 +667,6 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <!-- <<< PRIVATE:CATVOD -->
 
     <!-- >>> PRIVATE:BILIBILI -->
-    <section class="page" id="page-bilibili">
-      <h2 class="page-title">哔哩哔哩</h2>
-      <p class="page-desc">独立内置 B 站站点：一条自动高清线路，扫码保存登录态后优先 4K / 1080P / 720P。</p>
-      <div class="card">
-        <div class="card-title">B 站登录 <span class="pill off" id="biliPill">未登录</span></div>
-        <div class="hint" id="biliStatus">读取中…</div>
-        <div class="btn-row">
-          <button class="btn primary small" onclick="startBiliQr()">生成扫码入口</button>
-          <button class="btn danger small" onclick="clearBiliCookie()">退出登录</button>
-        </div>
-        <div id="biliQrBox" style="display:none;text-align:center">
-          <img id="biliQr" alt="B站登录二维码" style="width:240px;height:240px;background:#fff;border-radius:12px"/>
-          <div class="hint">用哔哩哔哩 App 扫码；扫码成功后登录态保存到本机 NAS。</div>
-        </div>
-        <details style="margin-top:12px"><summary>手工填入 Cookie</summary>
-          <textarea id="biliCookie" rows="4" placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."></textarea>
-          <div class="btn-row"><button class="btn small" onclick="saveBiliCookie()">保存 Cookie</button></div>
-        </details>
-      </div>
-      <div class="card"><div class="card-title">播放策略</div>
-        <div class="hint">自动选择可用最高画质：4K → 1080P60 → 1080P+ → 1080P → 720P60 → 720P。无需手动选线。</div>
-      </div>
-    </section>
-    <!-- <<< PRIVATE:BILIBILI -->
-
     <!-- ============ 搜索 ============ -->
     <section class="page" id="page-search">
       <h2 class="page-title">搜索设置</h2>
@@ -856,6 +870,10 @@ async function switchPage(page){
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
+  // >>> PRIVATE:SCANLOGIN
+  if(page==="scanlogin"){try{await loadBiliStatus();}catch(e){}try{await refreshPanScan();}catch(e){}}
+  else{try{stopBiliPoll();}catch(e){}}
+  // <<< PRIVATE:SCANLOGIN
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
 
@@ -2385,19 +2403,63 @@ async function browseXiaoya(tid){
 function xyCrumbUp(){browseXiaoya();}
 // <<< PRIVATE:CATVOD
 
+// >>> PRIVATE:SCANLOGIN
+async function openPanScan(){
+  const f=$('panScanFrame');if(!f)return;
+  if(!f.src)f.src=f.dataset.src;
+  f.style.display='block';
+  $('panScanMsg').textContent='在下方完成扫码登录（夸克 / UC / 阿里）。';
+}
+async function refreshPanScan(){
+  try{
+    const j=await jget('/v/api/ext/pan/status');const d=j.data||{};
+    const logins=d.logins||{};
+    const on=Object.keys(logins).filter(k=>logins[k]&&(logins[k].logged_in||logins[k].logged)).length;
+    const el=$('panScanPill');
+    if(el){el.textContent=on?('已登录 '+on):'未登录';el.className='pill '+(on?'on':'off');}
+    $('panScanMsg').textContent=on?('已登录 '+on+' 个网盘，网盘高清线路可自动转存。'):'未登录第三方网盘。';
+  }catch(e){$('panScanMsg').textContent='读取网盘登录状态失败：'+e.message;}
+}
+// <<< PRIVATE:SCANLOGIN
+
 // >>> PRIVATE:BILIBILI
+let BILI_POLL_TIMER=null;
 async function loadBiliStatus(){
   const j=await jget('/v/api/ext/bilibili/status');const d=j.data||{};
   $('biliPill').textContent=d.cookie_set?'已登录':'未登录';$('biliPill').className='pill '+(d.cookie_set?'on':'off');
   $('biliStatus').textContent=d.cookie_set?('登录态已保存'+(d.has_sessdata?' · SESSDATA':'')+(d.has_jct?' · bili_jct':'')):'未保存 B 站登录态';
 }
+function stopBiliPoll(){if(BILI_POLL_TIMER){clearInterval(BILI_POLL_TIMER);BILI_POLL_TIMER=null;}}
 async function startBiliQr(){
-  try{const j=await jpost('/v/api/ext/bilibili/qr/start',{});if(j.code!==0)throw new Error(j.msg||'生成失败');
-    const d=j.data||{};$('biliQrBox').style.display='block';
-    const txt=d.qr_text||d.qr_url||'';
-    $('biliQr').src='/v/api/ext/qr.png?text='+encodeURIComponent(txt);
-    $('biliStatus').textContent='请用 B 站 App 扫码；若扫码页未自动回填，可在下方粘贴 Cookie。';
+  try{
+    const j=await jpost('/v/api/ext/bilibili/qr/start',{});
+    if(j.code!==0)throw new Error(j.msg||'生成失败');
+    const d=j.data||{};
+    $('biliQrBox').style.display='block';
+    if(d.qr_png){$('biliQr').src=d.qr_png;}
+    else{const txt=d.qr_text||d.qr_url||'';$('biliQr').src='/v/api/ext/qr.png?text='+encodeURIComponent(txt);}
+    $('biliStatus').textContent='请用哔哩哔哩 App 扫码并确认登录。';
+    stopBiliPoll();
+    BILI_POLL_TIMER=setInterval(()=>pollBiliQr(d.session),2500);
   }catch(e){toast('生成 B 站二维码失败：'+e.message,'fail');}
+}
+async function pollBiliQr(session){
+  if(!session)return;
+  try{
+    const j=await jpost('/v/api/ext/bilibili/qr/poll',{session});
+    if(j.code!==0){stopBiliPoll();$('biliStatus').textContent=j.msg||'扫码失败';return;}
+    const d=j.data||{};
+    if(d.state==='done'){
+      stopBiliPoll();$('biliQrBox').style.display='none';
+      await loadBiliStatus();toast('B 站登录成功');
+    }else if(d.state==='expired'){
+      stopBiliPoll();$('biliStatus').textContent='二维码已过期，请重新生成';
+    }else if(d.state==='scanned'){
+      $('biliStatus').textContent='已扫码，请在手机上确认登录';
+    }else{
+      $('biliStatus').textContent=d.msg||'等待扫码…';
+    }
+  }catch(e){stopBiliPoll();$('biliStatus').textContent='轮询失败：'+e.message;}
 }
 async function saveBiliCookie(){
   const cookie=$('biliCookie').value.trim();if(!cookie){toast('先填 B 站 Cookie','fail');return;}
@@ -2405,6 +2467,7 @@ async function saveBiliCookie(){
   $('biliCookie').value='';await loadBiliStatus();toast('B 站登录态已保存');
 }
 async function clearBiliCookie(){
+  stopBiliPoll();
   await jpost('/v/api/ext/bilibili/clear',{});$('biliQrBox').style.display='none';await loadBiliStatus();toast('B 站登录态已清除');
 }
 // <<< PRIVATE:BILIBILI

@@ -63,6 +63,36 @@ export function gbkTool(){
                 return decodeURIComponent(a);
 
             });
+        },
+        // latin1 字节串 → GBK 文本：宿主传的是原始字节（每个字符码位就是
+        // 一个字节），这里按 GBK 双字节表还原成中文。
+        decodeBytes:function(bytes){
+            var buf = (bytes instanceof Uint8Array) ? bytes
+                : (typeof bytes === 'string'
+                    ? (function(s){var a=new Uint8Array(s.length);for(var i=0;i<s.length;i++)a[i]=s.charCodeAt(i)&0xff;return a;})(bytes)
+                    : new Uint8Array(0));
+            var out = '';
+            var i = 0;
+            while (i < buf.length) {
+                var b = buf[i];
+                if (b < 0x80) { out += String.fromCharCode(b); i += 1; continue; }
+                var key = null;
+                if (b >= 0x81 && b <= 0xFE && i + 1 < buf.length) {
+                    var b2 = buf[i + 1];
+                    if (b2 >= 0x40 && b2 <= 0xFE && b2 !== 0x7F) {
+                        key = ('%' + b.toString(16).toUpperCase())
+                            + ('%' + b2.toString(16).toUpperCase());
+                    }
+                }
+                if (key && key in G2Uhash) {
+                    out += String.fromCharCode('0x' + G2Uhash[key]);
+                    i += 2;
+                } else {
+                    out += String.fromCharCode(b);
+                    i += 1;
+                }
+            }
+            return out;
         }
     };
 }

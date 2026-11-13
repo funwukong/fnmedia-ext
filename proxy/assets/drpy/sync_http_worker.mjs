@@ -70,9 +70,12 @@ async function doFetch(req) {
   const buf = Buffer.from(await r.arrayBuffer());
   const h = {};
   r.headers.forEach((v, k) => { h[k] = v; });
+  // 二进制通道：responseType=bytes 时原样保留字节，不做 UTF-8 解码。
+  // toHex 直接对原始 Buffer 取 hex（旧的“对已解码文本再编码”会破坏密文）。
   // drpyS 默认按 utf-8 读 content；toHex 必须基于原始 bytes，不能对已损坏的 UTF-8 重编码。
   return { status: r.status, headers: h, content: buf.toString("utf8"),
     contentHex: o.toHex ? buf.toString("hex") : "",
+    contentBase64: o.responseType === "bytes" ? buf.toString("base64") : "",
     redirected: r.redirected, finalUrl: r.url };
 }
 
@@ -97,6 +100,7 @@ async function handle(seq, bodyPath) {
   const meta = JSON.stringify({
     status: result.status, headers: result.headers, error,
     contentHex: result.contentHex || "",
+    contentBase64: result.contentBase64 || "",
     url: result.finalUrl || "", redirected: !!result.redirected,
   });
   try {

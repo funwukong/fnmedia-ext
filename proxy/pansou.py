@@ -170,7 +170,13 @@ def _pansou_manual_state(mg: str) -> str:
 
 def _pansou_manual_arm(mg: str, title: str, index: int = 0) -> None:
     """登记片名/集序，进入待命。已 ready 且同片同集时保持 ready 不降级；
-    进行中（pending）时只更新片名/集序，不打断在途转存。"""
+    进行中（pending）时只更新片名/集序，不打断在途转存。
+
+    未登录时**不立刻判 need_login**：网盘线是兜底线，选中它不代表用户想扫码。
+    这里一律进 armed，等真正要转存时（_pansou_run）再判断登录态——那时才需要
+    提示扫码。这样平时选网盘线不会立刻弹二维码；只有该线真要出流、而网盘
+    尚未登录时才提示，且提示发生在播放画面里而不是选线瞬间。
+    """
     if not mg:
         return
     try:
@@ -200,14 +206,10 @@ def _pansou_manual_arm(mg: str, title: str, index: int = 0) -> None:
         rec["state"] = "dead"
         rec["error"] = "当前构建不含网盘驱动模块"
         return
-    if _any_pan_logged_in():
-        rec["state"] = "armed"
-        rec["provider"] = ""
-    else:
-        need = _first_not_logged_in() or _PAN_ORDER[0]
-        rec["state"] = "need_login"
-        rec["provider"] = need
-        rec["error"] = f"{_PAN_MODULES[need][1]}未登录，播放画面扫码登录后自动继续"
+    # 不在这里判登录态：armed 即可，真正的登录检查在 _pansou_run 转存前。
+    rec["state"] = "armed"
+    rec["provider"] = ""
+    rec["error"] = ""
 
 
 def _pansou_manual_kick(mg: str) -> None:
@@ -498,13 +500,9 @@ async def _pansou_run(mg: str) -> None:
     if not rec:
         return
     try:
-        if rec.get("state") == "need_login":
-            provider = rec.get("provider") or _first_not_logged_in() or ""
-            if provider and not _pan_logged_in(provider):
-                if not await _pansou_wait_login(mg, provider):
-                    return  # 仍未登录：保持 need_login，等下次 kick
-            rec["state"] = "armed"
-            rec["provider"] = ""
+        # 登录检查放在【真正要转存前】（下面循环里），不在这里提前判：
+        # 选网盘线只是兜底意图，不代表用户要立刻扫码。搜索无候选时直接
+        # dead，不弹码。
         if rec.get("state") not in ("armed", "pending", "dead"):
             return
         rec["state"] = "pending"

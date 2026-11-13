@@ -150,14 +150,15 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(appmod.history, "resume_episode", return_value=(None, 0)):
             response = await appmod._vod_line_folder("og", {}, clientmod.Client(kind="web"))
         data = json.loads(response.body)["data"]
-        # 2026-11-12 第 3 批：线路墙末尾多一张 PanSou 网盘高清卡。
-        self.assertEqual(data["total"], 3)
+        # 2026-11-13：海报下方（二级线路墙）不再挂网盘高清卡 —— 该入口点进去
+        # 提示无权访问。网盘线只保留在播放页线路菜单，并作为兜底自动切换。
+        self.assertEqual(data["total"], 2)
         self.assertEqual(data["mdb_category"], "TV")
         self.assertTrue(all(row["type"] == "TV" for row in data["list"]))
         self.assertTrue(all(row["number_of_episodes"] == 1 for row in data["list"]))
-        self.assertEqual(
-            appmod._parse_line_item_guid(data["list"][-1]["guid"])[1],
-            appmod.PANSOU_LINE)
+        self.assertNotIn(appmod.PANSOU_LINE,
+                         [appmod._parse_line_item_guid(r["guid"])[1]
+                          for r in data["list"]])
         self.assertTrue(data["list"][0]["title"].startswith("暴风资源｜"))
         parsed = appmod._parse_line_item_guid(data["list"][0]["guid"])
         self.assertEqual(parsed, ("og", "baofeng::bfzym3u8", 0))
@@ -176,13 +177,13 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(appmod.history, "resume_episode", return_value=(None, 0)):
             response = await appmod._vod_line_folder("og", {}, clientmod.Client(kind="web"))
         data = json.loads(response.body)["data"]
-        # 2026-11-12 第 3 批：聚合后 1 条 CMS 线 + 末尾 1 张 PanSou 卡。
-        self.assertEqual(data["total"], 2)
+        # 2026-11-13：网盘高清卡已从海报下方移除，只剩真实线路。
+        self.assertEqual(data["total"], 1)
         self.assertEqual(
             appmod._parse_line_item_guid(data["list"][0]["guid"])[1], "dytt::dyttm3u8")
-        self.assertEqual(
-            appmod._parse_line_item_guid(data["list"][-1]["guid"])[1],
-            appmod.PANSOU_LINE)
+        self.assertNotIn(appmod.PANSOU_LINE,
+                         [appmod._parse_line_item_guid(r["guid"])[1]
+                          for r in data["list"]])
 
     def test_seeded_media_target_uses_exact_line_without_pinning(self):
         # 冻结适配：种子只定选集身份（_line_seed），绝不产生 _fixed_line 固定标记。
@@ -236,11 +237,11 @@ class VodLineFolderTests(unittest.IsolatedAsyncioTestCase):
             response = await appmod._vod_line_folder(
                 "chart-og", {}, clientmod.Client(kind="web"))
         data = json.loads(response.body)["data"]
-        # 2026-11-12 第 3 批：1 条 CMS 线 + 末尾 1 张 PanSou 卡。
-        self.assertEqual(data["total"], 2)
-        self.assertEqual(
-            appmod._parse_line_item_guid(data["list"][-1]["guid"])[1],
-            appmod.PANSOU_LINE)
+        # 2026-11-13：网盘高清卡已从海报下方移除，只剩真实线路。
+        self.assertEqual(data["total"], 1)
+        self.assertNotIn(appmod.PANSOU_LINE,
+                         [appmod._parse_line_item_guid(r["guid"])[1]
+                          for r in data["list"]])
 
     async def test_seeded_line_tv_exposes_seasons_and_line_scoped_episodes(self):
         b = brief(tv=True)

@@ -14,6 +14,10 @@ from collections import deque
 
 import history as histmod
 
+import logging
+
+_log = logging.getLogger("fnmedia.resume_diag")
+
 _MAX_EVENTS = 20
 _events: "deque[dict]" = deque(maxlen=_MAX_EVENTS)
 _lock = threading.Lock()
@@ -46,6 +50,7 @@ def note_record(raw_guid, normalized_guid, body, outcome, parsed,
                 canon_key = histmod.canonical_key_for_guid(
                     str(normalized_guid or ""))
             except Exception:
+                _log.debug("resume diag canonical key failed", exc_info=True)
                 canon_key = None
         event = {
             "kind": "record",
@@ -60,6 +65,7 @@ def note_record(raw_guid, normalized_guid, body, outcome, parsed,
             "canon_key": canon_key or None,
         }
     except Exception:
+        _log.debug("resume diag record failed", exc_info=True)
         return
     with _lock:
         _events.append(event)
@@ -87,6 +93,7 @@ def note_info(request_guid, info):
             "partition": histmod.current_user(),
         }
     except Exception:
+        _log.debug("resume diag record failed", exc_info=True)
         return
     with _lock:
         _events.append(event)
@@ -114,6 +121,7 @@ def lookup(hist, guids):
             try:
                 ck = histmod.canonical_key_for_guid(g)
             except Exception:
+                _log.debug("resume diag canonical key failed", exc_info=True)
                 ck = None
             if ck and ck not in want:
                 want.append(ck)
@@ -129,6 +137,7 @@ def lookup(hist, guids):
                         "updated_at": rec.get("updated_at"),
                     }
     except Exception:
+        _log.debug("resume diag snapshot failed", exc_info=True)
         return {}
     return out
 

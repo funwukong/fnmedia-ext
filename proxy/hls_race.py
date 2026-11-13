@@ -956,7 +956,47 @@ async def _ensure_playable(picked: dict, request: Request,
     if good is not None:
         _log.info("自动切换到可用线路: %s -> %s", picked.get("line"), good.get("line"))
         return good
+    # 所有真实线路都不可用：静默兜底到网盘高清线。
+    # 网盘线是虚拟手动线（不在 store、不参与竞速/测速），只有到这一步才
+    # arm —— 平时不触发搜索/转存，也就不会提前弹扫码。
+    fallback = await _pansou_fallback_target(picked)
+    if fallback is not None:
+        _log.info("真实线路全不可用，静默兜底到网盘高清线: %s",
+                  picked.get("line"))
+        return fallback
     return picked
+
+
+async def _pansou_fallback_target(picked: dict):
+    """所有真实线路失效时的网盘高清兜底目标（不可用时返回 None）。
+
+    触发条件严格：只在 _ensure_playable 走完真实线路故障切换仍无解时调用。
+    这样网盘线不参与日常竞速、不会被主动优先选中，也不会提前要求扫码；
+    只有当前线路真的卡死/失效时才被静默拉起。
+    """
+    try:
+        from app import PANSOU_LINE, _pansou_available, _pansou_manual_arm, \
+            _pansou_manual_target
+    except Exception:
+        return None
+    if not _pansou_available():
+        return None
+    if picked.get("line") == PANSOU_LINE:
+        return None
+    try:
+        idx = int(picked.get("index", 0) or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    title = picked.get("title") or picked.get("ep_title") or ""
+    try:
+        if title:
+            _pansou_manual_arm(picked.get("media_guid") or "", title, idx)
+    except Exception:
+        _log.debug("pansou fallback arm failed", exc_info=True)
+    return dict(_pansou_manual_target(idx),
+                media_guid=picked.get("media_guid") or "",
+                online_guid=picked.get("online_guid") or "",
+                index=idx, title=title)
 
 
 async def _resolve_if_needed(picked: dict, request: Request) -> dict:
@@ -988,7 +1028,8 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
         import bilibili_site as _bili_site
         try:
             _target = str(picked.get("url") or "")
-            _page = int(picked.get("index", 0) or 1)
+            # 分 P 序号取自 Episode URL（?p=N）；index 是集序，不能当 P 用。
+            _page = _bili_site.parse_page(_target)
             _res = await _aio.to_thread(bilibili_play.play, _target, _page)
             picked["url"] = _res["video"]
             picked["headers"] = dict(_res.get("headers") or {})
@@ -1349,6 +1390,12 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     # 网盘播放代理：原画直出 mp4 时回包不是清单（content-type video、二进制），
     # 判为非 HLS 交调用方 302 到 direct；转码档则返回正常清单。
     if text is not None and picked.get("pan") and not _is_media_playlist(text):
+        return _NOT_HLS, None
+    # 无后缀地址（海阔/B 站 API 播放接口常见）：取回来的既不是清单也不是空，
+    # 说明是媒体直链（mp4/fmp4），交调用方 302 到 direct，否则会把二进制
+    # 当清单塞给播放器，表现为一直转圈。
+    if text is not None and not _is_media_playlist(text) \
+            and not re.search(r"\.m3u8(\?|$)", src_url, re.I):
         return _NOT_HLS, None
     # 跳转型源站极慢且间歇抖动：解析后的真实地址抓取失败时，对原始跳转地址
     # 强制重新解析一次再抓，避免整列表 502。

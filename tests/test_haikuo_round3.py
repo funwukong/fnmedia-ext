@@ -399,7 +399,11 @@ class Round3ResolveTests(unittest.IsolatedAsyncioTestCase):
             p = _picked("hiker://page/detail?id=91")
             self.assertFalse(await appmod._resolve_haikuo(p))
         self.assertEqual(p.get("haikuo_error"), "not_playable")
-        self.assertEqual(len(calls), 5)
+        # 上限从 5 提到 8：海报/导航类候选会占位（实测影探4K/鱼安/4K动漫
+        # 的首条候选是图片或 hiker://empty），只试 5 条会漏掉真剧集。
+        # 这里候选只有 7 条，应全部试完（≤ 上限）。
+        self.assertEqual(len(calls), len(eps))
+        self.assertLessEqual(len(calls), appmod._HAIKUO_RESOLVE_TRIES)
 
     async def test_title_token_falls_back_to_detail(self):
         # 首页项本身就是 haikuo-play token（91短剧）：play 得页面不是

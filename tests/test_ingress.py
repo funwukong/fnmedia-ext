@@ -57,8 +57,9 @@ class IngressTests(unittest.IsolatedAsyncioTestCase):
             self.addCleanup(item.stop)
 
     async def test_https_and_client_profiles_keep_virtual_libraries(self):
-        # 榜单四库（播放设置库已移除，不再常驻）
+        # 榜单四库（播放设置库已移除，不再常驻）+ B 站独立内置库
         expected = set(appmod.CHART_LIB_GUIDS.values())
+        expected.add(appmod.BILI_LIB_GUID)
         for ua in ("trimemedia-web", "com.trim.tv", "Dalvik/2.1.0 Android",
                    "com.trim.media.ios"):
             with self.subTest(ua=ua):

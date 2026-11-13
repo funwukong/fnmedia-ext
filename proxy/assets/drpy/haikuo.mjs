@@ -587,12 +587,18 @@ export function createHaikuoContext(ruleKey, opts = {}) {
       method, headers, body,
       timeout: timeoutMs,
       redirect: o.redirect === false ? 0 : undefined,
+      // 二进制/hex 请求必须透传到 worker，否则 worker 只会做 UTF-8 解码，
+      // 密文与原始字节在到达规则前就已损坏（toHex 曾经因此永远拿不到 hex）。
+      toHex: o.toHex === true,
+      responseType: o.responseType === "bytes" ? "bytes" : undefined,
     });
     if (r.error || !r.status) {
       throw vErr("fetch failed: " + u + " (" + (r.error || ("status " + r.status)) + ")");
     }
     const res = {
       body: String(r.content ?? ""),
+      bodyBase64: String(r.contentBase64 || ""),
+      bodyHex: String(r.contentHex || ""),
       headers: r.headers || {},
       statusCode: Number(r.status),
       finalUrl: String(r.url || u),
@@ -603,7 +609,13 @@ export function createHaikuoContext(ruleKey, opts = {}) {
     return res;
   }
   function shapeFetch(res, o) {
-    if (o.toHex) return String(res.contentHex || "");
+    if (o.toHex) return String(res.bodyHex || res.contentHex || "");
+    if (o.responseType === "bytes" || o.bytes === true) {
+      const buf = res.bodyBase64
+        ? Buffer.from(res.bodyBase64, "base64")
+        : Buffer.from(res.body || "", "utf8");
+      return buf;
+    }
     if (o.onlyHeaders) return JSON.stringify({ headers: headersAsArrays(res.headers) });
     if (o.withHeaders || o.withStatusCode) {
       const out = { body: res.body, headers: headersAsArrays(res.headers) };
@@ -718,6 +730,93 @@ export function createHaikuoContext(ruleKey, opts = {}) {
     return false;
   }
 
+
+  // ---------- AES（原始 key/iv 模式，与 CryptoJS 口令模式并存） ----------
+  // aesDecode/aesEncode 是 CryptoJS 口令模式（Salted__ + OpenSSL KDF），
+  // 保留原语义不动；这里新增的是站点常用的「明文 key/iv」模式。
+  function _aesCoerceBytes(value, encoding) {
+    if (value == null) return null;
+    if (typeof value === "object" && value && value.type === "Buffer"
+        && Array.isArray(value.data)) return Buffer.from(value.data);
+    const s = String(value);
+    const enc = String(encoding || "").toLowerCase();
+    if (enc === "hex") return Buffer.from(s.replace(/\s+/g, ""), "hex");
+    if (enc === "base64") return Buffer.from(s.replace(/\s+/g, ""), "base64");
+    // 未指定编码时按长度与字符集猜：32/48/64 位 hex → hex；否则按 utf8。
+    const t = s.replace(/\s+/g, "");
+    if (/^[0-9a-fA-F]{32}$/.test(t) || /^[0-9a-fA-F]{48}$/.test(t)
+        || /^[0-9a-fA-F]{64}$/.test(t)) return Buffer.from(t, "hex");
+    return Buffer.from(s, "utf8");
+  }
+  function _aesInputBytes(data, encoding) {
+    if (data == null) return Buffer.alloc(0);
+    if (typeof data === "object" && data && data.type === "Buffer"
+        && Array.isArray(data.data)) return Buffer.from(data.data);
+    if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    const s = String(data);
+    const enc = String(encoding || "base64").toLowerCase();
+    if (enc === "utf8") return Buffer.from(s, "utf8");
+    if (enc === "hex") return Buffer.from(s.replace(/\s+/g, ""), "hex");
+    return Buffer.from(s.replace(/\s+/g, ""), "base64");
+  }
+  function _aesNoPaddingRemove(buf, padding) {
+    const p = String(padding || "Pkcs7").toLowerCase();
+    if (p === "nopadding" || p === "none") return buf;
+    if (!buf.length) return buf;
+    const pad = buf[buf.length - 1];
+    if (pad > 0 && pad <= 16 && pad <= buf.length) {
+      let ok = true;
+      for (let i = buf.length - pad; i < buf.length; i++) {
+        if (buf[i] !== pad) { ok = false; break; }
+      }
+      if (ok) return buf.subarray(0, buf.length - pad);
+    }
+    return buf;
+  }
+  function _aesOutput(buf, encoding) {
+    const enc = String(encoding || "utf8").toLowerCase();
+    if (enc === "buffer" || enc === "bytes") return buf;
+    if (enc === "base64") return buf.toString("base64");
+    if (enc === "hex") return buf.toString("hex");
+    return buf.toString("utf8");
+  }
+  function aesCbcDecode(data, key, iv, options) {
+    const o = options || {};
+    const kb = _aesCoerceBytes(key, o.keyEncoding);
+    const ivb = iv ? _aesCoerceBytes(iv, o.ivEncoding) : Buffer.alloc(16, 0);
+    const db = _aesInputBytes(data, o.dataEncoding);
+    if (!kb || kb.length !== 16) throw vErr("aesCbcDecode: key must be 16 bytes");
+    if (ivb.length !== 16) throw vErr("aesCbcDecode: iv must be 16 bytes");
+    if (db.length % 16 !== 0) throw vErr("aesCbcDecode: data length not multiple of 16");
+    const decipher = crypto.createDecipheriv("aes-128-cbc", kb, ivb);
+    decipher.setAutoPadding(String(o.padding || "Pkcs7").toLowerCase() !== "nopadding");
+    const out = Buffer.concat([decipher.update(db), decipher.final()]);
+    return _aesOutput(_aesNoPaddingRemove(out, o.padding), o.output);
+  }
+  function aesCbcEncode(data, key, iv, options) {
+    const o = options || {};
+    const kb = _aesCoerceBytes(key, o.keyEncoding);
+    const ivb = iv ? _aesCoerceBytes(iv, o.ivEncoding) : Buffer.alloc(16, 0);
+    const db = _aesInputBytes(data, o.dataEncoding || "utf8");
+    if (!kb || kb.length !== 16) throw vErr("aesCbcEncode: key must be 16 bytes");
+    if (ivb.length !== 16) throw vErr("aesCbcEncode: iv must be 16 bytes");
+    const cipher = crypto.createCipheriv("aes-128-cbc", kb, ivb);
+    cipher.setAutoPadding(String(o.padding || "Pkcs7").toLowerCase() !== "nopadding");
+    const out = Buffer.concat([cipher.update(db), cipher.final()]);
+    return _aesOutput(out, o.output);
+  }
+  function aesEcbDecode(data, key, options) {
+    const o = options || {};
+    const kb = _aesCoerceBytes(key, o.keyEncoding);
+    const db = _aesInputBytes(data, o.dataEncoding);
+    if (!kb || kb.length !== 16) throw vErr("aesEcbDecode: key must be 16 bytes");
+    if (db.length % 16 !== 0) throw vErr("aesEcbDecode: data length not multiple of 16");
+    const decipher = crypto.createDecipheriv("aes-128-ecb", kb, null);
+    decipher.setAutoPadding(String(o.padding || "Pkcs7").toLowerCase() !== "nopadding");
+    const out = Buffer.concat([decipher.update(db), decipher.final()]);
+    return _aesOutput(_aesNoPaddingRemove(out, o.padding), o.output);
+  }
+
   // ---------- 编解码 / 加解密 ----------
   function hostMd5(input) {
     const s = String(input || "");
@@ -779,8 +878,14 @@ export function createHaikuoContext(ruleKey, opts = {}) {
   function hostDecodeStr(input, charset) {
     const cs = String(charset || "UTF-8").toUpperCase();
     const bytes = Buffer.from(String(input ?? ""), "latin1");
+    if (cs === "UTF-8" || cs === "UTF8") return bytes.toString("utf8");
+    // GBK/GB2312：Node 的 TextDecoder 不带 full-icu 时不支持 gbk，
+    // 且 gbkTool.decode 只认 %XX 形态；这里走字节表直接还原。
+    if (cs === "GBK" || cs === "GB2312" || cs === "GB18030") {
+      try { return _gbk.decodeBytes(bytes); }
+      catch (e) { debug("decodeStr GBK failed:", e && e.message); }
+    }
     try {
-      if (cs === "UTF-8" || cs === "UTF8") return bytes.toString("utf8");
       return new TextDecoder(cs.toLowerCase()).decode(bytes);
     } catch { return bytes.toString("latin1"); }
   }
@@ -1238,6 +1343,9 @@ export function createHaikuoContext(ruleKey, opts = {}) {
   assign("putVar", hostPutVar);
   assign("getVar", hostGetVar);
   assign("clearVar", hostClearVar);
+  assign("aesCbcDecode", aesCbcDecode);
+  assign("aesCbcEncode", aesCbcEncode);
+  assign("aesEcbDecode", aesEcbDecode);
   assign("putMyVar", hostPutMyVar);
   assign("getMyVar", hostGetMyVar);
   assign("clearMyVar", hostClearMyVar);
@@ -1629,7 +1737,17 @@ export function dispatchHaikuoPlayResult(value) {
   if (s.startsWith("toast://")) {
     return { playable: false, reason: s.slice("toast://".length) || "toast", action: "toast", url: "" };
   }
-  if (s.startsWith("video://") || s.startsWith("x5Rule://")) {
+  if (s.startsWith("video://")) {
+    // video:// 后面通常是嗅探页/iframe 地址（规则里 r.frame / 播放页 URL）。
+    // v1 直接抛错导致该规则整条不可播；这里改为交给嗅探器：普通 HTTP 抓取
+    // 能解出 m3u8 就照常播，解不出再明确报不支持。
+    const frame = s.slice("video://".length).trim();
+    if (/^https?:\/\//i.test(frame)) {
+      return { playable: false, sniff: true, url: frame, headers: {} };
+    }
+    throw new Error(`haikuo v1 unsupported: video play URLs need X5/WebView, which is not in v1`);
+  }
+  if (s.startsWith("x5Rule://")) {
     throw new Error(`haikuo v1 unsupported: ${s.slice(0, s.indexOf("://"))} play URLs need X5/WebView, which is not in v1`);
   }
   if (s.startsWith("magnet:")) return { playable: false, reason: "magnet/download not playable", action: "copy", url: s };

@@ -424,11 +424,11 @@ class FolderBindTests(unittest.IsolatedAsyncioTestCase):
             response = await appmod._vod_line_folder(
                 "catalog-cold-og", {}, _client())
         data = json.loads(response.body)["data"]
-        # 2026-11-12 第 3 批：1 条 CMS 线 + 末尾 1 张 PanSou 卡。
-        self.assertEqual(data["total"], 2)
-        self.assertEqual(
-            appmod._parse_line_item_guid(data["list"][-1]["guid"])[1],
-            appmod.PANSOU_LINE)
+        # 2026-11-13：网盘高清卡已从海报下方移除（只在播放页菜单/兜底用）。
+        self.assertEqual(data["total"], 1)
+        self.assertNotIn(appmod.PANSOU_LINE,
+                         [appmod._parse_line_item_guid(r["guid"])[1]
+                          for r in data["list"]])
         self.assertEqual(bound.get("guid"), "catalog-cold-og")
 
     async def test_cold_folder_miss_returns_empty_and_clears_cooldown(self):
@@ -482,11 +482,11 @@ class FolderBindTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cold-og", store_mock._titles)
         self.assertNotIn("cold-og", store_mock._orig)
         store_mock._rebuild_index.assert_called_once()
-        # 2026-11-12 第 3 批：1 条 CMS 线 + 末尾 1 张 PanSou 卡。
-        self.assertEqual(data["total"], 2)
-        self.assertEqual(
-            appmod._parse_line_item_guid(data["list"][-1]["guid"])[1],
-            appmod.PANSOU_LINE)
+        # 2026-11-13：网盘高清卡已从海报下方移除（只在播放页菜单/兜底用）。
+        self.assertEqual(data["total"], 1)
+        self.assertNotIn(appmod.PANSOU_LINE,
+                         [appmod._parse_line_item_guid(r["guid"])[1]
+                          for r in data["list"]])
 
 
 if __name__ == "__main__":

@@ -53,6 +53,14 @@ def _all_virtual_lib_guids() -> set[str]:
     from haikuo_browser import LIB_GUID as HAIKUO_LIB_GUID  # noqa: E402 延迟导入
     guids.add(HAIKUO_LIB_GUID)
     # <<< PRIVATE:HAIKUO
+    # >>> PRIVATE:BILIBILI
+    # B 站独立内置库：同样进虚拟库集合（否则会被上游库列表覆盖）
+    try:
+        from bilibili_browser import LIB_GUID as BILI_LIB_GUID  # noqa: E402 延迟导入
+        guids.add(BILI_LIB_GUID)
+    except Exception:
+        _log.debug("bilibili lib guid failed", exc_info=True)
+    # <<< PRIVATE:BILIBILI
     return guids
 
 

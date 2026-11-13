@@ -131,13 +131,13 @@ if features.HAIKUO:
         pass
 # <<< PRIVATE:HAIKUO
 # >>> PRIVATE:BILIBILI
-# B 站独立内置站点：不走海阔规则，内置一条搜索/详情/播放链路，
-# 扫码保存的 B 站 Cookie 由 bilibili.current_cookie() 注入。
+# 注册表不可在 Episode/OnlineTitle 定义前 import bilibili_site（循环导入）。
+# 列表/详情在调用时惰性导入，不依赖海阔规则或 Node。
 if getattr(features, "BILIBILI", False):
-    import bilibili_site as _bili_site
     _BILI_DEFAULT_SOURCE = {
         "id": "bilibili", "name": "哔哩哔哩", "api": "bilibili://home",
-        "enabled": True, "builtin": True, "bili_site": True, "xsrc": True,
+        "kind": "bilibili", "enabled": True, "builtin": True,
+        "bili_site": True, "standalone": True, "xsrc": True,
     }
     if not any(s.get("id") == "bilibili" for s in DEFAULT_SOURCES):
         DEFAULT_SOURCES.append(dict(_BILI_DEFAULT_SOURCE))
@@ -1027,6 +1027,37 @@ _HAIKUO_VIDEO_COL_TYPES = {
 }
 _HAIKUO_DETAIL_EPISODE_COL_TYPES = {"text_2", "text_3", "text_4", "text_5"}
 _HAIKUO_NAV_TITLES = ("猜你喜欢", "换一换", "线路", "排序", "筛选", "下一页", "上一页")
+# 详情页的集数条目：不少规则用 flex_button 排集（4K动漫「1集」「2集」…），
+# 之前一律当成分类按钮丢掉，导致详情页没有可播候选。
+_HAIKUO_EPISODE_TITLE_RE = re.compile(
+    r"^\s*(?:第\s*)?\d+(?:\.\d+)?\s*[集话話期]"
+    r"|^\s*(?:EP|Ep|ep)\s*\d+"
+    r"|^\s*(?:正片|播放|▶\s*播放|观看)\s*$"
+    r"|^\s*(?:免费|VIP|付费)\s*$"
+    r"|\(全\s*\d+\s*集\)|（全\s*\d+\s*集）")
+# 播放动作按钮：点了才吐播放地址。鱼安影视的详情里「高清」就是这种按钮，
+# 真正的 m3u8 藏在它后面（实测 v8.qqqrst.com/…/index.m3u8）。
+_HAIKUO_PLAY_ACTION_RE = re.compile(
+    r"^\s*(?:▶\s*)?(?:高清|清晰|流畅|标清|超清|原画|蓝光|4K|8K|1080P|720P|480P|360P)"
+    r"|^\s*(?:▶\s*)?(?:播放|正片|观看|立即播放|开始播放)\s*$")
+
+
+def _haikuo_is_episode_title(title: str) -> bool:
+    """标题是否像一条剧集（第N集 / 正片 / 全N集 / 免费）。"""
+    t = re.sub(r"<[^>]*>", "", str(title or "")).strip()
+    if not t:
+        return False
+    if t in ("猜你喜欢", "换一换", "线路", "排序", "筛选"):
+        return False
+    return bool(_HAIKUO_EPISODE_TITLE_RE.search(t))
+
+
+def _haikuo_is_play_action(title: str) -> bool:
+    """标题是否是「点了出播放地址」的动作按钮（高清/播放/正片…）。"""
+    t = re.sub(r"<[^>]*>", "", str(title or "")).strip()
+    if not t:
+        return False
+    return bool(_HAIKUO_PLAY_ACTION_RE.match(t))
 
 
 def _haikuo_item_role(v: dict, context: str = "home") -> str:
@@ -1034,7 +1065,12 @@ def _haikuo_item_role(v: dict, context: str = "home") -> str:
     if not isinstance(v, dict) or _haikuo_is_chrome_item(v):
         return "skip"
     title = re.sub(r"<[^>]*>", "", str(v.get("title") or "")).strip()
-    if context in ("home", "detail") and title in {
+    # 「点赞/收藏/高清/清晰…」在不同规则里含义不同：
+    #   * B 站详情里 text_5 的「高清/清晰/流畅」是清晰度切换按钮 → skip；
+    #   * 鱼安影视详情里 flex_button 的「高清」是播放入口 → episode。
+    # 因此只对 text_* 生效，flex_button 交给后面的动作判定。
+    if context in ("home", "detail") and str(v.get("col_type") or "").startswith("text") \
+            and title in {
         "点赞", "收藏", "稍后再看", "查看评论", "原站", "下载", "分享",
         "举报", "高清", "清晰", "流畅", "标清", "超清", "1080P", "720P",
         "480P", "360P",
@@ -1048,8 +1084,18 @@ def _haikuo_item_role(v: dict, context: str = "home") -> str:
         return "pager" if "下一页" in title or "上一页" in title else "skip"
     is_nav = u.startswith("haikuo-play:") or "@lazyRule=" in u or "@rule=js:" in u
     if context == "detail":
-        if ct in _HAIKUO_DETAIL_EPISODE_COL_TYPES or ct in _HAIKUO_VIDEO_COL_TYPES:
-            return "episode" if is_nav or ct in _HAIKUO_DETAIL_EPISODE_COL_TYPES else "video"
+        # 详情页：集数条目（text_2/3/4/5，或 flex_button 但标题像集数）
+        # → episode；影片卡（movie_*）→ video；其余 chrome → skip。
+        if ct in _HAIKUO_DETAIL_EPISODE_COL_TYPES:
+            return "episode"
+        if ct == "flex_button":
+            # flex_button 既可能是集数（4K动漫「1集」）也可能是播放动作
+            # （鱼安影视「高清」→ 真正的 m3u8 藏在按钮后面）。
+            if _haikuo_is_episode_title(title) or _haikuo_is_play_action(title):
+                return "episode"
+            return "skip"
+        if ct in _HAIKUO_VIDEO_COL_TYPES:
+            return "video"
         return "skip"
     if ct in _HAIKUO_FOLDER_COL_TYPES or ct in ("flex_button",):
         return "folder" if is_nav else "skip"

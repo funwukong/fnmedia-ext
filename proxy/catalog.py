@@ -301,7 +301,8 @@ async def _fetch_class_list(client: httpx.AsyncClient, source: dict) -> list[dic
 
 # 非苹果 CMS 协议的源：分类表深翻只认 http(s) 的 CMS 接口，spider://、
 # drpy://、catvod://、haikuo:// 等其它协议源一律不参与。
-_NON_CMS_KINDS = {"t4", "spider", "drpy", "catvod", "xsrc", "haikuo"}
+_NON_CMS_KINDS = {"t4", "spider", "drpy", "catvod", "xsrc", "haikuo",
+                  "bili_site"}
 
 
 def _is_non_cms_source(source: dict) -> bool:

@@ -115,10 +115,14 @@ class PansouContractTests(_PansouBase):
 
 
 class PansouArmTests(_PansouBase):
-    def test_arm_need_login_when_nobody_logged_in(self):
+    def test_arm_does_not_demand_login_upfront(self):
+        """2026-11-13：选网盘线只是兜底意图，不该立刻判未登录（那会直接弹扫码）。
+
+        登录检查推迟到真正转存前（_pansou_run 的候选循环里）。
+        """
         pansou._pansou_manual_arm(self.mg, "假影片", 0)
-        self.assertEqual(pansou._pansou_manual_state(self.mg), "need_login")
-        self.assertEqual(pansou._pansou_status(self.mg)["provider"], "quark")
+        self.assertEqual(pansou._pansou_manual_state(self.mg), "armed")
+        self.assertEqual(pansou._pansou_status(self.mg)["error"], "")
 
     def test_arm_armed_when_one_logged_in(self):
         self.fakes["uc"]._logged_in = True

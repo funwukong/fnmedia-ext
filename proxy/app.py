@@ -57,6 +57,9 @@ import t4_metadata
 from t4_browser import T4Browser, LIB_GUID as T4_LIB_GUID, LIB_TITLE as T4_LIB_TITLE
 # >>> PRIVATE:HAIKUO
 from haikuo_browser import HaikuoBrowser, HaikuoBrowseError, LIB_GUID as HAIKUO_LIB_GUID, LIB_TITLE as HAIKUO_LIB_TITLE
+# >>> PRIVATE:BILIBILI
+from bilibili_browser import BilibiliBrowser, BilibiliBrowseError, LIB_GUID as BILI_LIB_GUID, LIB_TITLE as BILI_LIB_TITLE
+# <<< PRIVATE:BILIBILI
 # <<< PRIVATE:HAIKUO
 import client as clientmod
 import live as livemod
@@ -96,6 +99,9 @@ t4_media = T4Media()
 t4_browser = T4Browser(store, config)
 # >>> PRIVATE:HAIKUO
 haikuo_browser = HaikuoBrowser(store, config)
+# >>> PRIVATE:BILIBILI
+bili_browser = BilibiliBrowser(store, config)
+# <<< PRIVATE:BILIBILI
 # <<< PRIVATE:HAIKUO
 
 UPSTREAM_SOCK = os.environ.get("FNMEDIA_UPSTREAM_SOCK",
@@ -2689,6 +2695,10 @@ async def mediadb_list(request: Request):
         inserts = []
         if t4_browser.sources() and _viewer_can_open_lib(request, T4_LIB_GUID):
             inserts.append(t4_browser.library())
+        # >>> PRIVATE:BILIBILI
+        if bili_browser.enabled() and _viewer_can_open_lib(request, BILI_LIB_GUID):
+            inserts.append(bili_browser.library())
+        # <<< PRIVATE:BILIBILI
         # >>> PRIVATE:HAIKUO
         if haikuo_browser.sources() and _viewer_can_open_lib(request, HAIKUO_LIB_GUID):
             inserts.append(haikuo_browser.library())
@@ -2973,6 +2983,11 @@ async def mdb_detail(guid: str, request: Request):
 
     if guid == T4_LIB_GUID:
         return JSONResponse({"code": 0, "msg": "", "data": t4_browser.library(detail=True)})
+    # >>> PRIVATE:BILIBILI
+    if guid == BILI_LIB_GUID:
+        return JSONResponse({"code": 0, "msg": "",
+                             "data": bili_browser.library(detail=True)})
+    # <<< PRIVATE:BILIBILI
     # >>> PRIVATE:HAIKUO
     if guid == HAIKUO_LIB_GUID:
         return JSONResponse({"code": 0, "msg": "", "data": haikuo_browser.library(detail=True)})
@@ -3556,12 +3571,9 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
             source_rows[provider] = t
     rows = [_vod_line_card(brief, t["line"], index, parent)
             for t in source_rows.values() if t.get("line")]
-    # 二级线路墙末尾追加 PanSou 网盘高清卡（手动线，见 _vod_pansou_card）。
-    if _pansou_available():
-        try:
-            rows.append(_vod_pansou_card(brief, PANSOU_LINE, index, parent))
-        except Exception:
-            _log.debug("_vod_line_folder pansou card failed", exc_info=True)
+    # 不在【海报下方/二级线路墙】展示网盘高清入口：该入口点进去会提示无权
+    # 访问（网盘线是虚拟手动线，不在 store、无按线集数）。网盘高清仅保留在
+    # 播放页的线路菜单里（见 _line_choices），由用户手动切换或作为兜底自动切换。
     rows = clientmod.normalize_cards(rows, client)
     # 电视剧线路墙仍归入 TV，保证客户端加载剧集模型与选集入口。
     mdb_category = "TV" if inj.is_tv(brief) else "Movie"
@@ -3894,6 +3906,26 @@ async def item_list(request: Request):
         parent = haikuo_browser.home_guid_for_source(_hk_scope)
         aguid = HAIKUO_LIB_GUID
     # <<< PRIVATE:HAIKUO
+    # >>> PRIVATE:BILIBILI
+    if aguid == BILI_LIB_GUID or parent == BILI_LIB_GUID or bili_browser.node(parent):
+        started = time.monotonic()
+        try:
+            data = await asyncio.wait_for(
+                bili_browser.listing(ext_client(request),
+                                     parent or BILI_LIB_GUID, body),
+                timeout=25)
+        except asyncio.TimeoutError:
+            _log.warning("bilibili browse timeout node=%s page=%s elapsed_ms=%d",
+                         parent, body.get("page", 1),
+                         int((time.monotonic() - started) * 1000))
+            return JSONResponse({"code": -1, "msg": "B 站加载超时，请稍后重试",
+                                 "data": None}, status_code=504)
+        except BilibiliBrowseError as exc:
+            _log.warning("bilibili browse failed: %s", exc)
+            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
+                                status_code=502)
+        return JSONResponse({"code": 0, "msg": "", "data": data})
+    # <<< PRIVATE:BILIBILI
     if aguid == HAIKUO_LIB_GUID or parent == HAIKUO_LIB_GUID or haikuo_browser.node(parent):
         started = time.monotonic()
         node = haikuo_browser.node(parent)
@@ -4536,6 +4568,18 @@ async def item_detail(guid: str, request: Request):
         return await forward_upstream(request)
     if not _brief_viewable(request, brief):
         return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
+    # >>> PRIVATE:BILIBILI
+    # B 站影片：单集占位要换成真实分P（详情时才去 B 站取 pagelist）。
+    if getattr(features, "BILIBILI", False):
+        import bilibili_detail as _bili_detail
+        if _bili_detail.is_bilibili_brief(brief):
+            bili_data = await _bili_detail.build_detail(brief, client)
+            if bili_data is not None:
+                _apply_marks(bili_data)
+                return JSONResponse({"code": 0, "msg": "",
+                                     "data": clientmod.normalize_detail(
+                                         bili_data, client)})
+    # <<< PRIVATE:BILIBILI
     data = inj.detail_item(brief)
     _apply_marks(data)
     _attach_related(data, brief)
@@ -5850,6 +5894,14 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
         if hit and time.time() - hit[0] < _HAIKUO_DIRECT_TTL:
             return "MP4", False
     # <<< PRIVATE:HAIKUO
+    # >>> PRIVATE:BILIBILI
+    # B 站独立线路：入口是 bilibili://video/BV…，播放由 bilibili_play 解析成
+    # 合一 MP4 直链。预判阶段还没解析，只能确定「最终不是 HLS」，因此走 direct；
+    # direct 入口解析失败会回明确错误，不会给占位假活。
+    if getattr(features, "BILIBILI", False) \
+            and str(target.get("play_from", "")).startswith("bilibili"):
+        return "MP4", False
+    # <<< PRIVATE:BILIBILI
     # >>> PRIVATE:DDUO
     if features.DDUO and target.get("xsrc"):
         # 仅查已热的解码缓存（预热/之前播放产生），不联网；明确 mp4 才用 MP4
@@ -6799,7 +6851,7 @@ _HAIKUO_IMAGE_SUFFIXES = (".webp", ".jpg", ".jpeg", ".png", ".gif",
                           ".bmp", ".svg", ".avif")
 
 _HAIKUO_RECOMMEND_MARKERS = ("猜你喜欢", "换一换")
-_HAIKUO_RESOLVE_TRIES = 5  # 详情取集按序尝试求值，最多试几条
+_HAIKUO_RESOLVE_TRIES = 8  # 详情取集按序尝试求值，最多试几条（图片候选会占位，故留余量）
 _HAIKUO_DETAIL_ACTION_TITLES = ("点赞", "收藏", "稍后再看", "查看评论",
     "原站", "下载", "分享", "举报", "高清", "清晰", "流畅", "标清",
     "超清", "1080P", "720P", "480P", "360P")
@@ -6886,6 +6938,42 @@ def _haikuo_classify_not_playable(reason: str, state_hint: str = "") -> tuple[st
     if "x5" in reason.lower() or "webview" in reason.lower():
         return "x5_unsupported", "该规则需要 X5/WebView 嗅探播放，当前版本不支持"
     return "not_playable", "该影片暂不可播"
+
+
+async def _haikuo_url_is_image(url: str, headers: dict) -> bool:
+    """这个 URL 是不是图片（海报/头像）而不是播放地址。
+
+    先看路径后缀（.jpg/.png/.webp…）：这类一定是图片，不用发请求。
+    再探 content-type 与首字节特征；探测失败一律返回 False（宁可多嗅探一次，
+    也不要误杀真播放地址）。
+    """
+    try:
+        path = str(url or "").split("?", 1)[0].split("#", 1)[0].lower()
+        if path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+                          ".svg", ".avif", ".ico")):
+            return True
+        h = dict(headers or {})
+        h.setdefault("User-Agent", "Mozilla/5.0")
+        h["Range"] = "bytes=0-255"
+        async with httpx.AsyncClient(trust_env=False, timeout=8.0,
+                                     follow_redirects=True) as client:
+            r = await client.get(url, headers=h)
+        ctype = str(r.headers.get("content-type", "")).lower()
+        if ctype.startswith("image/"):
+            return True
+        if ctype.startswith(("video/", "audio/", "application/vnd.apple.mpegurl",
+                              "application/x-mpegurl", "application/octet-stream",
+                              "text/")):
+            return False
+        head = (r.content or b"")[:16]
+        if head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8\xff") \
+                or head[:6] in (b"GIF87a", b"GIF89a") or head[:2] == b"BM":
+            return True
+        if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+            return True
+        return False
+    except Exception:
+        return False
 
 
 async def _resolve_haikuo(picked: dict) -> bool:
@@ -6987,16 +7075,43 @@ async def _resolve_haikuo(picked: dict) -> bool:
             # 无一可播才回分级硬错误。
             res = None
             last_reason = ""
+            image_hits = 0
             for cand in episodes[idx:idx + _HAIKUO_RESOLVE_TRIES]:
                 target = cand.get("url", "") if isinstance(cand, dict) else ""
                 if not target:
                     continue
                 res = await asyncio.to_thread(haikuo.play, key, target)
                 if isinstance(res, dict) and (res.get("playable") or res.get("sniff")):
+                    # sniff 可能是海报/头像（规则取错字段）：先探内容类型，
+                    # 是图片就跳过这条候选，继续试下一集（实测影探4K/鱼安/4K动漫
+                    # 的第一条候选都是图片）。
+                    if res.get("sniff") and not res.get("playable"):
+                        page = str(res.get("url") or "")
+                        if page and await _haikuo_url_is_image(
+                                page, res.get("headers") or {}):
+                            image_hits += 1
+                            _log.warning(
+                                "haikuo candidate %s is an image url, skip: %s",
+                                str(cand.get("title") or "")[:20], page[:100])
+                            _note("image_url", url=page[:120])
+                            res = None
+                            continue
+                    # 导航类 URL（hiker://empty 等）不是播放地址：继续试下一条，
+                    # 别在这里 break（91短剧首条是海报头，点开是 hiker://empty）。
+                    if not res.get("playable") and str(
+                            res.get("url") or "").startswith("hiker://"):
+                        last_reason = str(res.get("reason") or "")
+                        res = None
+                        continue
                     break
                 last_reason = str(res.get("reason", "")) if isinstance(res, dict) else ""
                 res = None
             if res is None:
+                if image_hits and not last_reason:
+                    last_reason = "play url resolved to an image"
+                    _note("image_url", reason=last_reason)
+                    return _fail("image_url",
+                                 "海阔规则未取到播放地址（返回的是图片）")
                 _note("not_playable", reason=last_reason[:80], state_hint=_diag_key)
                 code, msg = _haikuo_classify_not_playable(last_reason, _diag_key)
                 return _fail(code, msg)
@@ -7008,6 +7123,15 @@ async def _resolve_haikuo(picked: dict) -> bool:
             if not page:
                 _note("failed")
                 return _fail("failed", "海阔规则返回异常，请稍后重试")
+            # 部分规则的 play 取到了海报/头像（pic_url/avatar）而不是播放地址：
+            # 实测影探4K→iqiyipic 的 .jpg、鱼安→upload/vod/…、4K动漫→
+            # default_headimg.png。嗅探器对图片页必然失败，白等一轮超时。
+            # 这里先探内容类型：是图片就直接判定「取错字段」，换下一条候选。
+            if await _haikuo_url_is_image(page, picked.get("headers") or {}):
+                _log.warning("haikuo play resolved to an image url: %s",
+                             page[:120])
+                _note("image_url", url=page[:120])
+                return _fail("image_url", "海阔规则未取到播放地址（返回的是图片）")
             picked["url"] = page
             picked["resolve"] = True  # 现有 resolve_share 嗅探兜底
             picked["haikuo"] = False
@@ -7040,7 +7164,23 @@ async def _resolve_haikuo(picked: dict) -> bool:
         picked["url"] = durl
         picked["haikuo"] = False
         picked["headers"] = res.get("headers") or {"User-Agent": "Mozilla/5.0"}
-        picked["m3u8"] = durl.split("?", 1)[0].lower().endswith(".m3u8")
+        # 媒体类型判定：后缀只是线索，不是结论。
+        #   .m3u8            → HLS
+        #   .mp4/.ts/.flv    → 直链
+        #   #isHls=true#     → 规则显式声明 HLS
+        #   #isVideo=true#   → 直链
+        #   其余（无后缀 API 地址）→ 交给播放链的 Range/Content-Type 探测，
+        #   不能在这里一律判成非 HLS，否则无后缀清单会被当直链拉走。
+        _dur = durl.split("#", 1)[0].split("?", 1)[0].lower()
+        if _dur.endswith(".m3u8") or _dur.endswith(".m3u"):
+            picked["m3u8"] = True
+        elif _dur.endswith((".mp4", ".ts", ".flv", ".mkv", ".webm")):
+            picked["m3u8"] = False
+        elif "#ishls=true#" in durl.lower():
+            picked["m3u8"] = True
+        else:
+            picked["m3u8"] = False
+            picked["bili_probe_media"] = True
         try:
             haikuo_cache.record_play(
                 str(picked.get("online_guid") or picked.get("guid") or ""),
