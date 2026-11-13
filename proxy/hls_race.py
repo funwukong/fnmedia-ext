@@ -1010,31 +1010,6 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
     elif features.DRPY and picked and picked.get("drpy"):
         await _resolve_drpy(picked)
     # <<< PRIVATE:DRPY
-    # >>> PRIVATE:BILIBILI
-    elif getattr(features, "BILIBILI", False) and picked and str(picked.get("play_from", "")).startswith("bilibili"):
-        import asyncio as _aio
-        import bilibili_play
-        import bilibili_site as _bili_site
-        try:
-            _target = str(picked.get("url") or "")
-            # 分 P 序号取自 Episode URL（?p=N）；index 是集序，不能当 P 用。
-            _page = _bili_site.parse_page(_target)
-            _res = await _aio.to_thread(bilibili_play.play, _target, _page)
-            picked["url"] = _res["video"]
-            picked["headers"] = dict(_res.get("headers") or {})
-            picked["m3u8"] = False
-            picked["bili_audio"] = _res.get("audio", "")
-            picked["bili_quality"] = _res.get("quality", "auto")
-            picked["bili_type"] = _res.get("type", "mp4")
-            picked["xsrc"] = False
-            picked["bili_play"] = True
-        except Exception as exc:
-            picked["bili_play"] = True
-            picked["bili_error"] = "bilibili_play_failed"
-            picked["bili_error_msg"] = str(exc)[:180]
-            picked["resolve_error"] = picked["bili_error"]
-            picked["resolve_error_msg"] = picked["bili_error_msg"]
-    # <<< PRIVATE:BILIBILI
     # >>> PRIVATE:SPIDER
     elif picked and picked.get("spider_src"):
         await _resolve_spider(picked)

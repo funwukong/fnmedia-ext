@@ -54,11 +54,6 @@ from t4_service import T4Service
 from t4_media import T4Media
 import t4_metadata
 from t4_browser import T4Browser, LIB_GUID as T4_LIB_GUID, LIB_TITLE as T4_LIB_TITLE
-# >>> PRIVATE:BILIBILI
-from bilibili_browser import (BilibiliBrowser, BilibiliBrowseError,
-                             LIB_GUID as BILI_LIB_GUID,
-                             LIB_TITLE as BILI_LIB_TITLE)
-# <<< PRIVATE:BILIBILI
 import client as clientmod
 import live as livemod
 import inject as inj
@@ -95,9 +90,6 @@ from store import (store, make_guid, media_guid, video_guid, is_online_guid,
 t4_service = T4Service(store, config)
 t4_media = T4Media()
 t4_browser = T4Browser(store, config)
-# >>> PRIVATE:BILIBILI
-bili_browser = BilibiliBrowser(store, config)
-# <<< PRIVATE:BILIBILI
 
 UPSTREAM_SOCK = os.environ.get("FNMEDIA_UPSTREAM_SOCK",
                                "/var/run/trim_media_upstream.sock")
@@ -2479,117 +2471,6 @@ def _viewer_can_open_lib(request: Request, guid: str) -> bool:
     return _viewer_ctx(request).can_open_lib(guid)
 
 
-def _bili_listing_client(request: Request):
-    """B 站浏览用的 httpx 客户端；ext 通道不可用时返回 None（内部自建）。"""
-    try:
-        return ext_client(request)
-    except Exception:
-        _log.debug("bili listing client unavailable", exc_info=True)
-        return None
-
-
-def _is_bilibili_brief(brief: dict | None) -> bool:
-    """brief 是否来自 B 站独立站点（按线路名判定）。"""
-    if not isinstance(brief, dict):
-        return False
-    lines = brief.get("lines") or {}
-    return "B站自动高清" in lines
-
-
-async def _bili_season_rows(guid: str, brief: dict) -> list:
-    """B 站影片的选集列表（多 P → 每 P 一集；单 P → 一集）。"""
-    eps = await _bili_episode_defs(brief)
-    rows = []
-    for i, ep in enumerate(eps):
-        rows.append(inj._base_item(
-            guid=guid, type="Episode", title=str(ep.get("title") or ""),
-            parent_guid=guid, parent_title=str(brief.get("title") or ""),
-            tv_title=str(brief.get("title") or ""),
-            season_number=1, episode_number=i + 1,
-            number_of_seasons=1, number_of_episodes=len(eps),
-            can_play=1, play_item_guid=guid,
-            play_error="", media_guid="", video_guid="",
-            audio_guid="", subtitle_guid=""))
-    return rows
-
-
-async def _bili_episode_rows(guid: str, brief: dict) -> list:
-    """B 站影片的集列表（Episode 卡，带可播放的 media_guid）。
-
-    每集的播放目标 = 「B站自动高清」线路下的第 i 集；集 guid 用
-    episode_guid(og, "", i)（与 store 索引一致，line 参数不参与派生），
-    media_guid 带线路名，播放链据此取到对应分P。
-    """
-    eps = await _bili_episode_defs(brief)
-    rows = []
-    for i, ep in enumerate(eps):
-        ep_guid = episode_guid(guid, "", i)
-        rows.append(inj._base_item(
-            guid=ep_guid, type="Episode", title=str(ep.get("title") or ""),
-            parent_guid=guid, parent_title=str(brief.get("title") or ""),
-            tv_title=str(brief.get("title") or ""),
-            season_number=1, episode_number=i + 1,
-            number_of_seasons=1, number_of_episodes=len(eps),
-            can_play=1, play_item_guid=ep_guid,
-            play_error="", media_guid=ep_media_guid(ep_guid, "B站自动高清"),
-            video_guid=ep_video_guid(ep_guid, "B站自动高清"),
-            audio_guid="", subtitle_guid=""))
-    return rows
-
-
-async def _bili_episode_defs(brief: dict) -> list:
-    """取 B 站影片的真实分P定义（[{title,url,...}]）。
-
-    真实分P 要写回 store（否则 store 的 episode 索引里只有 1 条占位，
-    播放链拿到的集与分P 对不上）。写回后 store 会按新 lines 重建索引。
-    """
-    try:
-        import bilibili_detail
-        import bilibili_site
-        eps = [ep for ep in (brief.get("lines") or {}).get("B站自动高清") or []
-               if str(ep.get("url") or "").startswith(bilibili_site._BILI_URI)]
-        # 只有 1 条且无 p 参数 → 说明还是占位，需要真实分P
-        if len(eps) <= 1 and (not eps or "?p=" not in str(eps[0].get("url") or "")):
-            ref = ""
-            for ep in (brief.get("lines") or {}).get("B站自动高清") or []:
-                u = str(ep.get("url") or "")
-                if u.startswith(bilibili_site._BILI_URI):
-                    ref = u
-                    break
-            if ref:
-                detail = await bilibili_site.detail(ref)
-                # episodes 是 Episode dataclass（不是 dict），要按属性取
-                raw = list(detail.get("episodes") or [])
-                eps = [{"title": str(getattr(e, "title", "")
-                                  or (e.get("title") if isinstance(e, dict) else "")),
-                        "url": str(getattr(e, "url", "")
-                                  or (e.get("url") if isinstance(e, dict) else "")),
-                        "headers": dict(getattr(e, "headers", {})
-                                        or (e.get("headers") if isinstance(e, dict) else {}))}
-                       for e in raw]
-                # 真实分P 写回 store：播放链按 lines[line][index] 取第 i 集
-                if eps:
-                    lines = {bilibili_site.LINE_NAME: [
-                        {"title": e["title"], "url": e["url"],
-                         "direct": True, "resolve": False,
-                         "headers": e.get("headers") or {},
-                         "redirect": False, "xsrc": True,
-                         "play_from": bilibili_site.SOURCE_ID,
-                         "episode_key": ""}
-                        for e in eps]}
-                    try:
-                        import store as _st
-                        _st.store.remember_merged(
-                            [{**brief, "lines": lines}])
-                    except Exception:
-                        _log.debug("bili episode store update failed",
-                                   exc_info=True)
-        return eps
-    except Exception:
-        _log.debug("bili episode defs failed", exc_info=True)
-        return []
-
-
 def _lib_guid_for_key(key: str) -> str | None:
     """稳定库键 → 库 guid（_viewer_can_open_key 的入参）。无法映射返回 None。
 
@@ -2607,10 +2488,6 @@ def _lib_guid_for_key(key: str) -> str | None:
         except Exception:
             _log.debug("_lib_guid_for_key failed", exc_info=True)
             return None
-    # >>> PRIVATE:BILIBILI
-    if key == vlibsmod.K_BILIBILI:
-        return BILI_LIB_GUID
-    # <<< PRIVATE:BILIBILI
     kind, _, ident = key.partition(":")
     if kind == vlibsmod.K_CHART:
         return CHART_LIB_GUIDS.get(ident)
@@ -2801,10 +2678,6 @@ async def mediadb_list(request: Request):
         inserts = []
         if t4_browser.sources() and _viewer_can_open_lib(request, T4_LIB_GUID):
             inserts.append(t4_browser.library())
-        # >>> PRIVATE:BILIBILI
-        if bili_browser.enabled() and _viewer_can_open_lib(request, BILI_LIB_GUID):
-            inserts.append(bili_browser.library())
-        # <<< PRIVATE:BILIBILI
         # 1) 豆瓣真实榜单四库（独立开关 hot_library_enabled）
         if charts_enabled():
             _chart_refreshed = False
@@ -3066,11 +2939,6 @@ async def mdb_detail(guid: str, request: Request):
 
     if guid == T4_LIB_GUID:
         return JSONResponse({"code": 0, "msg": "", "data": t4_browser.library(detail=True)})
-    # >>> PRIVATE:BILIBILI
-    if guid == BILI_LIB_GUID:
-        return JSONResponse({"code": 0, "msg": "",
-                             "data": bili_browser.library(detail=True)})
-    # <<< PRIVATE:BILIBILI
     async def posters_for(items: list[str], n: int = 8) -> list[str]:
         ps = []
         for cover in items:
@@ -3955,28 +3823,6 @@ async def item_list(request: Request):
             [_apply_marks(row) for row in data["list"]], client)
         return JSONResponse({"code": 0, "msg": "", "data": data})
 
-    # >>> PRIVATE:BILIBILI
-    if aguid == BILI_LIB_GUID or parent == BILI_LIB_GUID or bili_browser.node(parent):
-        started = time.monotonic()
-        try:
-            # B 站浏览内部自建 httpx 客户端，不依赖 ext_client（外部加速
-            # 通道）；传 None 也能工作，避免 app.state.ext 未初始化时 500。
-            data = await asyncio.wait_for(
-                bili_browser.listing(_bili_listing_client(request),
-                                     parent or BILI_LIB_GUID, body),
-                timeout=25)
-        except asyncio.TimeoutError:
-            _log.warning("bilibili browse timeout node=%s page=%s elapsed_ms=%d",
-                         parent, body.get("page", 1),
-                         int((time.monotonic() - started) * 1000))
-            return JSONResponse({"code": -1, "msg": "B 站加载超时，请稍后重试",
-                                 "data": None}, status_code=504)
-        except BilibiliBrowseError as exc:
-            _log.warning("bilibili browse failed: %s", exc)
-            return JSONResponse({"code": -1, "msg": str(exc), "data": None},
-                                status_code=502)
-        return JSONResponse({"code": 0, "msg": "", "data": data})
-    # <<< PRIVATE:BILIBILI
 
     # —— 小雅分类媒体库 ——
     # >>> PRIVATE:CATVOD
@@ -4569,18 +4415,6 @@ async def item_detail(guid: str, request: Request):
         return await forward_upstream(request)
     if not _brief_viewable(request, brief):
         return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
-    # >>> PRIVATE:BILIBILI
-    # B 站影片：单集占位要换成真实分P（详情时才去 B 站取 pagelist）。
-    if getattr(features, "BILIBILI", False):
-        import bilibili_detail as _bili_detail
-        if _bili_detail.is_bilibili_brief(brief):
-            bili_data = await _bili_detail.build_detail(brief, client)
-            if bili_data is not None:
-                _apply_marks(bili_data)
-                return JSONResponse({"code": 0, "msg": "",
-                                     "data": clientmod.normalize_detail(
-                                         bili_data, client)})
-    # <<< PRIVATE:BILIBILI
     data = inj.detail_item(brief)
     _apply_marks(data)
     _attach_related(data, brief)
@@ -4621,16 +4455,6 @@ async def season_list_route(guid: str, request: Request):
     brief = store.get_title_by_guid(guid)
     if not brief:
         return await forward_upstream(request)
-    # >>> PRIVATE:BILIBILI
-    # B 站影片：多 P 视频的选集列表由 B 站 pagelist 给出（Movie 形态，
-    # 不走 inj.season_list）。缺这一段会透传官方上游 → 502 /「媒体不存在」。
-    if _is_bilibili_brief(brief):
-        rows = await _bili_season_rows(guid, brief)
-        if rows:
-            return JSONResponse({"code": 0, "msg": "",
-                                 "data": clientmod.normalize_cards(
-                                     rows, _client_of(request))})
-    # <<< PRIVATE:BILIBILI
     if not inj.is_tv(brief):
         return await forward_upstream(request)
     client = _client_of(request)
@@ -4705,18 +4529,6 @@ async def episode_list_route(guid: str, request: Request):
         brief = store.get_title_by_guid(guid)
         if brief and inj.is_tv(brief):
             tv = guid
-    # >>> PRIVATE:BILIBILI
-    # B 站影片是 Movie 形态（不走 TV 分支）：选集直接来自 B 站分P列表。
-    # 缺这一段会透传官方上游 → 502 /「媒体不存在」。
-    if not tv:
-        brief = store.get_title_by_guid(guid)
-        if _is_bilibili_brief(brief):
-            rows = await _bili_episode_rows(guid, brief)
-            if rows:
-                return JSONResponse({"code": 0, "msg": "",
-                                     "data": clientmod.normalize_cards(
-                                         rows, _client_of(request))})
-    # <<< PRIVATE:BILIBILI
     if not tv:
         return await forward_upstream(request)
     error = await _load_t4_detail(tv, request)
@@ -5362,49 +5174,6 @@ async def play_info(request: Request):
     import json
     body = json.loads(await request.body() or b"{}")
     guid = body.get("item_guid", "")
-    # >>> PRIVATE:BILIBILI
-    # B 站影片的集卡同时带 item/media/video 三种 guid；App 可能只给
-    # media_guid 或 video_guid（item_guid 也可能是标题 guid 而非集 guid）。
-    # 这里不只补空 guid，而是「item_guid 认不出集时」再按 media/video 找集。
-    def _bili_resolve_ep(g):
-        if not g:
-            return ""
-        try:
-            if store.get_episode(g):
-                return g
-            # media/video guid：store 的 media 索引能反查到集身份
-            t = store.resolve_media_guid(g)
-            if t and t.get("ep_guid"):
-                return str(t["ep_guid"])
-        except Exception:
-            _log.debug("bili resolve episode failed", exc_info=True)
-        return ""
-    _cands = []
-    for _k in ("item_guid", "media_guid", "video_guid"):
-        _v = body.get(_k)
-        if isinstance(_v, str) and _v:
-            _cands.append(_v)
-    if not guid or not (store.get_episode(guid) or store.get_title_by_guid(guid)):
-        for _v in _cands:
-            _hit = _bili_resolve_ep(_v)
-            if _hit:
-                guid = _hit
-                break
-            if store.get_title_by_guid(_v):
-                guid = _v
-                break
-        else:
-            # media_guid / video_guid 带线路后缀（ep_media_guid(ep, line)），
-            # store 索引里没有这个形态；去掉线路后缀再找一次集。
-            for _v in _cands:
-                if not _v:
-                    continue
-                _base = _v.split(":")[0] if _v.count(":") >= 1 else _v
-                _hit = _bili_resolve_ep(_base)
-                if _hit:
-                    guid = _hit
-                    break
-    # <<< PRIVATE:BILIBILI
     client = _client_of(request)
     # P0-3：已知在线标题但打不开任一归属库时直接 -6，不再往下走取流。
     if _online_guid_viewable(request, guid, _ctx=_viewer_ctx(request)) is False:
@@ -5928,14 +5697,6 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
     if not target.get("redirect") and not target.get("resolve") \
             and re.search(r"\.mp4$", path):
         return "MP4", False
-    # >>> PRIVATE:BILIBILI
-    # B 站独立线路：入口是 bilibili://video/BV…，播放由 bilibili_play 解析成
-    # 合一 MP4 直链。预判阶段还没解析，只能确定「最终不是 HLS」，因此走 direct；
-    # direct 入口解析失败会回明确错误，不会给占位假活。
-    if getattr(features, "BILIBILI", False) \
-            and str(target.get("play_from", "")).startswith("bilibili"):
-        return "MP4", False
-    # <<< PRIVATE:BILIBILI
     # >>> PRIVATE:DDUO
     if features.DDUO and target.get("xsrc"):
         # 仅查已热的解码缓存（预热/之前播放产生），不联网；明确 mp4 才用 MP4

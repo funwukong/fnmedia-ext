@@ -48,14 +48,6 @@ def _all_virtual_lib_guids() -> set[str]:
         guids.add(hgdjmod.lib_guid())
     # T4 选片库：与其它注入库一样进虚拟库集合，可被库授权限制
     guids.add(T4_LIB_GUID)
-    # >>> PRIVATE:BILIBILI
-    # B 站独立内置库：同样进虚拟库集合（否则会被上游库列表覆盖）
-    try:
-        from bilibili_browser import LIB_GUID as BILI_LIB_GUID  # noqa: E402 延迟导入
-        guids.add(BILI_LIB_GUID)
-    except Exception:
-        _log.debug("bilibili lib guid failed", exc_info=True)
-    # <<< PRIVATE:BILIBILI
     return guids
 
 

@@ -27,46 +27,21 @@ class ScanLoginUiTests(unittest.TestCase):
         self.assertLess(self.ui.index('data-page="importsub"'),
                         self.ui.index('data-page="scanlogin"'))
 
-    def test_scan_page_has_pan_and_bilibili(self):
+    def test_scan_page_has_pan(self):
         self.assertIn('id="page-scanlogin"', self.ui)
         self.assertIn("panScanFrame", self.ui)   # 第三方网盘扫码
-        self.assertIn("biliQr", self.ui)          # B 站扫码
-        self.assertIn("startBiliQr", self.ui)
         self.assertIn("openPanScan", self.ui)
 
-    def test_old_standalone_bilibili_page_removed(self):
-        """B 站扫码归类到扫码区，不再单独占一页。"""
-        self.assertNotIn('id="page-bilibili"', self.ui)
-        self.assertNotIn('data-page="bilibili"', self.ui)
+    def test_bilibili_ui_removed(self):
+        """B 站模块已整体删除，管理台不应再有 B 站登录区。"""
+        self.assertNotIn("startBiliQr", self.ui)
+        self.assertNotIn("biliQr", self.ui)
+        self.assertNotIn("/v/api/ext/bilibili/", self.ui)
 
     def test_switch_page_loads_scan_state(self):
         self.assertIn('page==="scanlogin"', self.ui)
-        self.assertIn("loadBiliStatus()", self.ui)
         self.assertIn("refreshPanScan()", self.ui)
 
-
-class BilibiliListingTests(unittest.TestCase):
-    """B 站列表加载：分区接口必须是仍可用的那个。"""
-
-    def setUp(self):
-        self.browser = (PROXY / "bilibili_browser.py").read_text(encoding="utf-8")
-
-    def test_partition_uses_newlist_not_dead_region_api(self):
-        # dynamic/region 已下线（实测 -404），实际请求必须走 newlist。
-        self.assertIn("/x/web-interface/newlist", self.browser)
-        # 旧接口不得再被真正调用（注释里提及允许）。
-        body = self.browser.split("def _partition")[1].split("def _titles_cards")[0]
-        self.assertNotIn('"https://api.bilibili.com/x/web-interface/dynamic/region"',
-                        body)
-
-    def test_partition_rids_are_official(self):
-        self.assertIn('("181", "影视")', self.browser)
-        self.assertIn('("23", "电影")', self.browser)
-        self.assertIn('("1", "动画")', self.browser)
-
-    def test_popular_is_awaited_not_to_thread(self):
-        """popular 是 async，塞进 to_thread 会拿到 coroutine 对象。"""
-        self.assertNotIn("to_thread(bilibili_site.popular", self.browser)
 
 
 class PansouFallbackTests(unittest.TestCase):

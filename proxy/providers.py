@@ -117,18 +117,6 @@ if features.DRPY:
     except Exception:
         pass
 # <<< PRIVATE:DRPY
-# >>> PRIVATE:BILIBILI
-# 注册表不可在 Episode/OnlineTitle 定义前 import bilibili_site（循环导入）。
-# 列表/详情在调用时惰性导入，不依赖海阔规则或 Node。
-if getattr(features, "BILIBILI", False):
-    _BILI_DEFAULT_SOURCE = {
-        "id": "bilibili", "name": "哔哩哔哩", "api": "bilibili://home",
-        "kind": "bilibili", "enabled": True, "builtin": True,
-        "bili_site": True, "standalone": True, "xsrc": True,
-    }
-    if not any(s.get("id") == "bilibili" for s in DEFAULT_SOURCES):
-        DEFAULT_SOURCES.append(dict(_BILI_DEFAULT_SOURCE))
-# <<< PRIVATE:BILIBILI
 # 源质量默认权重（越高越优先；未列出取 0）。基于国内直连可达性、直链率与片源质量
 # 的经验初值，用户可在管理页「片源质量」整体覆盖（存 config.source_priority）。
 # 标准 CMS 站按口碑分档；新增自定义源默认 0。
@@ -1136,15 +1124,6 @@ async def search_all(keyword: str, sources=None,
 
 async def _dispatch_search(client, source, keyword):
     """按源类型把一次搜索分发到对应的搜索实现。"""
-    # >>> PRIVATE:BILIBILI
-    if getattr(features, "BILIBILI", False) and source.get("bili_site"):
-        import bilibili_site as _bili_site
-        try:
-            return await _bili_site.search(client, source, keyword)
-        except Exception as exc:
-            _log.warning("bilibili search failed: %s", exc, exc_info=True)
-            return []
-    # <<< PRIVATE:BILIBILI
     # >>> PRIVATE:CATVOD
     if features.CATVOD and source.get("catvod"):
         return await xiaoya_search_source(client, source, keyword)

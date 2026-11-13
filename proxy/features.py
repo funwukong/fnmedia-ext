@@ -34,8 +34,6 @@ ADULT = True
 CATVOD = True
 # drpyS JS 爬虫运行时（Node 跑 TVBox type=3 的 drpy2 .js 站点）
 DRPY = True
-# 哔哩哔哩独立内置播放模块（独立站点、一条自动高清线路，关联扫码保存的 B 站 Cookie）
-BILIBILI = True
 # <<< PRIVATE:FEATURE_FLAGS
 
 # 无论何种构建都恒为真的安全红线开关（仅用于语义清晰，不参与剥离）
@@ -43,4 +41,4 @@ REDLINE = True
 
 
 def names() -> tuple[str, ...]:
-    return ("DDUO", "ADULT", "CATVOD", "DRPY", "BILIBILI")
+    return ("DDUO", "ADULT", "CATVOD", "DRPY")

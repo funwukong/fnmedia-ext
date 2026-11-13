@@ -60,34 +60,6 @@ class HaikuoRemovedTests(unittest.TestCase):
         self.assertNotIn("/v/api/ext/haikuo/", src)
 
 
-class BilibiliLibraryTests(unittest.TestCase):
-    """2) B 站库能进入（不再「此媒体不存在」）。"""
-
-    def setUp(self):
-        import sys
-        sys.path.insert(0, str(PROXY))
-        import app as appmod
-        import vlibs as vlibsmod
-        self.app = appmod
-        self.vlibs = vlibsmod
-
-    def test_lib_key_roundtrip(self):
-        self.assertEqual(
-            self.vlibs.key_of_guid(self.app.BILI_LIB_GUID),
-            self.vlibs.K_BILIBILI)
-        self.assertEqual(
-            self.app._lib_guid_for_key(self.vlibs.K_BILIBILI),
-            self.app.BILI_LIB_GUID)
-
-    def test_season_and_episode_local_branches(self):
-        src = (PROXY / "app.py").read_text(encoding="utf-8")
-        self.assertIn("_bili_season_rows(", src)
-        self.assertIn("_bili_episode_rows(", src)
-
-    def test_play_info_accepts_media_guid(self):
-        src = (PROXY / "app.py").read_text(encoding="utf-8")
-        self.assertIn('"media_guid", "video_guid"', src)
-
 
 class PanCacheTests(unittest.TestCase):
     """3) 网盘播放缓存：手动清理 + 按天 TTL + 开关。"""

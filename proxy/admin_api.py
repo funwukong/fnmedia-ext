@@ -2715,62 +2715,6 @@ async def pan_ali_cookie(req: Request):
     return await _pan_cookie("ali", req)
 
 
-@admin_router.get("/v/api/ext/bilibili/status")
-async def bilibili_status():
-    import bilibili as _bili
-    try:
-        return JSONResponse({"code": 0, "data": _bili.status()})
-    except Exception as exc:
-        _log.debug("bilibili_status failed", exc_info=True)
-        return JSONResponse({"code": 500, "msg": str(exc)[:200]})
-
-
-@admin_router.post("/v/api/ext/bilibili/qr/start")
-async def bilibili_qr_start():
-    import bilibili as _bili
-    try:
-        return JSONResponse({"code": 0, "data": _bili.qr_start()})
-    except Exception as exc:
-        _log.debug("bilibili_qr_start failed", exc_info=True)
-        return JSONResponse({"code": 500, "msg": str(exc)[:200]})
-
-
-@admin_router.post("/v/api/ext/bilibili/qr/poll")
-async def bilibili_qr_poll(req: Request):
-    import bilibili as _bili
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
-    try:
-        r = _bili.qr_poll(body)
-        return JSONResponse({"code": 0, "data": r})
-    except Exception as exc:
-        _log.debug("bilibili_qr_poll failed", exc_info=True)
-        return JSONResponse({"code": 400, "msg": str(exc)[:200]})
-
-
-@admin_router.post("/v/api/ext/bilibili/cookie")
-async def bilibili_cookie(req: Request):
-    import bilibili as _bili
-    try:
-        body = await req.json()
-    except Exception:
-        body = {}
-    try:
-        r = _bili.set_cookie(body.get("cookie", ""))
-        return JSONResponse({"code": 0, "data": r})
-    except Exception as exc:
-        _log.debug("bilibili_cookie failed", exc_info=True)
-        return JSONResponse({"code": 400, "msg": str(exc)[:200]})
-
-
-@admin_router.post("/v/api/ext/bilibili/clear")
-async def bilibili_clear():
-    import bilibili as _bili
-    _bili.clear()
-    return JSONResponse({"code": 0, "data": {"state": "cleared"}})
-
 async def _pan_resolve(key: str, req: Request):
     mod = _pan_mod(key)
     body = await req.json()
