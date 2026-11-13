@@ -1,0 +1,28 @@
+#!/bin/bash
+# 升级前：停掉接管服务（自动还原官方 socket），备份 repo/state。
+# App Center 升级会重建 repo 目录；titles/history/config 都在 state/ 内。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+
+systemctl stop fnmedia-ext.service >> "${FNMEDIA_LOG}" 2>&1 || true
+
+# 迁卷/换目录自愈：旧 unit 指向其他副本时，后续 install.sh 会渲染新路径。
+UNIT_FILE="/etc/systemd/system/fnmedia-ext.service"
+if [ -n "${FNMEDIA_REPO_DIR}" ] && [ -f "${UNIT_FILE}" ]; then
+  unit_wd="$(sed -n 's/^[[:space:]]*WorkingDirectory=//p' "${UNIT_FILE}" | head -n1)"
+  unit_wd_real="$(readlink -f -- "${unit_wd}" 2>/dev/null || true)"
+  repo_real="$(readlink -f -- "${FNMEDIA_REPO_DIR}" 2>/dev/null || true)"
+  if [ -n "${unit_wd_real}" ] && [ "${unit_wd_real}" != "${repo_real}/proxy" ]; then
+    rm -f "${UNIT_FILE}"
+    systemctl daemon-reload >> "${FNMEDIA_LOG}" 2>&1 || true
+  fi
+fi
+
+[ -n "${FNMEDIA_REPO_DIR}" ] || exit 0
+BACKUP_DIR="${TRIM_PKGVAR:-/tmp}/upgrade-backup"
+rm -rf "${BACKUP_DIR}"; mkdir -p "${BACKUP_DIR}"
+if [ -d "${FNMEDIA_REPO_DIR}/state" ]; then
+  tar --ignore-failed-read -czf "${BACKUP_DIR}/state.tar.gz" \
+    -C "${FNMEDIA_REPO_DIR}" state >> "${FNMEDIA_LOG}" 2>&1 || true
+fi
+exit 0

@@ -1,0 +1,18 @@
+{
+  "title": "合成API站",
+  "author": "test",
+  "version": "1",
+  "group": "test",
+  "type": "video",
+  "ua": "mobile",
+  "url": "hiker://empty##fypage",
+  "class_name": "",
+  "class_url": "",
+  "col_type": "movie_3",
+  "find_rule": "js:\nvar API = {\n  host: function() { return '__BASE__'; },\n  home: function() {\n    var j = JSON.parse(fetch(this.host() + '/api/home?page=' + MY_PAGE));\n    var d = [];\n    for (var i = 0; i < j.items.length; i++) { var it = j.items[i];\n      d.push({ title: it.title, desc: it.desc, pic: it.pic, url: this.host() + '/d/' + it.id + '@rule=js:$.require(\"hiker://page/erji\")', col_type: 'movie_3' }); }\n    setResult(d);\n  }\n};\nAPI.home();",
+  "search_url": "hiker://empty?kw=**",
+  "searchFind": "js:\nvar API = {\n  host: function() { return '__BASE__'; },\n  search: function() {\n    var kw = getParam('kw') || MY_KEYWORD;\n    var j = JSON.parse(fetch(this.host() + '/api/search?q=' + encodeURIComponent(kw)));\n    var d = [];\n    for (var i = 0; i < j.items.length; i++) { var it = j.items[i];\n      d.push({ title: it.title, desc: it.desc, pic: it.pic, url: this.host() + '/d/' + it.id + '@rule=js:$.require(\"hiker://page/erji\")', col_type: 'movie_3' }); }\n    setResult(d);\n  }\n};\nAPI.search();",
+  "detail_find_rule": "",
+  "preRule": "js:setItem('api_gate', 'open');",
+  "pages": "[{\"path\": \"erji\", \"name\": \"详情\", \"col_type\": \"movie_3\", \"rule\": \"js:\\nvar API = {\\n  host: function() { return '__BASE__'; },\\n  detail: function() {\\n    var m = MY_URL.match(/\\\\/d\\\\/(\\\\d+)/);\\n    var id = m ? m[1] : '0';\\n    var j = JSON.parse(fetch(this.host() + '/api/detail?id=' + id));\\n    var d = [];\\n    d.push({ title: j.title, desc: j.desc, col_type: 'text_1' });\\n    for (var i = 0; i < j.episodes.length; i++) { var ep = j.episodes[i];\\n      d.push({ title: '第' + ep.num + '集', url: $(this.host() + '/ep/' + ep.id).lazyRule(function(eid, host) { return host + '/v/' + eid + '.m3u8'; }, ep.id, this.host()), col_type: 'text_1' }); }\\n    setResult(d);\\n  }\\n};\\nAPI.detail();\"}]"
+}

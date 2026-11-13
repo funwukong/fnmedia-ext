@@ -1,0 +1,218 @@
+"""榜单（热门）片绑定结果持久化（方案 B）。
+
+热门库卡片只有片名/海报、没有播放线路，resolve_chart 全网搜源后才得到带线路
+的 brief。默认这些绑定只活在进程内存（store），重启即丢、要重新搜源（3.5–9s）。
+
+本模块把 chart guid -> 已绑定 brief 单独落盘到 state/chart_bindings.json：
+  - 独立文件，不受 store titles.json 的 4MB / 条数 LRU 淘汰影响；
+  - 带 TTL：过期不直接删除，而是标记需懒校验（线路签名 URL 可能失效），
+    命中时先恢复，播放链若发现死链仍会触发重新 resolve；
+  - 防抖落盘，避免高频绑定打爆磁盘；
+  - 只存 chart guid（32 位 hex）对应的 brief，体量可控。
+
+开关：config["prewarm_mode"] = "persist"（方案B）或 "realtime"（方案A，默认）。
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+
+try:
+    from fnlog import get_logger
+except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
+    import logging as _logging
+
+    def get_logger(name):  # type: ignore
+        return _logging.getLogger(f"fnmedia.{name}")
+
+_log = get_logger("chartbind")
+
+STATE = Path(__file__).resolve().parent.parent / "state" / "chart_bindings.json"
+
+# 绑定保鲜期：超过后 get() 返回 None（由后台预热重搜，不再当作起播种子
+# 恢复进内存）；is_fresh()/status() 仍可区分新鲜/过期条目。
+BIND_TTL = 6 * 3600
+# 单文件条数上限（防止无限增长；超出丢最旧）
+_MAX_ENTRIES = 2000
+# 落盘文件字节上限：2000 条重 brief 最坏 224MB；32MB 可容约 280 条重 brief
+# 或数千条常规 brief。绑定只是起播种子，可重新 resolve 生成，超限删最旧。
+_MAX_BYTES = 32 * 1024 * 1024
+_FLUSH_DEBOUNCE = 5.0
+
+
+def _entry_bytes(rec: dict) -> int:
+    """一条绑定记录的落盘字节估算（与 _persist_locked 同一序列化口径）。"""
+    try:
+        return len(json.dumps(rec, ensure_ascii=False,
+                              separators=(",", ":")).encode("utf-8"))
+    except Exception:
+        return 0
+
+
+class ChartBindStore:
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        # guid -> {"ts": float, "brief": dict}
+        self._data: dict[str, dict] = {}
+        self._bytes = 0  # 当前落盘字节估算（运行值）
+        self._dirty = False
+        self._flush_at = 0.0
+        self._flusher: threading.Timer | None = None
+        self.load()
+
+    # ---------- 持久化 ----------
+    def load(self) -> None:
+        with self._lock:
+            try:
+                raw = json.loads(STATE.read_text(encoding="utf-8"))
+                data = raw.get("bindings") if isinstance(raw, dict) else None
+                if isinstance(data, dict):
+                    self._data = {
+                        str(k): v for k, v in data.items()
+                        if isinstance(v, dict) and v.get("brief")
+                    }
+            except Exception:
+                _log.debug("load failed", exc_info=True)
+                self._data = {}
+            self._bytes = sum(_entry_bytes(v)
+                              for v in self._data.values())
+            # 旧文件超限：删最旧至上限内，并把裁剪结果落盘
+            trimmed = False
+            while (len(self._data) > _MAX_ENTRIES
+                   or self._bytes > _MAX_BYTES) \
+                    and len(self._data) > 1:
+                _old_k, _old_v = next(iter(self._data.items()))
+                self._data.pop(_old_k, None)
+                self._bytes -= _entry_bytes(_old_v)
+                trimmed = True
+            if trimmed:
+                self._dirty = True
+                self._schedule_flush_locked()
+
+    def _persist_locked(self) -> None:
+        try:
+            STATE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = STATE.with_suffix(".tmp")
+            payload = {"updated_at": time.time(), "bindings": self._data}
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8")
+            tmp.replace(STATE)
+        except Exception:
+            _log.debug("_persist_locked failed", exc_info=True)
+            pass
+
+    def _schedule_flush_locked(self) -> None:
+        self._dirty = True
+        now = time.monotonic()
+        if self._flusher is not None:
+            self._flush_at = now + _FLUSH_DEBOUNCE  # 顺延，合并写
+            return
+        self._flush_at = now + _FLUSH_DEBOUNCE
+
+        def _fire():
+            with self._lock:
+                self._flusher = None
+                if not self._dirty:
+                    return
+                self._persist_locked()
+                self._dirty = False
+            # 顺延期间又变脏：再起一轮
+            with self._lock:
+                if self._dirty:
+                    self._schedule_flush_locked()
+
+        t = threading.Timer(_FLUSH_DEBOUNCE, _fire)
+        t.daemon = True
+        self._flusher = t
+        t.start()
+
+    def flush(self) -> None:
+        with self._lock:
+            if self._dirty:
+                self._persist_locked()
+                self._dirty = False
+
+    # ---------- 读写 ----------
+    def remember(self, guid: str, brief: dict) -> None:
+        if not guid or not isinstance(brief, dict):
+            return
+        with self._lock:
+            old = self._data.get(guid)
+            if old is not None:
+                self._bytes -= _entry_bytes(old)
+            rec = {"ts": time.time(), "brief": brief}
+            self._data[guid] = rec
+            self._bytes += _entry_bytes(rec)
+            # 超容量丢最旧（dict 保序）：条数 2000 + 字节 32MB 双上限；
+            # 单条本身超限时保留该条，不清空整表
+            while (len(self._data) > _MAX_ENTRIES
+                   or self._bytes > _MAX_BYTES) \
+                    and len(self._data) > 1:
+                _old_k, _old_v = next(iter(self._data.items()))
+                self._data.pop(_old_k, None)
+                self._bytes -= _entry_bytes(_old_v)
+            self._schedule_flush_locked()
+
+    def get(self, guid: str) -> dict | None:
+        """返回绑定 brief；不存在或已过期返回 None（过期条目同时从内存
+        删掉并安排落盘同步；是否新鲜仍可由 is_fresh/status 区分）。"""
+        with self._lock:
+            rec = self._data.get(guid)
+            if not rec:
+                return None
+            if (time.time() - float(rec.get("ts") or 0)) >= BIND_TTL:
+                self._data.pop(guid, None)
+                self._bytes = max(0, self._bytes - _entry_bytes(rec))
+                self._schedule_flush_locked()
+                return None
+            return dict(rec["brief"])
+
+    def is_fresh(self, guid: str) -> bool:
+        with self._lock:
+            rec = self._data.get(guid)
+            if not rec:
+                return False
+            return (time.time() - float(rec.get("ts") or 0)) < BIND_TTL
+
+    def has(self, guid: str) -> bool:
+        with self._lock:
+            return guid in self._data
+
+    def count(self) -> int:
+        with self._lock:
+            return len(self._data)
+
+    def forget(self, guid: str) -> None:
+        with self._lock:
+            rec = self._data.pop(guid, None)
+            if rec is not None:
+                self._bytes = max(0, self._bytes - _entry_bytes(rec))
+                self._schedule_flush_locked()
+
+    def clear(self) -> None:
+        with self._lock:
+            self._data.clear()
+            self._bytes = 0
+            self._dirty = True
+            self._persist_locked()
+            self._dirty = False
+        try:
+            STATE.unlink(missing_ok=True)
+        except Exception:
+            _log.debug("clear failed", exc_info=True)
+            pass
+
+    def status(self) -> dict:
+        with self._lock:
+            now = time.time()
+            fresh = sum(1 for r in self._data.values()
+                        if (now - float(r.get("ts") or 0)) < BIND_TTL)
+            return {"entries": len(self._data), "fresh": fresh,
+                    "stale": len(self._data) - fresh, "ttl_sec": BIND_TTL}
+
+
+# 进程内单例
+bind_store = ChartBindStore()

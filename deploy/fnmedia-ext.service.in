@@ -1,0 +1,21 @@
+[Unit]
+Description=fnmedia-ext 在线资源扩展（trim_media.sock 可逆接管）
+After=network.target
+After=trim-media.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=@ROOT@/proxy
+# 开机自启时数据卷可能尚未挂载导致 venv 解释器缺失（203/EXEC），先等它就位
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do [ -x @ROOT@/.venv/bin/python ] && exit 0; sleep 2; done; exit 1'
+ExecStart=@ROOT@/.venv/bin/python supervise.py
+KillMode=mixed
+TimeoutStopSec=25
+Restart=no
+UMask=0022
+Environment=PYTHONUNBUFFERED=1
+Environment=FNMEDIA_UPSTREAM_SOCK=/var/run/trim_media_upstream.sock
+
+[Install]
+WantedBy=multi-user.target

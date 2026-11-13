@@ -1,0 +1,18 @@
+{
+  "title": "合成引擎站",
+  "author": "test",
+  "version": "1",
+  "group": "test",
+  "type": "video",
+  "ua": "mobile",
+  "url": "hiker://empty##fypage",
+  "class_name": "",
+  "class_url": "",
+  "col_type": "text_1",
+  "find_rule": "js:$.require('eng').home()",
+  "search_url": "hiker://empty?kw=**",
+  "searchFind": "js:putMyVar('eng_kw', MY_KEYWORD); $.require('eng').search()",
+  "detail_find_rule": "",
+  "preRule": "js:putItem('eng_gate', '1');",
+  "pages": "[{\"path\": \"eng\", \"name\": \"引擎模块\", \"col_type\": \"text_1\", \"rule\": \"js:\\nvar Engine = {\\n  home: function() {\\n    var html = fetch('__BASE__/eng?page=' + MY_PAGE);\\n    var items = pdfa(html, 'div.item&&a');\\n    var out = [];\\n    for (var i = 0; i < items.length; i++) {\\n      out.push({ title: pdfh(items[i], 'a&&Text') + '|' + getItem('eng_gate', '?'), url: pd(items[i], 'a&&href'), col_type: 'text_1' });\\n    }\\n    setResult(out);\\n  },\\n  search: function() {\\n    var kw = getMyVar('eng_kw', '');\\n    setResult([{ title: 'found:' + kw, url: '__BASE__/d/9', col_type: 'text_1' }]);\\n  }\\n};\\n$.exports = Engine;\\n\"}]"
+}

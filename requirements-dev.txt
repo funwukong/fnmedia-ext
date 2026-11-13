@@ -1,0 +1,3 @@
+# 开发 / 测试依赖（不随 FPK 打包）。
+-r requirements.txt
+pytest==9.2.0

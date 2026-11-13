@@ -1,0 +1,10 @@
+#!/bin/bash
+# 卸载：停服务、还原官方 socket；默认保留 state 与已转存 STRM。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+[ -n "${FNMEDIA_REPO_DIR}" ] && bash "${FNMEDIA_REPO_DIR}/deploy/uninstall.sh" >> "${FNMEDIA_LOG}" 2>&1 || {
+  systemctl stop fnmedia-ext.service 2>/dev/null || true
+  systemctl disable fnmedia-ext.service 2>/dev/null || true
+  rm -f /etc/systemd/system/fnmedia-ext.service
+  systemctl daemon-reload 2>/dev/null || true
+}
+exit 0

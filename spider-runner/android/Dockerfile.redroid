@@ -1,0 +1,17 @@
+# fnmedia redroid 加固运行时镜像（可公开匿名拉取）。
+#
+# 在 erstt/redroid（Android 11 + NDK ARM/ARM64 翻译）之上，仅内置【我们自研、可公开】
+# 的 catvod-bridge.apk 到只读路径 /fnmedia/。绝不包含任何第三方私有 DexGuard 加固 jar：
+# guard.jar 由【完整版 fpk】随插件下发，部署/首启时从宿主机灌入容器持久 /data。
+#
+# 注意：redroid 基础镜像根文件系统是 Android（无常规 /bin/sh），构建期不能执行 RUN，
+# 因此只用 COPY；部署脚本用 `docker exec ... test -f /fnmedia/catvod-bridge.apk`
+# 探测“镜像已内置 bridge”，并 `pm install /fnmedia/catvod-bridge.apk`。
+#
+# 构建上下文 = spider-runner/android（含 build/catvod-bridge.apk）：
+#   docker build -f Dockerfile.redroid -t <registry>/fnmedia-redroid:<tag> .
+ARG REDROID_BASE=erstt/redroid:11.0.0_ndk_ChromeOS
+FROM ${REDROID_BASE}
+
+# 设备内 bridge App（自研，承载加固 jar 执行的宿主；开机后由插件 am start 拉起）
+COPY build/catvod-bridge.apk /fnmedia/catvod-bridge.apk

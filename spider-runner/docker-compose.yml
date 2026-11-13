@@ -1,0 +1,44 @@
+# 外挂式 TVBox 爬虫运行时（完整版私有，公开发布剥离本目录）。
+#
+# 跨机一键部署：runner 用【公开、不含第三方私有 jar】的预构建镜像，直接 pull/up。
+# redroid（Android 加固运行时）不在本 compose 管理，由 android/setup_redroid.sh
+# 独立 docker run（纯手动启停），但加入同一外部网络 fnmedia-spider，使容器化
+# runner 能用固定容器名 http://fnmedia-redroid:9101 直达设备内 bridge。
+#
+# 覆盖镜像仓库/标签：FNM_REGISTRY=<dockerid>  FNM_IMAGE_TAG=...
+#
+#   docker compose up -d runner     # JVM(纯dex 小雅等) + Node(drpyS JS)，常驻轻量
+
+services:
+  runner:
+    image: ${FNM_RUNNER_IMAGE:-fnmedia/fnmedia-spider-runner:latest}
+    container_name: fnmedia-spider-runner
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:9100:9100"   # 仅本机；主插件在同一 NAS
+    environment:
+      RUNNER_PORT: "9100"
+      JAVA_BIN: java
+      NODE_BIN: node
+      SIDECAR_IDLE_SECONDS: "0"
+      CATVOD_ASSET: "/srv/catvod"
+      DRPY_ASSET: "/srv/drpy"
+      # redroid 容器名固定 fnmedia-redroid，与本服务同在 fnmedia-spider 网络
+      ANDROID_BRIDGE_URL: "http://fnmedia-redroid:9101"
+      # 小雅地址/凭证可用环境变量覆盖：
+      # FNM_XIAOYA_SERVER / FNM_XIAOYA_USER / FNM_XIAOYA_PASSWORD
+    volumes:
+      # 站点资产从完整版 fpk 目录只读挂载（bootstrap 注入绝对路径）；不进公开镜像
+      - ${FNM_CATVOD_ASSET:-/dev/null}:/srv/catvod:ro
+      - ${FNM_DRPY_ASSET:-/dev/null}:/srv/drpy:ro
+      # 私有凭证（小雅账密等），存在才由 bootstrap 经 FNM_CATVOD_LOCAL 注入
+      - ${FNM_CATVOD_LOCAL:-/dev/null}:/srv/catvod.local.json:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - spider
+
+networks:
+  spider:
+    name: fnmedia-spider       # 固定外部网络名；setup_redroid 会把 redroid 也接进来
+    driver: bridge

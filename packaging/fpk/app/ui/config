@@ -1,0 +1,22 @@
+{
+    ".url": {
+        "fnmedia-ext.main": {
+            "title": "影视在线扩展管理",
+            "desc": "在线资源站 / 搜索播放 / 播放记录",
+            "icon": "images/icon_{0}.png",
+            "type": "iframe",
+            "protocol": "http",
+            "port": "",
+            "url": "/app/fnmedia-ext/",
+            "allUsers": false,
+            "gatewaySocket": "fnmedia-ext.sock",
+            "gatewayPrefix": "/app/fnmedia-ext",
+            "control": {
+                "accessPerm": "readonly",
+                "portPerm": "hidden",
+                "pathPerm": "hidden",
+                "fullUrlPerm": "hidden"
+            }
+        }
+    }
+}

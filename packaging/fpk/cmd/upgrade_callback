@@ -1,0 +1,30 @@
+#!/bin/bash
+# 升级落盘后：恢复 state，补齐 venv，重新渲染并启动接管服务。
+set -uo pipefail
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+[ -n "${FNMEDIA_REPO_DIR}" ] || fnmedia_fail "应用文件缺失（deploy/install.sh 不存在）"
+
+BACKUP_DIR="${TRIM_PKGVAR:-/tmp}/upgrade-backup"
+if [ -f "${BACKUP_DIR}/state.tar.gz" ]; then
+  tar -xzf "${BACKUP_DIR}/state.tar.gz" -C "${FNMEDIA_REPO_DIR}" >> "${FNMEDIA_LOG}" 2>&1 \
+    || fnmedia_fail "恢复播放记录/资源缓存失败：${BACKUP_DIR}/state.tar.gz"
+fi
+
+cd "${FNMEDIA_REPO_DIR}" || fnmedia_fail "无法进入应用目录"
+# 依赖：venv 缺失或核心包 import 失败时统一引导（离线 wheelhouse 优先、国内镜像兜底）。
+need_deps=1
+if [ -x ".venv/bin/python" ] && .venv/bin/python -c 'import fastapi,uvicorn,httpx' >/dev/null 2>&1; then
+  need_deps=0
+fi
+if [ "$need_deps" = "1" ]; then
+  bash deploy/bootstrap_deps.sh || {
+    tail -n 14 "${FNMEDIA_LOG}" >&2 2>/dev/null || true
+    fnmedia_fail "Python 运行环境准备失败（已尝试内置离线包与多个国内镜像），详见 ${FNMEDIA_LOG}"
+  }
+fi
+bash deploy/install.sh >> "${FNMEDIA_LOG}" 2>&1 || {
+  tail -n 12 "${FNMEDIA_LOG}" >&2 || true
+  fnmedia_fail "升级后接管服务启动失败，详见 ${FNMEDIA_LOG}"
+}
+rm -rf "${BACKUP_DIR}"
+exit 0

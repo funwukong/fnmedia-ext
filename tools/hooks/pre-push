@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# 本地安全钩子：GitHub 只能接收「公开构建」。
+#
+# 规则：
+#   - 全功能本地分支 main 永远不允许推送（推到任何远端引用都拒绝）；
+#   - 只有本地 public 分支可以推送，且只能推到远端 main（由
+#     tools/publish-public.sh 用剥离结果生成 public 后执行）；
+#   - 标签只有指向 public 提交时才放行。
+#
+# 安装：tools/install-hooks.sh
+set -euo pipefail
+
+remote="$1"; url="$2"
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case "$local_ref" in
+    refs/heads/main)
+      echo "✘ 拒绝推送本地 main：这是全功能源码分支。" >&2
+      echo "  GitHub 只接收公开构建；公开发布请运行：tools/publish-public.sh --push" >&2
+      exit 1
+      ;;
+    refs/heads/public)
+      case "$remote_ref" in
+        refs/heads/main) ;;   # 公开线唯一合法目标
+        *)
+          echo "✘ 本地 public 只允许推送到远端 main，拒绝推送到 $remote_ref" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    refs/tags/*)
+      # 删除远端标签（local 为全 0）放行，由发布脚本的强制更新流程使用
+      if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        break
+      fi
+      # 标签不得落在全功能 main 历史上，且必须指向 public（公开构建）提交
+      if git merge-base --is-ancestor "$local_sha" main 2>/dev/null; then
+        echo "✘ 拒绝推送标签 $local_ref：它指向全功能 main 上的提交。" >&2
+        exit 1
+      fi
+      if ! git show-ref --verify --quiet refs/heads/public \
+           || ! git merge-base --is-ancestor "$local_sha" public 2>/dev/null; then
+        echo "✘ 拒绝推送标签 $local_ref：只能发布指向 public（公开构建）的标签。" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "✘ 拒绝推送 $local_ref -> $remote_ref：只允许 public -> main。" >&2
+      exit 1
+      ;;
+  esac
+done
+exit 0

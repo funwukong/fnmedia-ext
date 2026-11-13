@@ -1,0 +1,17 @@
+#!/bin/bash
+# 应用中心 start/stop/status。
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; . "${SELF_DIR}/_common"
+case "${1:-}" in
+  start)  systemctl start fnmedia-ext.service 2>>"${FNMEDIA_LOG}" || true; exit 0 ;;
+  stop)
+    systemctl stop fnmedia-ext.service 2>>"${FNMEDIA_LOG}" || true
+    sleep 0.5
+    # 桌面网关监听的是应用根目录 socket；停止后清理残留，避免应用中心显示连接拒绝。
+    for _root in "${TRIM_APPDEST:-}" "${FNMEDIA_APP_ROOT}/target" "${FNMEDIA_APP_ROOT}"; do
+      [ -n "${_root}" ] && rm -f "${_root}/fnmedia-ext.sock" 2>/dev/null || true
+    done
+    exit 0
+    ;;
+  status) systemctl is-active --quiet fnmedia-ext.service && exit 0 || exit 3 ;;
+  *) exit 1 ;;
+esac

@@ -1,0 +1,171 @@
+name: build-fpk
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      public:
+        description: 同时产出公开构建(经 tools/public_strip.py 剥离私有特性)
+        type: boolean
+        default: false
+      publish:
+        description: 手动触发时也发布 Release(以 VERSION 文件建 tag)
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FNPACK_URL: https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64
+
+jobs:
+  test:
+    name: 测试(P0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装测试依赖
+        run: python -m pip install -r requirements-dev.txt
+      - name: 跑测试
+        run: python -m pytest tests/ -q
+
+  full:
+    name: 完整构建(full)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      # tag 与 VERSION 一致性校验：必须在打包/发布之前。tag push 时校验真实
+      # tag；dispatch 且 publish=true 时校验由 VERSION 派生的 tag（即校验
+      # VERSION 自身格式合法）；dispatch 不发布时跳过（无 tag 可校验）。
+      - name: 校验 tag 与 VERSION 一致
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
+          python3 tools/check_tag_version.py --tag "$TAG"
+
+      - name: 安装 fnpack
+        run: |
+          mkdir -p .tools
+          curl -fsSL -o .tools/fnpack "$FNPACK_URL"
+          chmod +x .tools/fnpack
+          ACTUAL="$(sha256sum .tools/fnpack | awk '{print $1}')"
+          EXPECTED="$(awk '{print $1}' packaging/fpk/fnpack.sha256)"
+          [ "${ACTUAL}" = "${EXPECTED}" ] || { echo "ERROR: fnpack sha256 不一致: 实际 ${ACTUAL}，期望 ${EXPECTED}（见 packaging/fpk/fnpack.sha256）" >&2; exit 1; }
+          echo "fnpack sha256 OK: ${ACTUAL}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 冒烟：先组装出暂存树，验证完整构建能启动、核心测试子集能过，
+      # 再正式打包。打包步骤会重新组装一次，与冒烟用的是同一份源码。
+      # 注意：不要复用 tools/post_strip_smoke.py——它是剥离版，断言私有文件
+      # 不在、开关全关，在完整构建上会误报；完整构建用 tools/full_build_smoke.py。
+      - name: 组装(完整构建，暂存)
+        run: bash packaging/fpk/build.sh --stage-only packaging/fpk/.build/fpk --fnpack "$PWD/.tools/fnpack"
+
+      - name: 安装冒烟依赖
+        run: python -m pip install -q -r packaging/fpk/.build/fpk/app/repo/requirements-dev.txt
+
+      - name: 冒烟：完整构建启动验证
+        run: python3 tools/full_build_smoke.py packaging/fpk/.build/fpk/app/repo
+
+      - name: 打包(完整构建)
+        run: bash packaging/fpk/build.sh --fnpack "$PWD/.tools/fnpack"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-full
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "fnmedia-ext ${TAG#v}" --generate-notes \
+            || gh release upload "$TAG" dist/* --clobber
+
+  public:
+    name: 公开构建(public)
+    runs-on: ubuntu-latest
+    needs: test
+    if: ${{ github.event_name == 'push' || inputs.public == true }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 full job 相同的 tag/VERSION 校验（见 full job 注释）。
+      - name: 校验 tag 与 VERSION 一致
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
+          python3 tools/check_tag_version.py --tag "$TAG"
+
+      - name: 安装 fnpack
+        run: |
+          mkdir -p .tools
+          curl -fsSL -o .tools/fnpack "$FNPACK_URL"
+          chmod +x .tools/fnpack
+          ACTUAL="$(sha256sum .tools/fnpack | awk '{print $1}')"
+          EXPECTED="$(awk '{print $1}' packaging/fpk/fnpack.sha256)"
+          [ "${ACTUAL}" = "${EXPECTED}" ] || { echo "ERROR: fnpack sha256 不一致: 实际 ${ACTUAL}，期望 ${EXPECTED}（见 packaging/fpk/fnpack.sha256）" >&2; exit 1; }
+          echo "fnpack sha256 OK: ${ACTUAL}"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 冒烟：先组装并剥离出暂存树，验证剥离后的树能启动、测试子集能过，
+      # 再正式打包。打包步骤会重新组装一次，与冒烟用的是同一份源码。
+      - name: 组装并剥离(公开构建，暂存)
+        run: bash packaging/fpk/build.sh --public --stage-only packaging/fpk/.build/fpk --fnpack "$PWD/.tools/fnpack"
+
+      - name: 安装冒烟依赖
+        run: python -m pip install -q -r packaging/fpk/.build/fpk/app/repo/requirements-dev.txt
+
+      - name: 冒烟：剥离后启动验证
+        run: python3 tools/post_strip_smoke.py packaging/fpk/.build/fpk/app/repo
+
+      - name: 打包(公开构建,剥离私有特性)
+        run: bash packaging/fpk/build.sh --public --fnpack "$PWD/.tools/fnpack"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fpk-public
+          path: dist/*
+          if-no-files-found: error
+
+      - name: 发布 Release(公开包)
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.publish == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          if [[ "${GITHUB_REF:-}" != refs/tags/v* ]]; then
+            TAG="v$(head -n1 VERSION | tr -d '[:space:]')-fpk"
+          fi
+          gh release create "$TAG" dist/* \
+            --title "fnmedia-ext ${TAG#v}" --generate-notes \
+            || gh release upload "$TAG" dist/* --clobber
