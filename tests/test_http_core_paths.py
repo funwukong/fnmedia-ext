@@ -177,14 +177,6 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
         _refreshing = patch.object(appmod.chart_cache, "_refreshing", True)
         _refreshing.start()
         self.addCleanup(_refreshing.stop)
-        # 海阔源走独立注册表（haikuo_browser 实例持有 import 时的
-        # config 引用，不受上面空 sources 配置影响）；本类测的是核心
-        # 路径，工作区里登记的规则不能漏进 mediadb/list。公开构建已
-        # 剥离海阔模块，属性不存在时不用补丁。
-        if hasattr(appmod, "haikuo_browser"):
-            _no_hk = patch.object(appmod.haikuo_browser, "sources", lambda: [])
-            _no_hk.start()
-            self.addCleanup(_no_hk.stop)
         self.addAsyncCleanup(appmod.t4_media.metadata.close)
 
         def upstream(request):

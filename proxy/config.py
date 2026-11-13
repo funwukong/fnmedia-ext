@@ -368,6 +368,8 @@ DEFAULTS = {
     # 清理每小时跑一次（lifespan 内 _pan_cache_loop），开关关则不跑。
     "pan_cache_cleanup_enabled": True,
     "pan_cache_ttl_hours": 6,
+    # 网盘播放缓存保留天数（1/3/7 天）；0 表示沿用 pan_cache_ttl_hours。
+    "pan_cache_ttl_days": 0,
     # m3u8 流层去广告总开关（TVBox/OK影视 Pro rules 引擎 + 通用启发式）。
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
@@ -463,40 +465,12 @@ class Config:
             pass
         # <<< PRIVATE:SPIDER
 
-    # >>> PRIVATE:HAIKUO
-    def _sync_haikuo_defaults(self):
-        """把海阔模块的实时源（用户导入的规则）同步进 DEFAULT_SOURCES 底表。
-
-        导入海阔规则后调用，使新源无需重启即进入源列表/聚合；旧的导入源
-        若已删除则从底表移除（用户配置中的 enabled 等仍按 saved_by_id 合并）。
-        读失败保护：注册表损坏读不出时底表不动，不清空已有海阔源。
-        """
-        if features.HAIKUO:
-            try:
-                import haikuo as _hkm
-                live = {d["id"]: d for d in _hkm.all_remote_sources()}
-            except (ImportError, OSError, ValueError):
-                _log.debug("_sync_haikuo_defaults failed", exc_info=True)
-                return
-            for s in list(DEFAULT_SOURCES):
-                if s.get("haikuo") and s["id"] not in live:
-                    DEFAULT_SOURCES.remove(s)
-            for d in live.values():
-                ex = next((s for s in DEFAULT_SOURCES if s["id"] == d["id"]), None)
-                if ex is None:
-                    DEFAULT_SOURCES.append(dict(d))
-                else:
-                    ex["name"] = d["name"]
-    # <<< PRIVATE:HAIKUO
 
     def load(self):
         with _LOCK:
             # >>> PRIVATE:SPIDER
             self._sync_spider_defaults()
             # <<< PRIVATE:SPIDER
-            # >>> PRIVATE:HAIKUO
-            self._sync_haikuo_defaults()
-            # <<< PRIVATE:HAIKUO
             self._restored_from_backup = False
             _read_missing = False
             try:
@@ -565,11 +539,6 @@ class Config:
                 if m["drpy"]:
                     m["xsrc"] = True
                 # <<< PRIVATE:DRPY
-                # >>> PRIVATE:HAIKUO
-                m["haikuo"] = bool(s.get("haikuo", False)) if features.HAIKUO else False
-                if m["haikuo"]:
-                    m["xsrc"] = True
-                # <<< PRIVATE:HAIKUO
                 # >>> PRIVATE:SPIDER
                 m["spider_src"] = bool(s.get("spider_src", False))
                 m["spider_key"] = s.get("spider_key", "")
@@ -597,9 +566,6 @@ class Config:
                 # >>> PRIVATE:DRPY
                 m["drpy"] = bool(s.get("drpy", False)) if features.DRPY else False
                 # <<< PRIVATE:DRPY
-                # >>> PRIVATE:HAIKUO
-                m["haikuo"] = bool(s.get("haikuo", False)) if features.HAIKUO else False
-                # <<< PRIVATE:HAIKUO
                 # >>> PRIVATE:SPIDER
                 m["spider_src"] = bool(s.get("spider_src", False))
                 m["spider_key"] = s.get("spider_key", "")
@@ -1090,6 +1056,25 @@ class Config:
                     cfg["removed_ids"].append(sid)
             cfg["sources"] = [s for s in cfg["sources"] if s["id"] != sid]
             self._persist(cfg)
+            return True, "ok"
+
+    def reset_all(self) -> tuple[bool, str]:
+        """一键重置：所有设置回到默认，资源站列表清空（只剩内置源）。
+
+        保留管理令牌相关字段（admin_token 等），否则重置后管理员进不来。
+        """
+        with _LOCK:
+            cfg = dict(DEFAULTS)
+            cfg["sources"] = [dict(s) for s in DEFAULT_SOURCES]
+            cfg["removed_ids"] = []
+            old = self.get()
+            for k in ("admin_token", "admin_token_created_at",
+                      "admin_token_previous",
+                      "admin_token_previous_expires_at"):
+                if k in old:
+                    cfg[k] = old[k]
+            self._persist(cfg)
+            self.load()
             return True, "ok"
 
     def restore_builtin(self) -> tuple[bool, str]:

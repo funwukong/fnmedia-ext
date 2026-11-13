@@ -117,19 +117,6 @@ if features.DRPY:
     except Exception:
         pass
 # <<< PRIVATE:DRPY
-# >>> PRIVATE:HAIKUO
-# 海阔小程序规则（Node sidecar haikuo 引擎分支）。
-# api 形如 haikuo://sub/<key>.json，规则 JSON 已落盘 assets/haikuo/sub/；
-# 公开构建整块剥离。
-if features.HAIKUO:
-    try:
-        import haikuo as _hkm
-        for _h in _hkm.remote_sources():
-            if not any(s["id"] == _h["id"] for s in DEFAULT_SOURCES):
-                DEFAULT_SOURCES.append(_h)
-    except (ImportError, OSError, ValueError):
-        pass
-# <<< PRIVATE:HAIKUO
 # >>> PRIVATE:BILIBILI
 # 注册表不可在 Episode/OnlineTitle 定义前 import bilibili_site（循环导入）。
 # 列表/详情在调用时惰性导入，不依赖海阔规则或 Node。
@@ -180,7 +167,6 @@ def source_priority(source: dict, overrides: dict | None = None) -> int:
 # 普通 csp_ 爬虫源（饭太硬等订阅导入的纯 Java 在线源，经 redroid 真机解析）。
 SPIDER_DEFAULT_PRIORITY = 36
 DRPY_DEFAULT_PRIORITY = 15
-HAIKUO_DEFAULT_PRIORITY = 15
 DDUO_DEFAULT_PRIORITY = 15
 
 
@@ -191,8 +177,6 @@ def _private_source_priority_fn(source: dict) -> int | None:
         return SPIDER_DEFAULT_PRIORITY
     if source.get("drpy"):
         return DRPY_DEFAULT_PRIORITY
-    if source.get("haikuo"):
-        return HAIKUO_DEFAULT_PRIORITY
     if source.get("dduo") or sid == "dduo":
         return DDUO_DEFAULT_PRIORITY
     return None
@@ -247,11 +231,6 @@ class Episode:
     # drpyS JS 爬虫：播放前由 Node sidecar 的 playerContent 解析（公开构建恒 False）
     drpy: bool = False
     # <<< PRIVATE:DRPY
-    # >>> PRIVATE:HAIKUO
-    # 海阔小程序规则：播放前由 Node sidecar 的 haikuo 引擎分支解析
-    #（详情→懒 token→直链；公开构建恒 False）
-    haikuo: bool = False
-    # <<< PRIVATE:HAIKUO
 
 
 @dataclass
@@ -978,239 +957,6 @@ async def drpy_search_source(client, source: dict,
 
 # <<< PRIVATE:DRPY
 
-# >>> PRIVATE:HAIKUO
-# ---------------- 海阔视界小程序规则（Node sidecar haikuo 引擎分支，仅完整构建） ----------------
-
-def _haikuo_site(source: dict) -> dict:
-    """把内部 source 映射成 sidecar 需要的 {"ext": <规则 key>}。
-
-    api 形如 haikuo://sub/<key>.json；key 即 sidecar 会话缓存键。
-    """
-    api = source.get("api", "")
-    key = ""
-    if api.startswith("haikuo://sub/") and api.endswith(".json"):
-        key = api[len("haikuo://sub/"):-len(".json")]
-    return {"ext": key, "key": key}
-
-
-def _haikuo_provider(source: dict) -> str:
-    return source.get("id", "haikuo")
-
-
-# 海阔搜索页常在结果前放搜索框（col_type=input，URL 本身是 JS 函数表达式）
-# 与空白占位（blank_block/big_blank_block）：它们是页面 chrome，不是视频，
-# 映成卡片后点开只会报错，故搜索映射层直接过滤。
-_HAIKUO_CHROME_COL_TYPES = ("input", "blank_block", "big_blank_block")
-
-
-def _haikuo_is_chrome_item(v: dict) -> bool:
-    if str(v.get("col_type") or "") in _HAIKUO_CHROME_COL_TYPES:
-        return True
-    if str(v.get("url") or "").strip().startswith("function"):
-        return True
-    return False
-
-
-# col_type 分流（2026-11-12 影探4K 实测）：海阔 home 里 scroll_button 是
-# 分类按钮（懒代码导航），movie_3 是真影片，其余是页面 chrome。
-# 只有 video 角色进 _haikuo_map_item；folder 角色由 haikuo_browser._rows
-# 建目录卡；skip 角色一张卡都不出。
-_HAIKUO_FOLDER_COL_TYPES = ("scroll_button",)
-_HAIKUO_SKIP_COL_TYPES = ("rich_text", "text_1", "text_center_1",
-                          "blank_block", "big_blank_block", "input")
-
-
-_HAIKUO_VIDEO_COL_TYPES = {
-    "movie_1", "movie_2", "movie_3", "movie_1_left_pic",
-    "movie_1_vertical_pic", "movie_1_vertical_pic_blur",
-    "pic_2", "pic_3", "pic_2_card", "card_pic_2",
-}
-_HAIKUO_DETAIL_EPISODE_COL_TYPES = {"text_2", "text_3", "text_4", "text_5"}
-_HAIKUO_NAV_TITLES = ("猜你喜欢", "换一换", "线路", "排序", "筛选", "下一页", "上一页")
-# 详情页的集数条目：不少规则用 flex_button 排集（4K动漫「1集」「2集」…），
-# 之前一律当成分类按钮丢掉，导致详情页没有可播候选。
-_HAIKUO_EPISODE_TITLE_RE = re.compile(
-    r"^\s*(?:第\s*)?\d+(?:\.\d+)?\s*[集话話期]"
-    r"|^\s*(?:EP|Ep|ep)\s*\d+"
-    r"|^\s*(?:正片|播放|▶\s*播放|观看)\s*$"
-    r"|^\s*(?:免费|VIP|付费)\s*$"
-    r"|\(全\s*\d+\s*集\)|（全\s*\d+\s*集）")
-# 播放动作按钮：点了才吐播放地址。鱼安影视的详情里「高清」就是这种按钮，
-# 真正的 m3u8 藏在它后面（实测 v8.qqqrst.com/…/index.m3u8）。
-_HAIKUO_PLAY_ACTION_RE = re.compile(
-    r"^\s*(?:▶\s*)?(?:高清|清晰|流畅|标清|超清|原画|蓝光|4K|8K|1080P|720P|480P|360P)"
-    r"|^\s*(?:▶\s*)?(?:播放|正片|观看|立即播放|开始播放)\s*$")
-
-
-def _haikuo_is_episode_title(title: str) -> bool:
-    """标题是否像一条剧集（第N集 / 正片 / 全N集 / 免费）。"""
-    t = re.sub(r"<[^>]*>", "", str(title or "")).strip()
-    if not t:
-        return False
-    if t in ("猜你喜欢", "换一换", "线路", "排序", "筛选"):
-        return False
-    return bool(_HAIKUO_EPISODE_TITLE_RE.search(t))
-
-
-def _haikuo_is_play_action(title: str) -> bool:
-    """标题是否是「点了出播放地址」的动作按钮（高清/播放/正片…）。"""
-    t = re.sub(r"<[^>]*>", "", str(title or "")).strip()
-    if not t:
-        return False
-    return bool(_HAIKUO_PLAY_ACTION_RE.match(t))
-
-
-def _haikuo_item_role(v: dict, context: str = "home") -> str:
-    """返回 folder/video/episode/pager/skip，按页面上下文与标题语义分流。"""
-    if not isinstance(v, dict) or _haikuo_is_chrome_item(v):
-        return "skip"
-    title = re.sub(r"<[^>]*>", "", str(v.get("title") or "")).strip()
-    # 「点赞/收藏/高清/清晰…」在不同规则里含义不同：
-    #   * B 站详情里 text_5 的「高清/清晰/流畅」是清晰度切换按钮 → skip；
-    #   * 鱼安影视详情里 flex_button 的「高清」是播放入口 → episode。
-    # 因此只对 text_* 生效，flex_button 交给后面的动作判定。
-    if context in ("home", "detail") and str(v.get("col_type") or "").startswith("text") \
-            and title in {
-        "点赞", "收藏", "稍后再看", "查看评论", "原站", "下载", "分享",
-        "举报", "高清", "清晰", "流畅", "标清", "超清", "1080P", "720P",
-        "480P", "360P",
-    }:
-        return "skip"
-    ct = str(v.get("col_type") or "")
-    u = str(v.get("url") or "").strip()
-    if not u or u.startswith(("javascript:", "toast:", "copy:", "download:")):
-        return "skip"
-    if title.startswith("#") or any(x in title for x in _HAIKUO_NAV_TITLES):
-        return "pager" if "下一页" in title or "上一页" in title else "skip"
-    is_nav = u.startswith("haikuo-play:") or "@lazyRule=" in u or "@rule=js:" in u
-    if context == "detail":
-        # 详情页：集数条目（text_2/3/4/5，或 flex_button 但标题像集数）
-        # → episode；影片卡（movie_*）→ video；其余 chrome → skip。
-        if ct in _HAIKUO_DETAIL_EPISODE_COL_TYPES:
-            return "episode"
-        if ct == "flex_button":
-            # flex_button 既可能是集数（4K动漫「1集」）也可能是播放动作
-            # （鱼安影视「高清」→ 真正的 m3u8 藏在按钮后面）。
-            if _haikuo_is_episode_title(title) or _haikuo_is_play_action(title):
-                return "episode"
-            return "skip"
-        if ct in _HAIKUO_VIDEO_COL_TYPES:
-            return "video"
-        return "skip"
-    if ct in _HAIKUO_FOLDER_COL_TYPES or ct in ("flex_button",):
-        return "folder" if is_nav else "skip"
-    if ct in _HAIKUO_VIDEO_COL_TYPES:
-        return "video"
-    if ct in _HAIKUO_SKIP_COL_TYPES:
-        return "skip"
-    # 兼容大量旧规则：普通影片条目省略 col_type，但提供了详情 URL。
-    if not ct:
-        return "video"
-    # 非标准资源站常把首页海报放在 text_2/3；只有带 extra.id 或明确详情 URL 才收。
-    extra = v.get("extra") if isinstance(v.get("extra"), dict) else {}
-    if ct in _HAIKUO_DETAIL_EPISODE_COL_TYPES and (extra.get("id") or "/detail" in u):
-        return "video"
-    return "skip"
-
-
-def _haikuo_url_with_id(url: str, vid: str) -> str:
-    """把 extra.id 拼进详情 URL 的查询串（?id=，放在 # 片段之前）。
-
-    影探4K 这类规则：20 部影片共用同一个详情页 URL，真 id 只在 extra.id
-    里；不拼 id 则 store.make_guid 全塌成一条记录。已带 id、haikuo-play:
-    token、函数体 URL 一律不动。
-    """
-    u = str(url or "")
-    vid = str(vid or "").strip()
-    if not u or not vid:
-        return u
-    if u.startswith("haikuo-play:") or u.lstrip().startswith("function"):
-        return u
-    try:
-        p = urllib.parse.urlparse(u)
-    except ValueError:
-        return u
-    qs = urllib.parse.parse_qsl(p.query, keep_blank_values=True)
-    if any(k == "id" for k, _ in qs):
-        return u
-    qs.append(("id", vid))
-    new_q = urllib.parse.urlencode(qs)
-    return urllib.parse.urlunparse(
-        (p.scheme, p.netloc, p.path, p.params, new_q, p.fragment))
-
-
-def _haikuo_map_item(source: dict, v: dict, category_context: dict | None = None) -> OnlineTitle:
-    """海阔搜索项 {title,url,desc,col_type,pic_url,extra} → OnlineTitle。
-
-    col_type 是海阔 App 的卡片布局（movie_3 / pic_2_card 等），Feiniu 侧
-    无对应布局，直接丢弃并记一条日志；url 是详情链接（播放时先调 detail
-    取集、再对懒 token 求值，见 app._resolve_haikuo）；pic_url 可能带
-    @Referer=/@headers= 后缀，原样进海报代理层解析（app._serve_online_poster）。
-    extra.id（有则）拼进 url 当身份：同详情页 URL 的多部影片靠它区分，
-    否则 guid 塌成一条记录（见 _haikuo_url_with_id）。
-    """
-    if v.get("col_type"):
-        _log.debug("haikuo item col_type dropped (no Feiniu layout): %s",
-                   str(v.get("col_type"))[:40])
-    extra = v.get("extra") if isinstance(v.get("extra"), dict) else {}
-    vod_id = _haikuo_url_with_id(str(v.get("url") or ""),
-                                 str(extra.get("id") or ""))
-    episodes = []
-    if vod_id:
-        episodes.append(Episode(
-            title="播放", url=vod_id, direct=True,
-            headers={"User-Agent": "Mozilla/5.0"},
-            play_from=_haikuo_provider(source), haikuo=True, xsrc=True,
-        ))
-    return OnlineTitle(
-        provider=_haikuo_provider(source),
-        vod_id=vod_id,
-        title=(v.get("title") or "").strip(),
-        type_name=str(extra.get("type_name") or ""),
-        year=str(extra.get("year") or ""),
-        area=str(extra.get("area") or ""),
-        updated="",
-        remarks=str(extra.get("remarks") or ""),
-        score=str(extra.get("score") or ""),
-        poster=v.get("pic_url", "") or "",
-        overview=(v.get("desc") or "").strip(),
-        actor=str(extra.get("actor") or ""),
-        director=str(extra.get("director") or ""),
-        sources={source.get("name", "海阔源"): episodes} if episodes else {},
-    )
-
-
-async def haikuo_search_source(client, source: dict,
-                               keyword: str) -> list[OnlineTitle]:
-    import asyncio
-    import haikuo
-    if not haikuo.available():
-        return []
-    try:
-        site = _haikuo_site(source)
-        if not site.get("ext"):
-            return []
-        fut = asyncio.to_thread(haikuo.search, site["ext"], keyword, 1)
-        # 与 drpy/guard 搜索同一上限：8s 内无结果即放弃。
-        lst = await asyncio.wait_for(asyncio.shield(fut), timeout=8)
-    except (RuntimeError, TimeoutError, OSError, ValueError):
-        _log.debug("haikuo_search_source failed: source=%s", source, exc_info=True)
-        return []
-    out = []
-    for v in lst if isinstance(lst, list) else []:
-        if not isinstance(v, dict):
-            continue
-        # 只有 video 角色进结果：分类按钮（folder）与页面 chrome（skip）
-        # 都不是影片，映成结果卡点开只会报错或转圈。
-        if _haikuo_item_role(v) != "video":
-            continue
-        t = _haikuo_map_item(source, v)
-        if t.title and t.sources:
-            out.append(t)
-    return out
-
-
-# <<< PRIVATE:HAIKUO
 
 
 # >>> PRIVATE:SPIDER
@@ -1407,10 +1153,6 @@ async def _dispatch_search(client, source, keyword):
     if features.DRPY and source.get("drpy"):
         return await drpy_search_source(client, source, keyword)
     # <<< PRIVATE:DRPY
-    # >>> PRIVATE:HAIKUO
-    if features.HAIKUO and source.get("haikuo"):
-        return await haikuo_search_source(client, source, keyword)
-    # <<< PRIVATE:HAIKUO
     # >>> PRIVATE:SPIDER
     if source.get("spider_src"):
         return await spider_search_source(client, source, keyword)

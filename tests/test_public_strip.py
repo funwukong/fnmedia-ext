@@ -67,38 +67,4 @@ def test_residual_scan_still_catches_real_leak(tmp_path):
     assert public_strip.main(str(root)) == 1
 
 
-def test_strip_removes_haikuo_module_and_blocks(tmp_path):
-    """海阔批：规则模块与规则资产目录整文件删除，标记块剥离，
-    开关区块改写为关闭态。（针字面量子串由拼接构成，见文件头。）"""
-    root = _tree(tmp_path)
-    (root / "proxy" / "haikuo.py").write_text(
-        f"{_HK_LEAK_IMPORT}\n", encoding="utf-8")
-    (root / "proxy" / "assets").mkdir(exist_ok=True)
-    (root / "proxy" / "assets" / _HK).mkdir()
-    (root / "proxy" / "assets" / _HK / "sub").mkdir()
-    (root / "proxy" / "assets" / _HK / "sub" / "r.json").write_text(
-        "{}\n", encoding="utf-8")
-    flags_open = "# >>> PRIV" + "ATE:FEATURE_FLAGS"
-    flags_close = "# <<< PRIV" + "ATE:FEATURE_FLAGS"
-    (root / "proxy" / "features.py").write_text(
-        f"{flags_open}\nDDUO = True\n{_HK.upper()} = True\n{flags_close}\n",
-        encoding="utf-8")
-    (root / "proxy" / "x.py").write_text(
-        f"{_HK_PRIV_OPEN}\n{_HK.upper()} = True\n{_HK_PRIV_CLOSE}\nx = 1\n",
-        encoding="utf-8")
-    assert public_strip.main(str(root)) == 0
-    assert not (root / "proxy" / "haikuo.py").exists()
-    assert not (root / "proxy" / "assets" / _HK).exists()
-    feat = (root / "proxy" / "features.py").read_text(encoding="utf-8")
-    assert _HK.upper() + " = False" in feat
-    assert "PRIV" + "ATE:" not in feat
-    assert "PRIV" + "ATE:" not in (root / "proxy" / "x.py").read_text(
-        encoding="utf-8")
-    assert "x = 1" in (root / "proxy" / "x.py").read_text(encoding="utf-8")
 
-
-def test_residual_scan_catches_haikuo_leak(tmp_path):
-    root = _tree(tmp_path)
-    (root / "proxy" / "leak2.py").write_text(
-        _HK_LEAK_IMPORT + "\n" + _HK_LEAK_PATH + "\n", encoding="utf-8")
-    assert public_strip.main(str(root)) == 1

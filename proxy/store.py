@@ -664,9 +664,6 @@ class Store:
                                     "resolve": bool(e.get("resolve")),
                                     "redirect": bool(e.get("redirect")),
                                     "xsrc": bool(e.get("xsrc") or e.get("dduo")),
-                                    # >>> PRIVATE:HAIKUO
-                                    "haikuo": bool(e.get("haikuo")),
-                                    # <<< PRIVATE:HAIKUO
                                     "play_from": e.get("play_from", "")}
             if drop:
                 self._ep_index.pop(eg, None)
@@ -747,9 +744,6 @@ class Store:
             # >>> PRIVATE:DRPY
             "drpy": bool(one.get("drpy")),
             # <<< PRIVATE:DRPY
-            # >>> PRIVATE:HAIKUO
-            "haikuo": bool(one.get("haikuo")),
-            # <<< PRIVATE:HAIKUO
             "play_from": one.get("play_from", ""),
             "t4": bool(one.get("t4")),
             "episode_key": one.get("episode_key", ""),
@@ -1238,9 +1232,6 @@ class Store:
                 # >>> PRIVATE:DRPY
                 "drpy": bool(ep.get("drpy")),
                 # <<< PRIVATE:DRPY
-                # >>> PRIVATE:HAIKUO
-                "haikuo": bool(ep.get("haikuo")),
-                # <<< PRIVATE:HAIKUO
                 "play_from": ep.get("play_from", ""),
                 "online_guid": guid,
                 "ep_title": ep["title"], "title": brief.get("title", "")}

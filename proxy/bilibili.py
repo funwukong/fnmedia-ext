@@ -23,8 +23,8 @@ from pathlib import Path
 import httpx
 
 _STATE = Path(__file__).resolve().parent.parent / "state" / "bilibili_cookie.json"
-_HAIKUO_DIR = Path(__file__).resolve().parent / "assets" / "haikuo" / "sub"
-_COOKIE_FILE = _HAIKUO_DIR / "Bilibili" / "Cookie" / "bilibili_cookie.txt"
+# Cookie 只在本模块 state 内保存（不再写海阔规则目录，那套已删除）
+_COOKIE_FILE = Path(__file__).resolve().parent.parent / "state" /"bilibili_cookie.txt"
 
 _UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")

@@ -75,9 +75,10 @@ CATALOG_CAT_LABEL = {
 _STANDALONE_PREFIX = "fnmedia-standalone:"
 _XLIB_LIB_PREFIX = "fnmedia-xlib:"
 _T4_GUID = hashlib.md5(b"fnmedia-t4-browse").hexdigest()
-# 海阔选片库：与 proxy/haikuo_browser.py 的 LIB_GUID 同值。
-# 仅是库键常量，公开构建里不会出现该 guid，不参与剥离。
-_HAIKUO_GUID = hashlib.md5(b"fnmedia-haikuo-browse").hexdigest()
+# B 站独立内置库：与 proxy/bilibili_browser.py 的 LIB_GUID 同值。
+# 没有这个常量，库 guid 反查不到稳定键 → 子账号鉴权判定失败 →
+# 点进库提示「此媒体库不存在」（-6）。
+_BILIBILI_GUID = hashlib.md5(b"fnmedia-bilibili-browse").hexdigest()
 
 # 库类型（固定/组开关）与 key 前缀
 K_CHART = "chart"        # 豆瓣真实榜单四库
@@ -85,8 +86,8 @@ K_CATALOG = "catalog"    # 海量分类库
 K_STANDALONE = "standalone"
 K_XLIB = "xlib"
 K_T4 = "t4"
-K_HAIKUO = "haikuo"      # 本 fork 扩展：海阔小程序选片库
 K_HGDJ = "hgdj"          # 本 fork 扩展：红果短剧库
+K_BILIBILI = "bilibili"  # 本 fork 扩展：B 站独立内置库
 
 
 def standalone_guid(source_id: str) -> str:
@@ -107,8 +108,8 @@ def key_of_guid(guid: str) -> str | None:
         return None
     if guid == _T4_GUID:
         return K_T4
-    if guid == _HAIKUO_GUID:
-        return K_HAIKUO
+    if guid == _BILIBILI_GUID:
+        return K_BILIBILI
     for cat, g in CHART_LIB_GUIDS.items():
         if g == guid:
             return make_key(K_CHART, cat)
@@ -121,12 +122,12 @@ def key_of_guid(guid: str) -> str | None:
 def normalize_key(key) -> str:
     """校验库键形状：合法返回原键，否则返回 ""。
 
-    固定键：t4 / hgdj / haikuo；chart:/catalog: 后缀须是已知分类；
+    固定键：t4 / hgdj / bilibili；chart:/catalog: 后缀须是已知分类；
     standalone:/xlib: 后缀是动态标识，非空即合法。
     """
     if not isinstance(key, str) or not key:
         return ""
-    if key in (K_T4, K_HGDJ, K_HAIKUO):
+    if key in (K_T4, K_HGDJ, K_BILIBILI):
         return key
     kind, sep, ident = key.partition(":")
     if not sep or not ident:

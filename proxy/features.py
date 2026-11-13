@@ -34,8 +34,6 @@ ADULT = True
 CATVOD = True
 # drpyS JS 爬虫运行时（Node 跑 TVBox type=3 的 drpy2 .js 站点）
 DRPY = True
-# 海阔视界小程序规则运行时（Node 跑海阔规则 JSON + pages[] JS 引擎模块）
-HAIKUO = True
 # 哔哩哔哩独立内置播放模块（独立站点、一条自动高清线路，关联扫码保存的 B 站 Cookie）
 BILIBILI = True
 # <<< PRIVATE:FEATURE_FLAGS
@@ -45,4 +43,4 @@ REDLINE = True
 
 
 def names() -> tuple[str, ...]:
-    return ("DDUO", "ADULT", "CATVOD", "DRPY", "HAIKUO", "BILIBILI")
+    return ("DDUO", "ADULT", "CATVOD", "DRPY", "BILIBILI")

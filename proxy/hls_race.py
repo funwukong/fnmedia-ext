@@ -1010,17 +1010,6 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
     elif features.DRPY and picked and picked.get("drpy"):
         await _resolve_drpy(picked)
     # <<< PRIVATE:DRPY
-    # >>> PRIVATE:HAIKUO
-    elif features.HAIKUO and picked and picked.get("haikuo"):
-        from app import _resolve_haikuo  # noqa: E402 延迟导入：避免与 app.py 循环导入
-        ok = await _resolve_haikuo(picked)
-        if not ok:
-            # 解析失败的原因一路传出来：调用方（_serve_normal / direct_proxy）
-            # 据此返回客户端可见的硬错误，不给占位播放列表（否则客户端转圈）。
-            picked["resolve_error"] = picked.get("haikuo_error") or "failed"
-            picked["resolve_error_msg"] = (picked.get("haikuo_error_msg")
-                                           or "海阔规则解析失败")
-    # <<< PRIVATE:HAIKUO
     # >>> PRIVATE:BILIBILI
     elif getattr(features, "BILIBILI", False) and picked and str(picked.get("play_from", "")).startswith("bilibili"):
         import asyncio as _aio
@@ -1261,67 +1250,17 @@ async def _probe_direct_media(request, url: str, headers: dict) -> bool:
         return False
 
 
-def _is_haikuo_pick(picked: dict) -> bool:
-    """picked 是否海阔解析出的线路：play_from 带 haikuo-sub- 前缀。"""
-    if not isinstance(picked, dict):
-        return False
-    return str(picked.get("play_from") or "").startswith("haikuo-sub-")
-
 
 def _dduo_strip_referer(picked: dict) -> bool:
     """DDUO 解码直链取分片时是否剥 Referer：只对 DDUO 解出的直链生效。
 
-    海阔 Episode 同样带 xsrc=True，但规则给的 Referer 是分片鉴权的一
-    部分（91短剧），剥掉后某规则分片校验 Referer 会 403，故跳过。
+    外站 CDN 校验 Referer 时保留；多多解出的直链按其自有鉴权处理，剥掉。
     """
     if not features.DDUO:
         return False
     if not isinstance(picked, dict) or not picked.get("xsrc"):
         return False
-    return not _is_haikuo_pick(picked)
-
-
-def _haikuo_deliver_note(request, mg: str, picked: dict, result: str,
-                         **fields):
-    """记一条 main.m3u8 出口 deliver 事件（只记海阔 pick，只记形态）。
-
-    公开构建剥离诊断模块时 import 失败即静默跳过；事件字段不含
-    token 原文与 Authorization。
-    """
-    if not _is_haikuo_pick(picked):
-        return
-    try:
-        diag = importlib.import_module("hai" + "kuo_diag")
-    except ImportError:
-        return
-    except Exception:
-        _log.debug("haikuo deliver diag import failed", exc_info=True)
-        return
-    try:
-        key = ""
-        name = ""
-        try:
-            from app import _haikuo_source_for
-            src = _haikuo_source_for(picked)
-            if src:
-                key = str(src.get("ext", "") or "")
-                name = str(src.get("name", "") or "")
-        except Exception:
-            _log.debug("haikuo deliver source lookup failed", exc_info=True)
-            pass
-        client_label = ""
-        try:
-            from app import _client_of
-            client_label = str(_client_of(request).label)
-        except Exception:
-            _log.debug("haikuo deliver client lookup failed", exc_info=True)
-            pass
-        diag.note("deliver", key=key, name=name, mg=mg, result=result,
-                  url=_url_shape(picked.get("url", "")),
-                  client=client_label, **fields)
-    except Exception:
-        _log.debug("haikuo deliver note failed", exc_info=True)
-
+    return True
 
 
 def _playlist_cache_key(picked: dict) -> str:
@@ -2358,35 +2297,27 @@ async def hls_main(mg: str, request: Request):
                     # <<< PRIVATE:CATVOD
                     body = await _get_playlist_cached(mg, picked, request)
         if body is None:
-            if picked.get("haikuo") and not picked.get("resolve_error"):
                 # 单飞加入了预热的抓取任务时，解析跑在预热的 picked 上，
                 # 本请求的 picked 从未被解析；这里补一次，失败原因才能冒出来。
-                # 已解析过（resolve_error 已设）或已解析成功（haikuo 标志已清）
                 # 时条件不成立，不会重复求值。
-                await _resolve_if_needed(picked, request)
             # 解析失败（如海阔规则详情为空/不可播/需 X5）时直接给硬错误：
             # 慢线占位会让客户端一直转圈，而解析失败没有“后台自愈”的可能。
             if picked.get("resolve_error"):
-                _haikuo_deliver_note(request, mg, picked, "error502",
-                                     code=picked.get("resolve_error"),
-                                     fetch_fail=picked.get("_fetch_fail_reason"))
+                
                 return Response(picked.get("resolve_error_msg") or "海阔规则解析失败",
                                 status_code=502)
             # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
             # 爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
             if _is_slow_line(picked):
-                _haikuo_deliver_note(request, mg, picked, "placeholder",
-                                     fetch_fail=picked.get("_fetch_fail_reason"))
+                
                 return _placeholder_playlist_response(mg)
-            _haikuo_deliver_note(request, mg, picked, "error502",
-                                 code="fetch_fail",
-                                 fetch_fail=picked.get("_fetch_fail_reason"))
+            
             return Response("fetch fail upstream", status_code=502)
         if _mid_switched_from is not None:
             # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
             _mid_switch_note_ok(picked)
         if body is _NOT_HLS:
-            _haikuo_deliver_note(request, mg, picked, "redirect302")
+            
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
             q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
             return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
@@ -2408,25 +2339,21 @@ async def hls_main(mg: str, request: Request):
                 if alt:
                     body2 = await _get_playlist_cached(mg, alt, request)
                     if body2 and body2 is not _NOT_HLS:
-                        _haikuo_deliver_note(request, mg, picked, "playlist",
-                                             via="resurrect")
+                        
                         return Response(body2, media_type="application/vnd.apple.mpegurl",
                                         headers={"Cache-Control": "no-cache",
                                                  "Access-Control-Allow-Origin": "*"})
             if status == "fail":
-                _haikuo_deliver_note(request, mg, picked, "error502",
-                                     code="seg_dead")
+                
                 return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
                                 status_code=502)
             # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
             # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
             if _is_slow_line(picked):
-                _haikuo_deliver_note(request, mg, picked, "placeholder",
-                                     code="seg_dead")
+                
                 return _placeholder_playlist_response(mg)
             # running：让客户端稍候重试，不返回错误清单
-            _haikuo_deliver_note(request, mg, picked, "error503",
-                                 code="seg_dead")
+            
             return Response("正在为你寻找可用线路…", status_code=503,
                             headers={"Retry-After": "3",
                                      "Access-Control-Allow-Origin": "*"})
@@ -2434,7 +2361,7 @@ async def hls_main(mg: str, request: Request):
         if _sk:
             # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
             sourcehealth.record(_sk, True, level="stream")
-        _haikuo_deliver_note(request, mg, picked, "playlist")
+        
         return Response(body, media_type="application/vnd.apple.mpegurl",
                         headers={"Cache-Control": "no-cache",
                                  "Access-Control-Allow-Origin": "*"})

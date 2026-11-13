@@ -108,6 +108,18 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 .live-dev details{margin-top:6px}
 .diag{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px}
 
+/* ---------- 已缓存条目：容器内滚动 + 自适应缩放 ---------- */
+.cache-wrap{max-height:340px;overflow:auto;border:1px solid var(--line);
+  border-radius:10px;background:#fff}
+.cache-wrap table{width:100%;table-layout:fixed}
+.cache-wrap td,.cache-wrap th{font-size:13px;padding:7px 9px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cache-wrap td:first-child{white-space:normal;line-height:1.45}
+.cache-wrap.compact{font-size:12px}
+.cache-wrap.compact td,.cache-wrap.compact th{font-size:12px;padding:5px 7px}
+.cache-more{margin-top:8px;display:flex;justify-content:center}
+.cache-more button{font-size:13px}
+
 /* ---------- 表格 ---------- */
 table{width:100%;border-collapse:collapse;font-size:13px}
 th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
@@ -190,7 +202,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <button class="nav-item" data-page="sources">资源站</button>
       <button class="nav-item" data-page="importsub">导入订阅</button>
       <!-- >>> PRIVATE:SCANLOGIN -->
-      <button class="nav-item" data-page="scanlogin">扫码登录</button>
+      <button class="nav-item" data-page="scanlogin">网盘登录</button>
       <!-- <<< PRIVATE:SCANLOGIN -->
       <!-- >>> PRIVATE:CATVOD -->
       <button class="nav-item" data-page="xiaoya">小雅 / JS</button>
@@ -567,34 +579,13 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       </div>
       <!-- <<< PRIVATE:DRPY -->
 
-      <!-- >>> PRIVATE:HAIKUO -->
-      <div class="card" style="margin-top:14px">
-        <div class="card-title">海阔视界规则导入</div>
-        <p class="card-sub">支持分享口令（rule://、￥home_rule￥/￥rule￥）、云口令（云1/2/5/6/7/9号云剪贴板，如 云5oooole/a3uy）、规则 json 网址、.json 文件（一个文件可含多条规则）。v1 只接 video 型小程序规则；read 型、X5 嗅探、磁力播放不在 v1。</p>
-        <div class="row"><input type="text" id="hkInput" placeholder="粘贴分享口令 / 云口令 / 规则 json 网址" style="flex:2"/>
-          <input type="text" id="hkGroup" placeholder="分组（可选，如 短剧）" style="max-width:140px"/>
-          <button class="primary small" onclick="hkImport()">导入</button></div>
-        <label class="field"><textarea id="hkText" rows="4" placeholder="或粘贴规则 JSON / .json 文件内容…"></textarea></label>
-        <div class="btn-row">
-          <label class="small" style="cursor:pointer">📁 选择 .json 文件 <input type="file" id="hkFile" accept=".json,application/json" style="display:none" onchange="hkFilePicked(this)"/></label>
-          <button class="small" onclick="hkImportFile()">导入文件内容</button>
-        </div>
-        <div id="hkResult" class="muted sm" style="margin-top:6px"></div>
-        <div class="card-title" style="margin-top:12px">已导入的海阔规则 <button class="small" style="float:right" onclick="loadHaikuoMgmt()">刷新</button></div>
-        <div class="row" style="margin:4px 0 8px;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="text" id="hkProbeKw" value="庆余年" placeholder="测试关键词" style="max-width:150px"/>
-          <span class="muted sm">点「测试」对该规则跑一次真实搜索（只搜不播）。</span>
-        </div>
-        <div id="hkMgmt"><div class="muted sm">导入后自动显示。</div></div>
-      </div>
-      <!-- <<< PRIVATE:HAIKUO -->
     </section>
 
     <!-- >>> PRIVATE:SCANLOGIN -->
     <!-- ============ 扫码登录（第三方网盘 + B 站） ============ -->
     <section class="page" id="page-scanlogin">
-      <h2 class="page-title">扫码登录</h2>
-      <p class="page-desc">各站点的登录入口集中在这里。第三方网盘登录后网盘高清线路才能自动转存；B 站登录后可拉取高清与会员内容。</p>
+      <h2 class="page-title">网盘登录</h2>
+      <p class="page-desc">选择网盘进行登录授权。第三方网盘登录后网盘高清线路才能自动转存；B 站登录后可拉取高清与会员内容。</p>
 
       <!-- >>> PRIVATE:BILIBILI -->
       <div class="card">
@@ -625,6 +616,33 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" id="panScanMsg">未加载</div>
         <iframe id="panScanFrame" title="第三方网盘扫码登录" data-src="/v/api/ext/pan/page"
           style="display:none;width:100%;height:640px;border:1px solid var(--line);border-radius:12px;margin-top:10px"></iframe>
+      </div>
+
+      <div class="card">
+        <div class="card-title">一键重置</div>
+        <p class="card-sub">清空所有设置与已导入的资源站列表，回到初始状态。重置后可在「资源站」里用「恢复内置」找回内置源。</p>
+        <div class="btn-row">
+          <button class="btn danger small" onclick="resetAll()">一键重置所有设置</button>
+        </div>
+        <div class="hint" id="resetMsg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">网盘播放缓存</div>
+        <p class="card-sub">转存缓存占满会导致无法播放。默认保留 1 天自动清理，也可手动清理。</p>
+        <label class="switch-row"><input type="checkbox" id="panCacheAuto" checked/>
+          <span>定时自动清理<span class="sub">已开启自动清理，到期自动清除网盘播放缓存</span></span></label>
+        <label class="field"><span>缓存保留天数</span>
+          <select id="panCacheDays">
+            <option value="1">1 天</option>
+            <option value="3">3 天</option>
+            <option value="7">7 天</option>
+          </select></label>
+        <div class="btn-row">
+          <button class="btn primary small" onclick="clearPanCache()">立即清理播放缓存</button>
+          <button class="btn small" onclick="savePanCache()">保存设置</button>
+        </div>
+        <div class="hint" id="panCacheMsg">未清理</div>
       </div>
     </section>
     <!-- <<< PRIVATE:SCANLOGIN -->
@@ -738,10 +756,15 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="card-title">已缓存在线条目 <span class="badge" id="cacheN"></span></div>
         <div class="row"><input type="text" id="kw" placeholder="按标题过滤（在飞牛搜索过的会出现在这里）" style="flex:1"/>
           <button class="small" onclick="loadOnline()">刷新</button></div>
-        <table style="margin-top:10px">
-          <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
-          <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
-        </table>
+        <div class="cache-wrap" id="cacheWrap">
+          <table>
+            <thead><tr><th>标题</th><th style="width:100px">来源</th><th style="width:70px">集数</th></tr></thead>
+            <tbody id="rows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="cache-more" id="cacheMore" style="display:none">
+          <button class="small" onclick="toggleCacheAll()">显示更多</button>
+        </div>
       </div>
 
       <!-- 一键清理：只留一个按钮，分项管理已去掉（用户要求） -->
@@ -845,7 +868,7 @@ const $=(id)=>document.getElementById(id);
 const $$=(sel)=>Array.from(document.querySelectorAll(sel));
 let CFG=null,KWS=[],STATUS=null,PRIO={};
 // >>> PRIVATE:FEATURE_FLAGS
-const FEAT_DDUO=true,FEAT_ADULT=true,FEAT_HAIKUO=true;
+const FEAT_DDUO=true,FEAT_ADULT=true;
 // <<< PRIVATE:FEATURE_FLAGS
 
 function toast(m,kind){const t=$("toast");t.textContent=m;t.className="show "+(kind==="fail"?"fail":"ok");
@@ -2148,90 +2171,7 @@ async function drRetry(key){
   if(r.code===0){toast("脚本下载成功，可启用");await loadDrpyMgmt();}else toast(r.msg||"重试失败","fail");
 }
 /* <<< PRIVATE:DRPY */
-/* >>> PRIVATE:HAIKUO */
-// ---------- 海阔规则导入与管理 ----------
-async function loadHaikuoMgmt(){
-  const box=$("hkMgmt");if(!box)return;
-  try{
-    const r=await jget("/v/api/ext/haikuo/status");
-    if(r.code!==0){box.innerHTML='<div class="hint">加载失败</div>';return;}
-    const d=r.data||{},sites=d.rules||[];
-    if(!sites.length){box.innerHTML='<div class="muted sm">暂无导入的海阔规则。</div>';return;}
-    let h='<div class="subgrp"><div class="subgrp-t">共 '+sites.length+' 个'+(d.available?'':'（运行时不可用）')+'</div>';
-    sites.forEach(s=>{
-      const tag=s.enabled?'<span class="tag">已启用</span>'
-        :'<span class="tag warn">'+(s.script_ready?'已停用':'文件缺失')+'</span>';
-      const grp=s.group?'<span class="tag">'+esc(s.group)+'</span>':'';
-      const cb=s.script_ready?('<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
-        +'<input type="checkbox" '+(s.enabled?"checked":"")+' onchange="hkToggle(this,\''+esc(s.key)+'\')" '
-        +'style="width:14px;height:14px;accent-color:var(--accent)"/>启用</label>'):'';
-      const tst='<button class="small" style="padding:2px 8px" onclick="hkTest(\''+esc(s.key)+'\')">测试</button>';
-      const del='<button class="small" style="padding:2px 8px" onclick="hkRemove(\''+esc(s.key)+'\')">删</button>';
-      h+='<div class="subrow"><span>'+esc(s.name)+'</span><span style="display:flex;align-items:center;gap:8px">'+grp+tag+cb+tst+del+'</span></div>';
-    });
-    h+='</div>';
-    box.innerHTML=h;
-  }catch(e){box.innerHTML='<div class="hint" style="color:var(--danger)">'+esc(String(e))+'</div>';}
-}
-async function hkImport(){
-  const input=$("hkInput").value.trim()||$("hkText").value.trim();
-  const group=$("hkGroup").value.trim();
-  const out=$("hkResult");
-  if(!input){toast("先粘贴口令、地址或规则 JSON","fail");return;}
-  out.textContent="导入中…";
-  const r=await jpost("/v/api/ext/haikuo/import",{input,group:group||null});
-  if(r.code===0){
-    const d=r.data||{};
-    out.textContent="新增 "+(d.added||0)+" 条，更新 "+(d.updated||0)+" 条"
-      +((d.items||[]).map(s=>" · "+s.name).join(""))
-      +((d.errors||[]).length?"；失败："+d.errors.join("；"):"");
-    toast("导入完成");$("hkInput").value="";$("hkText").value="";
-    await Promise.all([loadStatus(),loadHaikuoMgmt()]);
-  }else{out.textContent="导入失败："+(r.msg||"未知错误");toast(r.msg||"导入失败","fail");}
-}
-function hkFilePicked(el){
-  const f=el.files&&el.files[0];if(!f)return;
-  const rd=new FileReader();
-  rd.onload=()=>{$("hkText").value=String(rd.result||"");};
-  rd.readAsText(f);
-}
-async function hkImportFile(){
-  const txt=$("hkText").value.trim();
-  const group=$("hkGroup").value.trim();
-  const out=$("hkResult");
-  if(!txt){toast("先选择 .json 文件","fail");return;}
-  out.textContent="导入中…";
-  const r=await jpost("/v/api/ext/haikuo/import",{file:txt,group:group||null});
-  if(r.code===0){
-    const d=r.data||{};
-    out.textContent="新增 "+(d.added||0)+" 条，更新 "+(d.updated||0)+" 条"
-      +((d.items||[]).map(s=>" · "+s.name).join(""))
-      +((d.errors||[]).length?"；失败："+d.errors.join("；"):"");
-    toast("导入完成");$("hkText").value="";
-    await Promise.all([loadStatus(),loadHaikuoMgmt()]);
-  }else{out.textContent="导入失败："+(r.msg||"未知错误");toast(r.msg||"导入失败","fail");}
-}
-async function hkToggle(el,key){
-  try{
-    const r=await jpost("/v/api/ext/haikuo/remote-toggle",{key,enabled:el.checked});
-    if(r.code===0){toast(el.checked?"已启用":"已停用");await Promise.all([loadStatus(),loadHaikuoMgmt()]);}
-    else{toast(r.msg||"操作失败","fail");el.checked=!el.checked;}
-  }catch(e){toast(String(e),"fail");el.checked=!el.checked;}
-}
-async function hkRemove(key){
-  if(!confirm("确定删除该海阔规则？"))return;
-  const r=await jpost("/v/api/ext/haikuo/remote-remove",{key});
-  if(r.code===0){toast("已删除");await Promise.all([loadStatus(),loadHaikuoMgmt()]);}else toast(r.msg||"删除失败","fail");
-}
-async function hkTest(key){
-  const kw=($("hkProbeKw").value||"庆余年").trim();
-  const r=await jpost("/v/api/ext/haikuo/test",{key,keyword:kw});
-  if(r.code===0){
-    const d=r.data||{};
-    toast("搜索到 "+(d.count||0)+" 条："+((d.items||[]).map(s=>s.title).join("、")||"无"));
-  }else toast(r.msg||"测试失败","fail");
-}
-/* <<< PRIVATE:HAIKUO */
+
 async function delSource(id,name){
   if(!confirm("确定删除资源站「"+name+"」？"))return;
   const r=await jpost("/v/api/ext/source/delete",{id});
@@ -2343,15 +2283,42 @@ async function resetLinePredict(){
   const r=await jpost("/v/api/ext/linepredict/reset",{});
   if(r.code===0)toast("预测缓存已清空");else toast("清空失败 "+(r.msg||""),"fail");
 }
+let CACHE_ALL=[],CACHE_EXPANDED=false;
+const CACHE_PAGE=30;
+function toggleCacheAll(){
+  CACHE_EXPANDED=!CACHE_EXPANDED;
+  renderCache();
+  const b=document.querySelector("#cacheMore button");
+  if(b)b.textContent=CACHE_EXPANDED?"收起":"显示更多";
+}
+function renderCache(){
+  const tb=$("rows");const wrap=$("cacheWrap");
+  const list=CACHE_ALL;
+  $("cacheN").textContent=list.length;
+  const more=$("cacheMore");
+  if(!list.length){
+    tb.innerHTML='<tr><td colspan="3" class="muted">暂无，先去飞牛搜索任意中文片名</td></tr>';
+    if(more)more.style.display="none";
+    return;
+  }
+  const show=CACHE_EXPANDED?list:list.slice(0,CACHE_PAGE);
+  tb.innerHTML=show.map(x=>`<tr><td><div style="font-weight:500">${esc(x.title)}</div>
+    <div class="meta">${esc(x.year||"")} ${esc(x.area||"")} · ${esc(x.remarks||"")}</div></td>
+    <td>${esc(x.provider)}</td><td>${x.episodes}</td></tr>`).join("");
+  if(more){
+    more.style.display=list.length>CACHE_PAGE?"flex":"none";
+    const b=more.querySelector("button");
+    if(b)b.textContent=CACHE_EXPANDED?"收起":("显示更多（还有 "+(list.length-CACHE_PAGE)+" 条）");
+  }
+  // 条目多时用紧凑排版，避免表格过高撑破容器
+  if(wrap)wrap.classList.toggle("compact",list.length>60);
+}
 async function loadOnline(){
   const kw=$("kw").value.trim();
   const r=await jget("/v/api/ext/online?limit=500"+(kw?("&q="+encodeURIComponent(kw)):""));
-  const list=r.data||[];$("cacheN").textContent=list.length;
-  const tb=$("rows");
-  if(!list.length){tb.innerHTML='<tr><td colspan="3" class="muted">暂无，先去飞牛搜索任意中文片名</td></tr>';return;}
-  tb.innerHTML=list.map(x=>`<tr><td><div style="font-weight:500">${esc(x.title)}</div>
-    <div class="meta">${esc(x.year||"")} ${esc(x.area||"")} · ${esc(x.remarks||"")}</div></td>
-    <td>${esc(x.provider)}</td><td>${x.episodes}</td></tr>`).join("");
+  CACHE_ALL=r.data||[];
+  CACHE_EXPANDED=false;
+  renderCache();
 }
 
 
@@ -2404,6 +2371,37 @@ function xyCrumbUp(){browseXiaoya();}
 // <<< PRIVATE:CATVOD
 
 // >>> PRIVATE:SCANLOGIN
+async function savePanCache(){
+  const days=parseInt($("panCacheDays").value||"1",10);
+  const enabled=$("panCacheAuto").checked;
+  try{
+    const j=await jpost("/v/api/ext/config",{pan_cache_ttl_days:days,pan_cache_cleanup_enabled:enabled});
+    if(j.code!==0)throw new Error(j.msg||"保存失败");
+    $("panCacheMsg").textContent=enabled?("已开启自动清理，到期自动清除网盘播放缓存"):"已关闭自动清理";
+    toast("网盘缓存设置已保存");
+  }catch(e){$("panCacheMsg").textContent=e.message;toast("保存失败："+e.message,"fail");}
+}
+async function clearPanCache(){
+  $("panCacheMsg").textContent="正在清理播放缓存，请稍候";
+  try{
+    const j=await jpost("/v/api/ext/pan/cache/clear",{});
+    if(j.code!==0)throw new Error(j.msg||"清理失败");
+    const d=j.data||{};
+    if(!d.total){$("panCacheMsg").textContent="暂无播放缓存需要清理";toast("暂无播放缓存需要清理");return;}
+    $("panCacheMsg").textContent="✅ 播放缓存清理完成";
+    toast("✅ 播放缓存清理完成");
+  }catch(e){$("panCacheMsg").textContent="清理失败："+e.message;toast("清理失败："+e.message,"fail");}
+}
+async function resetAll(){
+  if(!confirm("确定一键重置？\n\n将清空所有设置与已导入的资源站列表。\n重置后可在「资源站」用「恢复内置」找回内置源。"))return;
+  try{
+    const j=await jpost("/v/api/ext/config/reset",{});
+    if(j.code!==0)throw new Error(j.msg||"重置失败");
+    $("resetMsg").textContent="✅ 重置完成";
+    toast("✅ 重置完成，页面即将刷新");
+    setTimeout(()=>location.reload(),1200);
+  }catch(e){$("resetMsg").textContent="重置失败："+e.message;toast("重置失败："+e.message,"fail");}
+}
 async function openPanScan(){
   const f=$('panScanFrame');if(!f)return;
   if(!f.src)f.src=f.dataset.src;
@@ -2419,6 +2417,19 @@ async function refreshPanScan(){
     if(el){el.textContent=on?('已登录 '+on):'未登录';el.className='pill '+(on?'on':'off');}
     $('panScanMsg').textContent=on?('已登录 '+on+' 个网盘，网盘高清线路可自动转存。'):'未登录第三方网盘。';
   }catch(e){$('panScanMsg').textContent='读取网盘登录状态失败：'+e.message;}
+  await loadPanCacheCfg();
+}
+async function loadPanCacheCfg(){
+  try{
+    const cfg=(await jget('/v/api/ext/status')).data.config||{};
+    const days=parseInt(cfg.pan_cache_ttl_days||0,10);
+    const enabled=cfg.pan_cache_cleanup_enabled!==false;
+    const el=$('panCacheAuto');if(el)el.checked=enabled;
+    const sel=$('panCacheDays');
+    if(sel){if(days===3||days===7)sel.value=String(days);else sel.value='1';}
+    const msg=$('panCacheMsg');
+    if(msg&&!msg.textContent.trim())msg.textContent=enabled?'已开启自动清理，到期自动清除网盘播放缓存':'已关闭自动清理';
+  }catch(e){}
 }
 // <<< PRIVATE:SCANLOGIN
 

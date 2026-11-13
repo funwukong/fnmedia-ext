@@ -459,7 +459,6 @@ TARARGS=()
 [ -d "$ROOT/proxy/assets/spiders" ] && TARARGS+=(proxy/assets/spiders)
 [ -d "$ROOT/proxy/assets/catvod" ] && TARARGS+=(proxy/assets/catvod)
 [ -d "$ROOT/proxy/assets/drpy" ] && TARARGS+=(proxy/assets/drpy)
-[ -d "$ROOT/proxy/assets/haikuo" ] && TARARGS+=(proxy/assets/haikuo)
 if [ "${{#TARARGS[@]}}" -gt 0 ]; then
   tar --ignore-failed-read -czf "$BK" -C "$ROOT" "${{TARARGS[@]}}" || true
 fi
@@ -475,7 +474,7 @@ RSYNC_EX=(
   --exclude='.venv/' --exclude='state/' --exclude='__pycache__/'
   --exclude='*.pyc' --exclude='proxy/assets/spiders/'
   --exclude='proxy/assets/catvod/' --exclude='proxy/assets/drpy/'
-  --exclude='proxy/assets/haikuo/' --exclude='*local.json'
+  --exclude='*local.json'
 )
 if command -v rsync >/dev/null 2>&1; then
   rsync -a "${{RSYNC_EX[@]}}" "$EXTRACT/repo/" "$ROOT/" || fail "rsync 覆盖代码失败"
@@ -484,7 +483,6 @@ else
       --exclude='__pycache__' --exclude='*.pyc' \
       --exclude='proxy/assets/spiders' \
       --exclude='proxy/assets/catvod' --exclude='proxy/assets/drpy' \
-      --exclude='proxy/assets/haikuo' \
       --exclude='*local.json' -cf - . ) | ( cd "$ROOT" && tar -xf - ) \
       || fail "tar 覆盖代码失败"
 fi

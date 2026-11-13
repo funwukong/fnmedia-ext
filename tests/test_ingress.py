@@ -46,15 +46,6 @@ class IngressTests(unittest.IsolatedAsyncioTestCase):
             "is_admin": True, "token": "tok-admin"})
         item.start()
         self.addCleanup(item.stop)
-        # 海阔源走独立注册表（haikuo_browser 实例持有 import 时的
-        # config 引用，不受上面 standalone_sources_active 补丁与空
-        # sources 影响）；本类测的是“无任何虚拟库”契约，必须一并清空，
-        # 否则工作区里登记的规则会漏进 mediadb/list。公开构建已剥离
-        # 海阔模块，属性不存在时不用补丁。
-        if hasattr(appmod, "haikuo_browser"):
-            item = patch.object(appmod.haikuo_browser, "sources", lambda: [])
-            item.start()
-            self.addCleanup(item.stop)
 
     async def test_https_and_client_profiles_keep_virtual_libraries(self):
         # 榜单四库（播放设置库已移除，不再常驻）+ B 站独立内置库

@@ -15,10 +15,6 @@ from fastapi import Response
 from fastapi.responses import StreamingResponse
 from t4_browser import LIB_GUID as T4_LIB_GUID
 from t4_browser import LIB_TITLE as T4_LIB_TITLE
-# >>> PRIVATE:HAIKUO
-from haikuo_browser import LIB_GUID as HAIKUO_LIB_GUID
-from haikuo_browser import LIB_TITLE as HAIKUO_LIB_TITLE
-# <<< PRIVATE:HAIKUO
 import admin_auth as admin_authmod
 import asyncio
 import base64
@@ -564,13 +560,6 @@ def _virtual_lib_list() -> list[dict]:
     out.append({"guid": T4_LIB_GUID, "key": vlibsmod.K_T4, "title": T4_LIB_TITLE,
                 "kind": "t4", "group": "t4", "enabled": bool(t4_browser.sources()),
                 "count": len(t4_browser.sources())})
-    # >>> PRIVATE:HAIKUO
-    from app import haikuo_browser as _hk_browser  # noqa: E402 延迟导入：避免与 app.py 循环导入
-    out.append({"guid": HAIKUO_LIB_GUID, "key": vlibsmod.K_HAIKUO,
-                "title": HAIKUO_LIB_TITLE, "kind": "haikuo",
-                "group": "haikuo", "enabled": bool(_hk_browser.sources()),
-                "count": len(_hk_browser.sources())})
-    # <<< PRIVATE:HAIKUO
     for cat, title, _c in chartmod.CHART_CATEGORIES:
         out.append({"guid": CHART_LIB_GUIDS[cat],
                     "key": vlibsmod.make_key(vlibsmod.K_CHART, cat),
@@ -765,6 +754,20 @@ async def ext_online(q: str = "", limit: int = 200):
     return {"code": 0, "data": items[:limit]}
 
 
+@admin_router.post("/v/api/ext/config/reset")
+async def ext_reset_config():
+    """一键重置：清空所有设置与资源站列表（内置源可用「恢复内置」找回）。"""
+    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    try:
+        ok, msg = config.reset_all()
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("config reset failed", exc_info=True)
+        return JSONResponse({"code": 500, "msg": str(exc)[:200]})
+    if not ok:
+        return JSONResponse({"code": 500, "msg": msg})
+    return JSONResponse({"code": 0, "msg": "", "data": {"reset": True}})
+
+
 @admin_router.post("/v/api/ext/config")
 async def ext_set_config(request: Request):
     from app import HOT_DEFAULT_TITLE, _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -789,6 +792,7 @@ async def ext_set_config(request: Request):
         "folder_bind_wait",  # 二级目录冷片绑定等待预算（秒），默认 8.0，夹取 [0, 25]
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
+        "pan_cache_ttl_days",
         "update_proxy",
     }
     # >>> PRIVATE:CATVOD
@@ -2063,148 +2067,6 @@ if features.DRPY:
 # <<< PRIVATE:DRPY
 
 
-# >>> PRIVATE:HAIKUO
-# ---------------- 海阔视界小程序规则（Node sidecar haikuo 引擎分支，仅完整构建） ----------------
-if features.HAIKUO:
-    import haikuo as _hkm
-
-    def _haikuo_src(sid: str):
-        from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        for s in config.all_sources():
-            if s.get("haikuo") and s.get("id") == sid:
-                return s
-        return None
-
-    def _haikuo_guard():
-        if not _hkm.available():
-            return JSONResponse(
-                {"code": 503, "msg": "海阔运行时不可用（缺 Node/规则文件）", "data": None},
-                status_code=503)
-        return None
-
-    def _haikuo_reload():
-        """导入/启停/删除后刷新源底表与搜索缓存（复用 drpy 订阅导入的流程）。"""
-        from app import _AGG_CACHE, _schedule_routes_refresh, _search_cache, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        config.load()
-        _search_cache.clear(); _AGG_CACHE.clear()
-        _schedule_routes_refresh()
-
-    @admin_router.get("/v/api/ext/haikuo/status")
-    async def haikuo_status():
-        from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        sites = [{"id": s.get("id"), "name": s.get("name"),
-                  "enabled": bool(s.get("enabled"))}
-                 for s in config.all_sources() if s.get("haikuo")]
-        return JSONResponse({"code": 0, "msg": "", "data": {
-            "available": _hkm.available(), "sites": sites,
-            "rules": await asyncio.to_thread(_hkm.remote_status)}})
-
-    @admin_router.post("/v/api/ext/haikuo/import")
-    async def haikuo_import(request: Request):
-        """导入海阔规则：四种输入自动识别。
-
-        入参：{input}（分享口令 / 云口令 / 规则 json 网址 / 裸规则 JSON /
-        .json 文件内容）或 {text}/{url}/{code}/{file} 任一，可选 group
-        （导入前分组，缺省用规则自带的 group）。返回登记报告。
-        """
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        try:
-            body = await request.json()
-        except ValueError:
-            _log.debug("haikuo_import bad json", exc_info=True)
-            body = {}
-        raw = (body.get("input") or body.get("text") or body.get("file")
-               or body.get("url") or body.get("code") or "")
-        group = body.get("group") or None
-        if not str(raw).strip():
-            return JSONResponse({"code": 400, "msg": "缺少导入内容"}, status_code=400)
-        try:
-            res = await asyncio.to_thread(
-                _hkm.import_rules, str(raw), group,
-                "file" if body.get("file") else "paste")
-        except (_hkm.HaikuoImportError, _hkm.HaikuoRuleError) as exc:
-            # 输入无法识别 / 规则不在 v1 范围（read 型等）：都是用户侧错误。
-            return JSONResponse({"code": 400, "msg": str(exc)[:200]}, status_code=400)
-        except (OSError, ValueError, RuntimeError) as exc:
-            _log.debug("haikuo_import failed", exc_info=True)
-            return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
-        if res.get("added") or res.get("updated"):
-            _haikuo_reload()
-        return JSONResponse({"code": 0, "msg": "", "data": res})
-
-    @admin_router.post("/v/api/ext/haikuo/test")
-    async def haikuo_test(request: Request):
-        """对已登记的规则跑一次真实搜索，验证规则可用（只搜不播）。"""
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _haikuo_guard()
-        if g:
-            return g
-        try:
-            body = await request.json()
-        except ValueError:
-            _log.debug("haikuo_test bad json", exc_info=True)
-            body = {}
-        key = str(body.get("key", ""))
-        keyword = str(body.get("keyword") or "庆余年").strip()
-        if not key:
-            return JSONResponse({"code": 400, "msg": "缺少 key"}, status_code=400)
-        try:
-            fut = asyncio.to_thread(_hkm.search, key, keyword, 1)
-            items = await asyncio.wait_for(asyncio.shield(fut), timeout=30)
-        except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
-            _log.debug("haikuo_test failed: key=%s", key, exc_info=True)
-            return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
-        return JSONResponse({"code": 0, "msg": "", "data": {
-            "count": len(items),
-            "items": [{"title": it.get("title", ""), "url": it.get("url", "")}
-                      for it in (items or [])[:5]]}})
-
-    @admin_router.post("/v/api/ext/haikuo/remote-toggle")
-    async def haikuo_remote_toggle(request: Request):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        try:
-            body = await request.json()
-        except ValueError:
-            _log.debug("haikuo_remote_toggle failed", exc_info=True)
-            body = {}
-        key, on = str(body.get("key", "")), bool(body.get("enabled"))
-        ok = await asyncio.to_thread(_hkm.set_remote_enabled, key, on)
-        if not ok:
-            return JSONResponse({"code": 409, "msg": "规则文件缺失，无法启用"},
-                                status_code=409)
-        _haikuo_reload()
-        return JSONResponse({"code": 0, "msg": "", "data": {"key": key, "enabled": on}})
-
-    @admin_router.post("/v/api/ext/haikuo/remote-remove")
-    async def haikuo_remote_remove(request: Request):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        try:
-            body = await request.json()
-        except ValueError:
-            _log.debug("haikuo_remote_remove failed", exc_info=True)
-            body = {}
-        key = str(body.get("key", ""))
-        if not key or not await asyncio.to_thread(_hkm.remove_remote, key):
-            return JSONResponse({"code": 404, "msg": "未知海阔规则"}, status_code=404)
-        _haikuo_reload()
-        return JSONResponse({"code": 0, "msg": "", "data": {"key": key}})
-
-    @admin_router.get("/v/api/ext/diag/haikuo")
-    async def ext_diag_haikuo(request: Request, key: str = "", limit: int = 50):
-        """海阔诊断（只读，内存）：最近 100 条海阔事件，可按规则 key 过滤。
-
-        用法：真机点分类/点影片后打开本端点，把 JSON 发回排查。
-        只含事件摘要（kind/时间/规则 key/名/条数/col_type 直方图/解析
-        结果），不含任何 token 原文、Authorization 或带参完整 URL。
-        """
-        import haikuo_diag as _hkdiag
-        try:
-            limit = int(limit)
-        except (TypeError, ValueError):
-            limit = 50
-        return {"code": 0, "msg": "", "data": {
-            "events": _hkdiag.events(key or None, limit)}}
-# <<< PRIVATE:HAIKUO
 
 
 # ---------------- 在线源健康画像（成功率/延迟，自动降权，通用能力） ----------------
@@ -2462,6 +2324,21 @@ def _pan_mod(key: str):
     if m is None:
         raise _PanUnsupported("当前构建不含该网盘模块")
     return m
+
+@admin_router.post("/v/api/ext/pan/cache/clear")
+async def pan_cache_clear():
+    """手动清理网盘播放缓存（立即执行，返回每家删除数与释放空间）。"""
+    from app import _pan_cache_cleanup_once, app  # noqa: E402,F401 延迟导入
+    try:
+        res = await _pan_cache_cleanup_once(force=True)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("pan cache clear failed", exc_info=True)
+        return JSONResponse({"code": 500, "msg": str(exc)[:200]})
+    total = sum(int((v or {}).get("deleted") or 0) for v in res.values())
+    freed = sum(float((v or {}).get("freed") or 0) for v in res.values())
+    return JSONResponse({"code": 0, "data": {"total": total,
+                                            "freed": freed,
+                                            "detail": res}})
 
 @admin_router.get("/v/api/ext/pan/status")
 async def pan_status():
