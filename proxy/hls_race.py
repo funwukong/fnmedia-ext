@@ -2124,7 +2124,7 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
     """抓取并跟随嵌套 master，返回最终媒体列表文本与其基准 URL。失败返回 (None,url)。
 
     失败原因记到 picked["_fetch_fail_reason"]（异常类型名或 HTTP <状态码>），
-    供海阔 deliver 诊断事件用；picked 为 None 时只记日志。
+    供播放链诊断用；picked 为 None 时只记日志。
     """
     # 网盘播放代理首次需转存+实时换链，给更宽裕的超时
     from app import ext_get_retry  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -2133,7 +2133,10 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
     cur, text = url, None
     for _ in range(4):
         try:
-            r = await ext_get_retry(request, cur, headers, tries=tries, timeout=15.0)
+            # 必须传 timeout（网盘线路上面算出的 45s）；写死 15.0 会让
+            # 转存耗时 16~19s 的网盘清单被砍掉 → 换线 → 「该线路文件不存在」。
+            r = await ext_get_retry(request, cur, headers, tries=tries,
+                                    timeout=timeout)
         except Exception as exc:
             # 抓取失败即整表失败，调用方据此换线；记异常类型与 URL 形态，不记完整地址。
             _log.warning("playlist fetch failed: error=%s url=%s m3u8=%s",
@@ -2272,21 +2275,17 @@ async def hls_main(mg: str, request: Request):
                     # <<< PRIVATE:CATVOD
                     body = await _get_playlist_cached(mg, picked, request)
         if body is None:
-                # 单飞加入了预热的抓取任务时，解析跑在预热的 picked 上，
-                # 本请求的 picked 从未被解析；这里补一次，失败原因才能冒出来。
-                # 时条件不成立，不会重复求值。
-            # 解析失败（如海阔规则详情为空/不可播/需 X5）时直接给硬错误：
-            # 慢线占位会让客户端一直转圈，而解析失败没有“后台自愈”的可能。
+            # 解析失败（规则详情为空/不可播/需 X5）时直接给硬错误：
+            # 慢线占位会让客户端一直转圈，而解析失败没有"后台自愈"的可能。
+            # resolve_error 由解析链写入（无写入方时该分支不触发，属预留钩子）。
             if picked.get("resolve_error"):
-                
-                return Response(picked.get("resolve_error_msg") or "海阔规则解析失败",
+                return Response(picked.get("resolve_error_msg") or "规则解析失败",
                                 status_code=502)
             # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
             # 爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
             if _is_slow_line(picked):
-                
                 return _placeholder_playlist_response(mg)
-            
+
             return Response("fetch fail upstream", status_code=502)
         if _mid_switched_from is not None:
             # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
@@ -2396,7 +2395,7 @@ async def hls_main(mg: str, request: Request):
     except asyncio.TimeoutError:
         # 解析已失败（picked 上已有原因）时不再给占位：解析失败没有自愈可能。
         if picked.get("resolve_error"):
-            return Response(picked.get("resolve_error_msg") or "海阔规则解析失败",
+            return Response(picked.get("resolve_error_msg") or "规则解析失败",
                             status_code=502)
         return _placeholder_playlist_response(mg)
 

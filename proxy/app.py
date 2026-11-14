@@ -1703,6 +1703,9 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     if _fut is not None and not _fut.done():
         try:
             return [dict(b) for b in await _fut]
+        except asyncio.CancelledError:
+            # 上一次扇出的 leader 被取消：自己重试，不把取消异常抛给请求。
+            _log.debug("_aggregate_briefs leader cancelled", exc_info=True)
         except Exception:
             _log.debug("_aggregate_briefs failed", exc_info=True)
             pass  # 前次扇出失败则自己重试
@@ -1723,10 +1726,16 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
         if not fut.done():
             fut.set_result(result)
         return [dict(b) for b in result]
-    except Exception as exc:
+    except BaseException as exc:
+        # CancelledError 继承 BaseException（不是 Exception），leader 被
+        # wait_for 取消时若不兜底，等待者会永久挂起（同片名再也搜不出）。
+        # set_exception 不接受 CancelledError，非 Exception 一律转普通异常；
+        # 不能用 fut.cancel()：等待侧的 except Exception 捕不到 CancelledError，
+        # 异常会穿透到请求协程。
         _log.debug("_aggregate_briefs failed", exc_info=True)
         if not fut.done():
-            fut.set_exception(exc)
+            fut.set_exception(exc if isinstance(exc, Exception)
+                              else RuntimeError("aggregate leader cancelled"))
         raise
     finally:
         _AGG_INFLIGHT.pop(cache_key, None)

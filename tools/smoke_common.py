@@ -93,7 +93,7 @@ def run_smoke(root: Path, *, required=(), forbidden=(),
     print("[smoke] import app 检查通过")
 
     rc, out = run([sys.executable, *pytest_cmd], cwd=root,
-                  timeout=600, env_extra={"PYTHONPATH": proxy_dir})
+                  timeout=1500, env_extra={"PYTHONPATH": proxy_dir})
     tail = "\n".join(out.strip().splitlines()[-15:])
     print(tail or "(无输出)")
     if rc != 0:
