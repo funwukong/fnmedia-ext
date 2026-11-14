@@ -736,6 +736,15 @@ class Config:
         with _LOCK:
             return [dict(s) for s in self._cfg["sources"]]
 
+    def set_sources(self, sources: list[dict]) -> bool:
+        """整表替换资源站列表（导入订阅 / 批量维护用）。
+
+        只动 sources 字段，其余配置不变；传空列表即清空
+        （内置源要靠 restore_builtin() 找回）。
+        """
+        self.save({"sources": [dict(s) for s in (sources or [])]})
+        return True
+
     def save(self, patch: dict):
         with _LOCK:
             cfg = self.get()
@@ -1050,6 +1059,25 @@ class Config:
             self._persist(cfg)
             return True, "ok"
     # <<< PRIVATE:ADULT
+
+    def set_source_enabled(self, sid: str, enabled: bool) -> bool:
+        """只改一个源的启用位（不动其它字段）。
+
+        2026-11-13：探活判定失效后自动禁用用。用局部修改 + 落盘，
+        避免调用方拿整份配置覆盖（并发下会丢其它人的改动）。
+        """
+        if not sid:
+            return False
+        with _LOCK:
+            cfg = self._cfg
+            for s in (cfg.get("sources") or []):
+                if s.get("id") == sid:
+                    if bool(s.get("enabled", True)) == bool(enabled):
+                        return True
+                    s["enabled"] = bool(enabled)
+                    self._persist(cfg)
+                    return True
+        return False
 
     def remove_source(self, sid: str) -> tuple[bool, str]:
         with _LOCK:

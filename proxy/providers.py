@@ -622,6 +622,29 @@ async def resolve_share(client: httpx.AsyncClient, page_url: str,
     return found
 
 
+def _is_site_side_error(exc: BaseException) -> bool:
+    """站点自身问题（不是本机网络抖动）→ 可作失效证据。
+
+    典型：SSL 证书链不全（站点漏装中间证书）、证书过期/域名不匹配、
+    TLS 握手协议错误、HTTP 解析错。这些错误换任何网络/设备都一样，
+    不会因为手机换 WiFi 而恢复，因此可以下「失效」结论。
+
+    注意：httpx 会把 TLS 失败包装成 ConnectError，异常类型不够用，
+    必须同时看错误文本（实测 agedm 证书链缺失就落在 ConnectError 里）。
+    """
+    import ssl as _ssl
+    if isinstance(exc, (_ssl.SSLError, _ssl.CertificateError)):
+        return True
+    txt = str(exc).lower()
+    if any(m in txt for m in (
+        "certificate verify failed", "unable to get local issuer",
+        "certificate is not valid", "hostname mismatch",
+        "wrong version number", "ssl:", "certificate has expired",
+    )):
+        return True
+    return type(exc).__name__ in {"RemoteProtocolError", "UnsupportedProtocol"}
+
+
 async def probe_source(api: str, keyword: str = "庆余年",
                        timeout: float = 8.0, source: dict | None = None) -> dict:
     """探测一个苹果CMS资源站是否可用。
@@ -642,8 +665,12 @@ async def probe_source(api: str, keyword: str = "庆余年",
                 headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
             ms = int((time.monotonic() - t0) * 1000)
             if r.status_code != 200:
+                # 站点已明确应答（403/404/410/5xx）= 接口本身坏了，是强失效证据。
+                # 标记 site_error 供上层与「网络层抖动」区分，否则 403 会被
+                # 当成网络不可达而永远不下结论（实测 heimuer 403 一直停在 alive=None）。
                 return {"ok": False, "status": r.status_code,
                         "elapsed_ms": ms, "count": 0, "sample": "",
+                        "site_error": True,
                         "error": f"HTTP {r.status_code}"}
             # 同时支持 at/json 与 at/xml（XML 先转等价 dict）
             j = parse_cms_xml(r.text) if _is_xml_api(api) else r.json()
@@ -651,7 +678,10 @@ async def probe_source(api: str, keyword: str = "庆余年",
         _log.debug("probe_source failed: source=%s", source, exc_info=True)
         return {"ok": False, "status": 0,
                 "elapsed_ms": int((time.monotonic() - t0) * 1000),
-                "count": 0, "sample": "", "error": type(exc).__name__}
+                "count": 0, "sample": "", "error": type(exc).__name__,
+                # ssl 证书链不全（站点缺中间证书，真实飞牛同样会失败）属于站点侧问题，
+                # 不是本机网络抖动 → 记强失效证据，否则永远停在「不下结论」。
+                "site_error": _is_site_side_error(exc)}
     if not isinstance(j, dict) or j.get("code") not in (1, "1"):
         return {"ok": False, "status": 200, "elapsed_ms": ms, "count": 0,
                 "sample": "", "error": "非苹果CMS JSON（code≠1）"}
@@ -690,6 +720,31 @@ async def probe_source(api: str, keyword: str = "庆余年",
 # 移植上游 v0.2.71（批量体检）。
 PROBE_HOT_KEYWORDS = ("庆余年", "狂飙", "流浪地球", "斗罗大陆", "琅琊榜")
 
+# >>> PRIVATE:RISK 风险源判定（2026-11-13）
+# 爬虫源导入时会带 risk 字段；CMS/TVBox 源没有，这里按关键词兜底判定。
+# 命中即视为「风险/重资源源」：探活通过也自动禁用，避免拖慢聚合或
+# 在缺登录态时反复报错。
+_RISKY_NAME_KW = (
+    "伦理", "色", "福利", "午夜", "性感", "两性", "偷拍", "自拍",
+    "蜜桃", "麻豆", "天美", "果冻", "swag", "91", "黑料", "吃瓜",
+    "破解", "福利姬", "里番",
+)
+_RISKY_URL_KW = ("/adult", "adult/", "sexy", "porn", "18av")
+
+
+def source_is_risky(source: dict) -> bool:
+    """判断一个源是否「风险源」（纯函数，不触网）。"""
+    if not isinstance(source, dict):
+        return False
+    if source.get("risk"):
+        return True
+    name = str(source.get("name") or "").lower()
+    if any(k.lower() in name for k in _RISKY_NAME_KW):
+        return True
+    url = str(source.get("api") or source.get("url") or "").lower()
+    return any(k in url for k in _RISKY_URL_KW)
+# <<< PRIVATE:RISK
+
 
 async def probe_source_alive(source: dict, timeout: float = 8.0,
                              keywords=PROBE_HOT_KEYWORDS) -> dict:
@@ -704,6 +759,8 @@ async def probe_source_alive(source: dict, timeout: float = 8.0,
     tried, hit = [], ""
     last = {"ok": False, "status": 0, "elapsed_ms": 0, "count": 0,
             "sample": "", "error": ""}
+    net_err = 0          # 网络层失败（超时/连不上）次数
+    hard_err = 0         # 明确站点侧失败（4xx/5xx、非 CMS 结构）
     for kw in keywords:
         tried.append(kw)
         r = await probe_source(api, keyword=kw, timeout=timeout, source=source)
@@ -712,6 +769,18 @@ async def probe_source_alive(source: dict, timeout: float = 8.0,
             hit = kw
             return {**r, "alive": True, "hit": hit, "tried": tried,
                     "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+        err = str(r.get("error") or "")
+        if r.get("site_error"):
+            # 站点明确应答异常（403/404/5xx、SSL 证书链坏、非 CMS 结构）→
+            # 换任何网络都一样，是强失效证据，直接判死不再空耗其余关键词。
+            hard_err += 1
+            return {**r, "alive": False, "reachable": True, "hit": "",
+                    "tried": tried, "reason": f"站点侧错误：{err or '接口异常'}",
+                    "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+        if _is_net_error_text(err):
+            net_err += 1
+        else:
+            hard_err += 1
     # 全部关键词都无结果：若接口仍能返回合法 CMS 结构，只说明没有这些热门片，
     # 不能据此把正常小众源熔断。用 alive=None 表示“可访问但无基准命中”。
     # 移植上游 beta.3（B11）。
@@ -719,8 +788,161 @@ async def probe_source_alive(source: dict, timeout: float = 8.0,
         return {**last, "alive": None, "reachable": True, "hit": "", "tried": tried,
                 "reason": "接口正常但基准热门词无结果",
                 "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+    if net_err and not hard_err:
+        # 纯网络层失败（沙箱/内网 DNS 抖动、移动网络握手超时）不足以判死源：
+        # 只有站点明确应答了错误（4xx/5xx、非 CMS 结构）才确定失效。
+        # 否则整个探活会被一次 ConnectTimeout 团灭（实测真 CMS 源被误判失效）。
+        return {**last, "alive": None, "reachable": False, "hit": "", "tried": tried,
+                "reason": f"网络不可达（{net_err} 次），不下结论",
+                "elapsed_ms": int((time.monotonic() - t0) * 1000)}
     return {**last, "alive": False, "hit": "", "tried": tried,
             "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+
+
+_NET_ERROR_MARKS = ("timeout", "timed out", "connect", "connecterror",
+                    "connection", "unreachable", "dns", "getaddrinfo",
+                    "name or service", "ssl", "handshake", "reset",
+                    "read error", "remotedisconnected", "network")
+
+
+def _is_net_error_text(err: str) -> bool:
+    """错误文本是否是网络层失败（不代表站点失效）。"""
+    t = (err or "").lower()
+    return any(m in t for m in _NET_ERROR_MARKS)
+
+def _is_net_layer_error(exc: BaseException) -> bool:
+    """异常是否属于网络层失败。
+
+    区分标准：**请求有没有到达站点**。超时/连接/握手/DNS 抖动属于「没拿到
+    应答」，一秒前还正常的源可能只是临时断网，不能据此判死；反之站点返回了
+    HTML 当 JSON、结构不符、4xx/5xx，说明接口本身坏了，是强失效证据。
+    """
+    try:
+        import httpx as _hx
+        if isinstance(exc, (_hx.TimeoutException, _hx.TransportError,
+                            _hx.ConnectError, _hx.ReadError,
+                            _hx.RemoteProtocolError, _hx.ProxyError)):
+            return True
+    except Exception:
+        pass
+    if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+        # OSError 覆盖 getaddrinfo 失败、连接被拒、socket reset 等。
+        return True
+    return _is_net_error_text(type(exc).__name__) or _is_net_error_text(str(exc))
+
+
+async def probe_any_source(source: dict, timeout: float = 8.0,
+                           keywords=PROBE_HOT_KEYWORDS) -> dict:
+    """按源类型探活任意源，返回与 probe_source_alive 兼容的结构。
+
+    2026-11-13：原批量体检只覆盖纯 CMS 源，spider/drpy/t4/catvod/xsrc
+    全被跳过，用户看到的“探活不全”即此。这里按类型分发：
+      · CMS / T4       → probe_source_alive（多热门词）
+      · spider / drpy  → 交给各自搜索实现（需 sidecar 运行时可跑）
+      · catvod / xsrc  → 同上
+    运行时不具备时返回 alive=None（reachable=False），
+    由调用方决定不据此禁用，避免误伤。
+    """
+    src = dict(source or {})
+    kind = _source_kind_of(src)
+
+    if kind in ("", "cms", "t4"):
+        return await probe_source_alive(src, timeout=timeout, keywords=keywords)
+
+    # 非 CMS 源：走各自搜索探活，需要运行时（sidecar）在。
+    # 判据分三层：命中=活着；运行时缺失=不下结论；超时/连不上=判定失效。
+    t0 = time.monotonic()
+    hard_fail = 0
+    site_bad = 0
+    last_err = ""
+    for kw in keywords:
+        try:
+            async with netutil.async_client() as client:
+                titles = await _dispatch_search(client, src, kw)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("probe_any_source %s failed: id=%s", kind,
+                       src.get("id"), exc_info=True)
+            last_err = type(exc).__name__
+            # 运行时缺失（Node/容器没起来）绝不能据此判死源。
+            if _is_runtime_missing(exc):
+                return {"ok": False, "alive": None, "reachable": False,
+                        "status": 0, "count": 0, "sample": "", "hit": "",
+                        "tried": [kw], "error": last_err,
+                        "reason": f"{kind} 运行时不可用，未参与判定",
+                        "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+            # 站点侧超时/连接失败：网络层抖动，不能据此判死源，只计数。
+            if _is_net_layer_error(exc):
+                hard_fail += 1
+                continue
+            # 站点明确应答了但内容不可用（返回 HTML/乱码/结构不符）→ 强证据判死。
+            site_bad += 1
+            continue
+        n = len(titles or [])
+        if n > 0:
+            return {"ok": True, "alive": True, "reachable": True, "status": 200,
+                    "count": n, "sample": "", "hit": kw, "tried": [kw],
+                    "error": "",
+                    "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+    if hard_fail and hard_fail >= len(list(keywords)):
+        # 每个热门词都超时/连不上。但纯网络层失败不足以判死源（沙箱/内网 DNS
+        # 抖动、移动网络握手超时都会命中），只报“不下结论”，交给人工。
+        return {"ok": True, "alive": None, "reachable": False, "status": 0,
+                "count": 0, "sample": "", "hit": "",
+                "tried": list(keywords), "error": last_err,
+                "reason": f"{kind} 全部基准词无响应（网络层），不下结论",
+                "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+    if site_bad:
+        # 站点有应答但内容不可用（老接口下线、返回 HTML、结构不符）→ 判失效。
+        return {"ok": True, "alive": False, "reachable": True, "status": 0,
+                "count": 0, "sample": "", "hit": "",
+                "tried": list(keywords), "error": last_err,
+                "reason": f"{kind} 接口无有效数据（{last_err}），判失效",
+                "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+    return {"ok": True, "alive": None, "reachable": True, "status": 200,
+            "count": 0, "sample": "", "hit": "", "tried": list(keywords),
+            "error": "", "reason": "接口正常但基准热门词无结果",
+            "elapsed_ms": int((time.monotonic() - t0) * 1000)}
+
+
+def _source_kind_of(src: dict) -> str:
+    """归一化源类型。
+
+    历史坑：T4 源用 kind="t4" 标记而非 t4 布尔字段，旧代码 `src.get("t4")`
+    恒为空 → T4 源全部掉进 CMS 分支用空 api 探测，判死误删。
+    """
+    k = str(src.get("kind") or "").strip().lower()
+    if k in ("t4", "catvod", "drpy", "spider", "dduo"):
+        return k
+    if src.get("spider_src"):
+        return "spider"
+    if src.get("drpy"):
+        return "drpy"
+    if src.get("catvod"):
+        return "catvod"
+    if src.get("xsrc"):
+        return "dduo"
+    if src.get("kind") == "t4":
+        return "t4"
+    return "cms"
+
+
+def _is_runtime_missing(exc: BaseException) -> bool:
+    """异常是否属于「本地运行时缺失」而非「站点挂了」。
+
+    侧车（Node/容器）没起来时抛的是 FileNotFoundError / ConnectionRefused
+    到本机回环 / 显式的 RuntimeNotReady，此时不拿它判源失效。
+    """
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    if "runtime" in name and "not" in name:
+        return True
+    if isinstance(exc, (FileNotFoundError,)):
+        return True
+    for key in ("connection refused", "connect call failed",
+                "sidecar", "runner not", "no such file"):
+        if key in msg:
+            return True
+    return False
 
 
 # >>> PRIVATE:DDUO

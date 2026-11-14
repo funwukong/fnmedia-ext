@@ -26,7 +26,7 @@ class SourceProbeTests(unittest.IsolatedAsyncioTestCase):
         peak = 0
         records = []
 
-        async def fake_alive(source):
+        async def fake_alive(source, **kw):
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -53,7 +53,7 @@ class SourceProbeTests(unittest.IsolatedAsyncioTestCase):
     async def test_cancel_keeps_completed_results(self):
         started = asyncio.Event()
 
-        async def slow_alive(source):
+        async def slow_alive(source, **kw):
             started.set()
             await asyncio.sleep(0.05)
             return {"alive": True, "ok": True, "elapsed_ms": 50,

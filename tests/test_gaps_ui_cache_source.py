@@ -306,18 +306,21 @@ def test_source_health_check(tmp_path, monkeypatch):
                 "elapsed_ms": 0, "count": 0, "sample": "",
                 "error": "无返回结果", "hit": "", "tried": ["庆余年"]}
 
-    with patch.object(providers, "probe_source_alive",
+    with patch.object(providers, "probe_any_source",
                       new=AsyncMock(side_effect=fake_alive)), \
             TestClient(appmod.app, raise_server_exceptions=False) as cli:
-        r = cli.post("/v/api/ext/source/health-check", json={})
+        r = cli.post("/v/api/ext/source/health-check",
+                     json={"auto_disable": False, "auto_disable_risk": False})
         assert r.status_code == 200
         d = r.json()["data"]
-        # 只检测纯 CMS 源：爬虫站被排除
-        assert d["total"] == 1
-        assert d["alive"] == 1 and d["dead"] == 0
+        # 探活覆盖全部源（含爬虫站）：2026-11-13 按用户要求改为全量探活
+        assert d["total"] == 2
+        assert d["alive"] == 1 and d["dead"] == 1
         assert d["keywords"] == list(providers.PROBE_HOT_KEYWORDS)
-        assert d["results"][0]["id"] == "custom_aaaa"
-        assert d["results"][0]["hit"] == "庆余年"
+        assert {x["id"] for x in d["results"]} == {"custom_aaaa", "spider-1"}
+        hit_row = next(x for x in d["results"]
+                       if x["id"] == "custom_aaaa")
+        assert hit_row["hit"] == "庆余年"
     # 有效结果回写健康画像（清零失败计数），画像里有该源
     snap = sourcehealth.snapshot()
     assert any("custom_aaaa" in k for k in snap)
@@ -333,10 +336,11 @@ def test_source_health_check_dead_written_to_portrait(tmp_path, monkeypatch):
                 "elapsed_ms": 0, "count": 0, "sample": "",
                 "error": "无返回结果", "hit": "", "tried": ["庆余年"]}
 
-    with patch.object(providers, "probe_source_alive",
+    with patch.object(providers, "probe_any_source",
                       new=AsyncMock(side_effect=fake_alive)), \
             TestClient(appmod.app, raise_server_exceptions=False) as cli:
-        r = cli.post("/v/api/ext/source/health-check", json={})
+        r = cli.post("/v/api/ext/source/health-check",
+                     json={"auto_disable": False})
         assert r.json()["data"]["dead"] == 1
     snap = sourcehealth.snapshot()
     key = next(k for k in snap if "custom_aaaa" in k)

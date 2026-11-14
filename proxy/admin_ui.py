@@ -1631,15 +1631,24 @@ async function sourceProbeStart(){
 async function sourceProbePoll(){
   try{
     const r=await jget("/v/api/ext/source/probe/status"),d=r.data||{};
-    $("srcProbeProgress").textContent=`探活 ${d.done||0}/${d.total||0} · 可用 ${d.alive_count||0} · ${d.running?"进行中":"已结束"}`;
+    const unk=d.unknown_count||0, rem=d.removed_count||0;
+    $("srcProbeProgress").textContent=`探活 ${d.done||0}/${d.total||0} · 可用 ${d.alive_count||0}`
+      +(unk?` · 未定论 ${unk}`:"")+(rem?` · 已删 ${rem}`:"")
+      +` · ${d.running?"进行中":"已结束"}`;
     (d.results||[]).forEach(x=>{
       const tr=$("srcRows").querySelector(`tr[data-id="${x.id}"]`);if(!tr)return;
       if(x.alive)setSt(tr,`✓ ${x.elapsed_ms||0}ms · ${x.count||0}条 · ${x.hit||"命中"}`,"ok");
-      else setSt(tr,"✕ "+(x.error||"失效"),"bad");
+      else if(x.state==="unknown")setSt(tr,"? "+(x.reason||"网络层失败，未定论")+"（未删除）","");
+      else setSt(tr,"✕ "+(x.reason||x.error||"失效"),"bad");
+      if(x.removed){
+        const tds=tr.querySelectorAll("td");
+        if(tds.length)tds[0].innerHTML='<span class="muted sm">已删除</span>';
+      }
     });
     if(!d.running){
       if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
       $("srcProbeCancelBtn").style.display="none";
+      if(rem)setTimeout(loadSources,600);
     }
   }catch(e){/* 单次轮询失败下轮再试，不清空已保留结果 */}
 }

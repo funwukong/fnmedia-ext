@@ -83,12 +83,43 @@ def _sniff_cache_put(page_url: str, found: str) -> None:
     _bounded_put(_cache, page_url, (time.time(), found), _CACHE_MAX)
 
 
+# 明显【不是】媒体地址的形态（借 FongMi/TV Sniffer 的"排除优先"思路）：
+# 这些即便带 .mp4 后缀也要先否掉，否则会把播放页/跳转接口误当直链。
+_NOT_MEDIA = re.compile(
+    r"(?:[?&](?:url|u|v|link)=)"          # 嵌套跳转：?url=http.../&v=http...
+    r"|(?:\.html?)(?:[?#]|$)"             # 页面
+    r"|(?:[?&](?:ac|m)=)"                 # MacCMS 动作接口（需再解析）
+    r"|(?:/redirect|/jump|/goto|/go\.php)",  # 跳转中间件
+    re.I)
+# FongMi SNIFFER 里我们缺的几类：mpd（DASH）、rtmp、抖音 video/tos
+_MEDIA_EXT2 = re.compile(
+    r"\.(m3u8|mp4|mkv|flv|mp3|m4a|aac|mpd|ts)(?:[?#]|$)", re.I)
+_SPECIAL_MEDIA = re.compile(
+    r"^rtmp://\S+"
+    r"|^https?://[^\s]*?video/tos[^\s]*"    # 抖音系 CDN
+    r"|^https?://[^\s]+/live/[^\s]+\.(?:m3u8|flv)"
+    r"|^https?://[^\s]+\.(?:m3u8|mpd)\?",   # 带 query 的清单/描述文件
+    re.I)
+
+
 def _is_media(u: str) -> bool:
+    """判定是否为可播放的媒体地址。
+
+    判定顺序借 FongMi/TV Sniffer（排除优先 → 限定条件 → 页面否定 → 兜底），
+    避免把「播放页 / 跳转接口 / .html」误当直链：
+      1) 显式排除（嵌套跳转、页面、需再解析的接口）
+      2) 后缀 / 特殊协议（m3u8/mp4/mpd/rtmp/抖音 tos）
+      3) 无后缀的媒体 CDN 路径
+    """
     if not u:
         return False
-    if _MEDIA_EXT.search(u):
+    # 1) 排除优先
+    if _NOT_MEDIA.search(u):
+        return False
+    # 2) 后缀与特殊协议
+    if _MEDIA_EXT2.search(u) or _SPECIAL_MEDIA.search(u):
         return True
-    # 阿里云/CDN 签名流常无后缀但带明确媒体路径
+    # 3) 无后缀媒体 CDN（阿里云签名流等）
     return bool(_MEDIA_PATH.search(u))
 
 

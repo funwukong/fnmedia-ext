@@ -1193,19 +1193,26 @@ async def ext_source_health_check(request: Request):
         concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
     except (TypeError, ValueError):
         concurrency = 4
-    targets = [s for s in config.all_sources() if _is_pure_cms(s)]
+    # 2026-11-13：源健康检查同样覆盖【全部源】（原来只挑纯 CMS，
+    # spider/drpy/t4/catvod 全被跳过 → 那些源的健康画像永远是空的）。
+    targets = list(config.all_sources())
     sem = asyncio.Semaphore(concurrency)
 
     async def one(s):
         from app import _source_health_enabled  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
         async with sem:
             try:
-                r = await providers.probe_source_alive(s)
+                r = await providers.probe_any_source(s)
             except Exception as exc:  # noqa: BLE001
                 _log.debug("one failed", exc_info=True)
-                r = {"alive": False, "ok": False, "status": 0,
+                # 网络层失败不代表站点失效，返回 None 表示「未定论」，
+                # 否则一次 DNS 抖动就会把成批源报成 dead 并自动禁用。
+                net = providers._is_net_layer_error(exc)
+                r = {"alive": None if net else False, "ok": not net, "status": 0,
                      "elapsed_ms": 0, "count": 0, "sample": "",
-                     "error": type(exc).__name__, "hit": "", "tried": []}
+                     "error": type(exc).__name__, "hit": "", "tried": [],
+                     "reason": ("网络层失败，未定论" if net
+                                else f"探测异常：{type(exc).__name__}")}
             sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
             # 回写源健康：仅明确的有效/失效才累计；可访问但无基准热门命中
             # （alive=None）不进入播放熔断，避免误伤小众正常源（上游 B11）。
@@ -1213,20 +1220,55 @@ async def ext_source_health_check(request: Request):
                     and r.get("alive") is not None:
                 sourcehealth.record(sk, bool(r.get("alive")),
                                     (r.get("elapsed_ms") or 0) / 1000.0)
+            # >>> PRIVATE:AUTOHEAL 探活失败自动禁用（2026-11-13）
+            # 只有在【明确判定失效】（alive is False，接口可达但搜不到任何结果）
+            # 时才自动禁用；alive=None（不可达/无运行时）不动，避免误禁。
+            auto_disabled = False
+            if body.get("auto_disable", True) and r.get("alive") is False:
+                try:
+                    if config.set_source_enabled(str(s.get("id")), False):
+                        auto_disabled = True
+                        _log.info("auto disable dead source id=%s",
+                                  s.get("id"))
+                except Exception:  # noqa: BLE001
+                    _log.debug("auto disable failed", exc_info=True)
+            # <<< PRIVATE:AUTOHEAL
+            # >>> PRIVATE:RISK 风险源自动禁用（2026-11-13）
+            # CMS/TVBox 源导入路径没有 risk 字段（只有爬虫源有），这里用同一
+            # 套关键词兜底判定；风险源即便探活通过也禁用，避免拖慢聚合或在
+            # 缺登录态时报错。
+            if body.get("auto_disable_risk", True) and not auto_disabled:
+                try:
+                    if providers.source_is_risky(s):
+                        if config.set_source_enabled(str(s.get("id")), False):
+                            auto_disabled = True
+                            _log.info("auto disable risky source id=%s",
+                                      s.get("id"))
+                except Exception:  # noqa: BLE001
+                    _log.debug("risk disable failed", exc_info=True)
+            # <<< PRIVATE:RISK
             return {
                 "id": s.get("id"), "name": s.get("name", ""),
-                "alive": bool(r.get("alive")), "hit": r.get("hit", ""),
+                # alive 三态：True 可用 / False 失效 / None 未定论（网络层失败）
+                "alive": r.get("alive"), "hit": r.get("hit", ""),
                 "tried": r.get("tried", []), "count": r.get("count", 0),
                 "elapsed_ms": r.get("elapsed_ms", 0),
                 "status": r.get("status", 0), "error": r.get("error", ""),
+                "reason": r.get("reason", ""),
                 "dead": sourcehealth.is_dead(sk) if sk else False,
+                "auto_disabled": auto_disabled,
             }
 
     results = await asyncio.gather(*[one(s) for s in targets])
-    alive_n = sum(1 for r in results if r["alive"])
+    # 三态统计：alive=True 才算可用，alive=None 单列「未定论」，不混进失效。
+    alive_n = sum(1 for r in results if r["alive"] is True)
+    unknown_n = sum(1 for r in results if r["alive"] is None)
+    disabled_n = sum(1 for r in results if r.get("auto_disabled"))
     return {"code": 0, "msg": "", "data": {
         "total": len(results), "alive": alive_n,
-        "dead": len(results) - alive_n,
+        "dead": len(results) - alive_n - unknown_n,
+        "unknown": unknown_n,
+        "auto_disabled": disabled_n,
         "keywords": list(providers.PROBE_HOT_KEYWORDS),
         "results": results}}
 
@@ -1246,9 +1288,20 @@ async def ext_source_probe_start(request: Request):
         concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
     except (TypeError, ValueError):
         concurrency = 4
-    targets = [s for s in config.all_sources() if _is_pure_cms(s)]
+    # 2026-11-13：探活覆盖【全部源】（含已禁用），不只纯 CMS ——
+    # 原实现只挑 _is_pure_cms，spider/drpy/t4/catvod/xsrc 全被跳过，
+    # 用户看到的「探活不全」即此。已禁用源也探，便于发现恢复可用的源。
+    targets = list(config.all_sources())
+
+    def _disable(sid: str) -> None:
+        """探活判定失效/危险 → 直接从源列表删除（用户要求删而非禁）。"""
+        if not sid:
+            return
+        config.remove_source(sid)
+
     return {"code": 0, "msg": "", "data": await _probe.start(
-        targets, concurrency=concurrency)}
+        targets, concurrency=concurrency, limit=0,
+        disable_sink=_disable)}
 
 
 @admin_router.get("/v/api/ext/source/probe/status")

@@ -2003,7 +2003,7 @@ async def hls_preset(mg: str, request: Request):
                 or t.get("_pansou_manual"):
             hls_targets.append(t)
     if not hls_targets:
-        return Response("no hls line", status_code=404)
+        return _err_response("no hls line", 404, "no_hls_line")
 
     # 分辨率探测模块已搁置：线路菜单只显示线路名，不追加分辨率标签。
     idx = int(picked.get("index", 0) or 0)
@@ -2174,6 +2174,24 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
     return text, cur
 
 
+def _err_response(body: str, status: int, code: str,
+                  headers: dict | None = None) -> Response:
+    """HLS 代理错误响应：带 X-Fnmedia-Error 标记，便于客户端/日志区分
+    「源站问题」与「代理自身问题」（借 FongMi/TV Proxy.java 的
+    X-TV-Proxy-Error 思路）。
+
+    code 取值与 picked["_fetch_fail_reason"] / picked["_pan_error"] 对齐：
+      no_hls_line      没有任何可用 HLS 线路
+      fetch_fail       上游清单抓取失败（源站不可达/403/超时）
+      no_line_alive    全部线路分片失效
+      seg_fail         分片代理异常
+    """
+    h = {"Cache-Control": "no-store", "X-Fnmedia-Error": code}
+    if headers:
+        h.update(headers)
+    return Response(body, status_code=status, headers=h)
+
+
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
     from app import _autofail_on, _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _ensure_playable, _get_playlist_cached, _main_slow_budget, _online_target_viewable, _pick_episode, _verify_rewritten_first_seg, _viewer_ctx, app, chart_guid_by_media  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -2298,7 +2316,8 @@ async def hls_main(mg: str, request: Request):
             if _is_slow_line(picked):
                 return _placeholder_playlist_response(mg)
 
-            return Response("fetch fail upstream", status_code=502)
+            return _err_response("fetch fail upstream", 502,
+                                 "fetch_fail")
         if _mid_switched_from is not None:
             # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
             _mid_switch_note_ok(picked)
@@ -2331,8 +2350,9 @@ async def hls_main(mg: str, request: Request):
                                                  "Access-Control-Allow-Origin": "*"})
             if status == "fail":
                 
-                return Response("暂无可播线路（该源分片已失效，且未找到其他可用源）",
-                                status_code=502)
+                return _err_response(
+                    "暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                    502, "no_line_alive")
             # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
             # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
             if _is_slow_line(picked):
@@ -2682,7 +2702,8 @@ async def hls_seg(mg: str, request: Request):
     except Exception as exc:
         _log.warning("seg fetch fail %s %s", type(exc).__name__,
                      urllib.parse.urlsplit(src_url).netloc)
-        return Response(f"seg fail {type(exc).__name__}", status_code=502)
+        return _err_response(f"seg fail {type(exc).__name__}", 502,
+                             "seg_fail")
     body = r.content
     # 播放中分片耗时（供静默换线决策）：整段缓冲回退路径同样记录完整下载耗时。
     # （抄上游 v1.1.0 app.py:7404：PanSou 手动线不计入线路测速统计。）
