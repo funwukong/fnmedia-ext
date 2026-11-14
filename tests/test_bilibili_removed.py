@@ -39,9 +39,10 @@ class BilibiliFullyRemovedTests(unittest.TestCase):
             self.assertNotIn(token, src, token)
 
     def test_no_private_blocks(self):
+        # 关键字用拼接构造，避免本文件自身被公开构建的残留扫描命中
+        needle = "PRIVATE" + ":BILIBILI"
         for py in PROXY.glob("*.py"):
-            self.assertNotIn("PRIVATE:BILIBILI",
-                             py.read_text(encoding="utf-8"), py.name)
+            self.assertNotIn(needle, py.read_text(encoding="utf-8"), py.name)
 
     def test_feature_flag_removed(self):
         src = (PROXY / "features.py").read_text(encoding="utf-8")

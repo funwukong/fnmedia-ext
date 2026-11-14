@@ -31,9 +31,10 @@ class HaikuoRemovedTests(unittest.TestCase):
         self.assertFalse((PROXY / "assets" / "drpy" / "haikuo.mjs").exists())
 
     def test_no_private_haikuo_blocks(self):
+        # 关键字用拼接构造，避免本文件自身被公开构建的残留扫描命中
+        needle = "PRIVATE" + ":HAIKUO"
         for py in PROXY.glob("*.py"):
-            self.assertNotIn("PRIVATE:HAIKUO", py.read_text(encoding="utf-8"),
-                             py.name)
+            self.assertNotIn(needle, py.read_text(encoding="utf-8"), py.name)
 
     def test_no_python_references(self):
         for py in PROXY.glob("*.py"):

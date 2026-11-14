@@ -89,7 +89,8 @@ _IMPORT_CHECK = """
 import app as appmod
 import providers
 
-assert appmod.features.HAIKUO is False
+assert appmod.features.CATVOD is False
+assert appmod.features.DRPY is False
 routes = {getattr(r, "path", None) for r in appmod.app.routes}
 for p in ("/v/api/v1/search/list", "/v/api/v1/item/list",
           "/v/api/v1/mediadb/list"):
@@ -120,27 +121,19 @@ _PYTEST_CMD = [
     "--ignore=tests/test_config_whitelist.py",
     # 内存批新增：模块级 import 已剥离的 xlib，构造不兼容，跳过。
     "--ignore=tests/test_memory_caches.py",
-    # 海阔批新增：测完整构建的 haikuo 模块与规则导入，剥离树里模块已删。
-    "--ignore=tests/test_haikuo_py.py",
-    # 海阔 sidecar 测试驱动 proxy/assets/drpy/ 里的 Node sidecar，
-    # 公开剥离会删掉该目录，故在剥离树里整文件忽略（全量套件仍跑）。
-    "--ignore=tests/test_haikuo_shim.py",
-    "--ignore=tests/test_haikuo_loader.py",
-    # 海阔 batch 4：live 回归包装在收集期就 import haikuo 模块，剥离树里
-    # 模块已删，整文件忽略（全量套件仍跑，需 HAIKUO_LIVE=1 才执行）。
-    "--ignore=tests/test_haikuo_live.py",
-    # 海阔浏览批：测 haikuo_browser 模块与 App 点开源链，剥离树里模块已删。
-    "--ignore=tests/test_haikuo_browse.py",
-    # 海阔修复批：nav/id、解析硬错误、诊断日志均在收集期 import 海阔模块，
-    # 剥离树里模块已删，整文件忽略（全量套件仍跑）。
-    "--ignore=tests/test_haikuo_nav_id.py",
-    "--ignore=tests/test_haikuo_resolve_errors.py",
-    "--ignore=tests/test_haikuo_diag.py",
-    "--ignore=tests/test_haikuo_round2.py",
-    "--ignore=tests/test_haikuo_round3.py",
+    # 网盘二维码烧 TS 模块（panqr.py）在公开构建被剥离，测试收集期会 import 失败。
+    "--ignore=tests/test_panqr.py",
+    # 占位 TS 路由测试同样覆盖网盘二维码烧录分支（依赖已剥离的 panqr）。
+    "--ignore=tests/test_gaps_play.py",
+    # 海报裁切测试需要 Pillow（公开构建不带该依赖）。
+    "--ignore=tests/test_poster_landscape.py",
+    # 完整构建专属断言（海阔/B站删除、网盘登录文案、一键重置 UI 等）：
+    # 公开构建会剥掉 SCANLOGIN/PAN 相关块，这些断言在剥离树里不成立。
+    "--ignore=tests/test_seven_fixes.py",
+    "--ignore=tests/test_scan_and_fallback.py",
+    "--ignore=tests/test_bilibili_removed.py",
     "-k", "not dduo_probe_source",
 ]
-
 
 def main(argv: list[str]) -> int:
     return smoke_common.main(
@@ -152,7 +145,6 @@ def main(argv: list[str]) -> int:
         pytest_cmd=_PYTEST_CMD,
         pytest_label="pytest 兼容子集",
     )
-
 
 if __name__ == "__main__":
     raise SystemExit(main(sys.argv))

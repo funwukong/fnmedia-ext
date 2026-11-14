@@ -32,7 +32,7 @@ import re
 import sys
 from pathlib import Path
 
-FEATURES = ("DDUO", "ADULT", "CATVOD", "DRPY", "HAIKUO")
+FEATURES = ("DDUO", "ADULT", "CATVOD", "DRPY")
 
 # 整文件/目录删除（相对目录的 POSIX 路径）。
 # 除专有源码/资产外，构建工具与内部发布说明也不进入公开产物。
@@ -52,6 +52,7 @@ DROP_FILES = {
    "proxy/pan.py",          # 第三方网盘（夸克）扫码登录/转存/直链，私有
    "proxy/panuc.py",
    "proxy/panali.py",       # 第三方网盘（阿里云盘开放平台）登录/转存/取链，私有        # 第三方网盘（UC）扫码登录/转存/直链，私有
+   "proxy/panqr.py",        # 网盘登录二维码烧进 TS 占位分片，私有
    "proxy/_vendor",         # 网盘功能内联第三方库（segno 二维码），私有
    "proxy/spiders.py",
    "proxy/assets/spiders",
@@ -76,8 +77,8 @@ BLOCK_RE = re.compile(
 CLOSE_RE = re.compile(r"<<<\s*PRIVATE:(?P<tag>[A-Z_]+)")
 
 # 公开构建里直接写成不带任何标记的普通常量（不残留 PRIVATE 字样）
-PY_FLAGS = "# 可选特性在公开构建中均关闭\nDDUO = False\nADULT = False\nCATVOD = False\nDRPY = False\nHAIKUO = False"
-JS_FLAGS = "const FEAT_DDUO=false,FEAT_ADULT=false,FEAT_HAIKUO=false;"
+PY_FLAGS = "# 可选特性在公开构建中均关闭\nDDUO = False\nADULT = False\nCATVOD = False\nDRPY = False"
+JS_FLAGS = "const FEAT_DDUO=false,FEAT_ADULT=false;"
 
 
 def _is_text(path: Path) -> bool:
