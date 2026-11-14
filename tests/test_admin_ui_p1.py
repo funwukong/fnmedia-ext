@@ -90,56 +90,68 @@ def test_acl_default_three_states_with_node():
     assert "acl three-state ok" in out
 
 
-# ---------------- P1-16：资源站分页/筛选 ----------------
+# ---------------- P1-16：资源站筛选 / 不分页（2026-11-13 改） ----------------
 
-def _src_pager_block(src: str) -> str:
+def _src_filter_block(src: str) -> str:
+    """取筛选相关函数块（不再有 srcPage —— 列表已改为不分页）。"""
     start = src.index("let SRC_FILTER")
-    end = src.index("function srcPage(d)")
-    end = src.index("\n", end) + 1
+    end = src.index("function renderSources()")
     return src[start:end]
 
 
-def test_sources_pager_controls_present():
+def test_sources_no_pager_controls_present():
+    """2026-11-13：资源站列表不分页 —— 一次渲染全部 + 展开/收起 + 自适应。"""
     src = _src()
-    for html_id in ("srcFilter", "srcEnabledFilter", "srcPageInfo"):
+    for html_id in ("srcFilter", "srcEnabledFilter", "srcPageInfo",
+                    "srcWrap", "srcExpandBtn"):
         assert f'id="{html_id}"' in src, html_id
-    assert "const SRC_PAGE_SIZE=20" in src
+    # 分页相关必须已移除
+    assert "const SRC_PAGE_SIZE=20" not in src
+    assert "function srcPage(d)" not in src
+    assert 'onclick="srcPage(-1)"' not in src
+    assert 'onclick="srcPage(1)"' not in src
+    # 筛选 + 展开/收起仍在
     assert "function srcFiltered()" in src
     assert "function onSrcFilter(v)" in src
     assert "function onSrcEnabledFilter(v)" in src
-    assert "function srcPage(d)" in src
-    # renderSources 按筛选结果分页切片，并给出空筛选提示。
+    assert "function toggleSrcExpand()" in src
+    assert 'onclick="toggleSrcExpand()"' in src
+    # renderSources 一次渲染全部（不再切片）
     assert "srcsAll=srcFiltered()" in src
-    assert "slice((SRC_PAGE-1)*SRC_PAGE_SIZE,SRC_PAGE*SRC_PAGE_SIZE)" in src
+    assert "slice((SRC_PAGE-1)*SRC_PAGE_SIZE,SRC_PAGE*SRC_PAGE_SIZE)" not in src
     assert "没有匹配的资源站" in src
+    # 容器自适应（列宽固定 + 可滚动 + 展开态）
+    assert ".src-wrap{" in src
+    assert "table-layout:fixed" in src
+    assert ".src-wrap.expanded{" in src
 
 
-def test_sources_filter_and_page_logic_with_node():
+def test_sources_filter_logic_with_node():
+    """筛选逻辑（不再涉及翻页）。"""
     src = _src()
-    block = _src_pager_block(src)
+    block = _src_filter_block(src)
     script = (
         "let CFG={sources:[]};\n"
         "for(let i=0;i<25;i++)CFG.sources.push(\n"
         "  {id:'s'+i,name:'站'+i,api:'https://h'+i+'.example/api',enabled:i%2===0});\n"
         "let rendered=0;function renderSources(){rendered++;}\n"
+        "let $=(id)=>({textContent:'',value:'',className:''});\n"
         + block +
         "function eq(a,b,msg){if(a!==b)throw new Error(msg+': got '+a+' want '+b);}\n"
         "eq(srcFiltered().length,25,'默认不过滤');\n"
         "onSrcFilter('站2');\n"
         "eq(srcFiltered().length,6,'关键字 站2 命中 站2/站20-24');\n"
-        "eq(SRC_PAGE,1,'筛选后回到第 1 页');\n"
         "onSrcFilter('');onSrcEnabledFilter('on');\n"
         "eq(srcFiltered().length,13,'仅已启用');\n"
         "onSrcFilter('站2');\n"
         "eq(srcFiltered().length,4,'关键字+仅已启用');\n"
         "onSrcFilter('');onSrcEnabledFilter('all');\n"
-        "srcPage(2);eq(SRC_PAGE,3,'翻页');\n"
-        "onSrcFilter('站2');eq(SRC_PAGE,1,'再次筛选回到第 1 页');\n"
-        "if(rendered<1)throw new Error('筛选/翻页未触发重绘');\n"
-        "console.log('src pager logic ok');\n"
+        "eq(srcFiltered().length,25,'清空筛选');\n"
+        "if(rendered<1)throw new Error('筛选未触发重绘');\n"
+        "console.log('src filter logic ok');\n"
     )
     out = _node_ok(script)
-    assert "src pager logic ok" in out
+    assert "src filter logic ok" in out
 
 
 # ---------------- P1-16：启用开关失败回滚 ----------------

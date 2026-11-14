@@ -6315,6 +6315,103 @@ def _line_key_match(want: str, got: str) -> bool:
     return disp(want) == disp(got)
 
 
+# >>> PRIVATE:PAN
+async def _resolve_pan_share(picked: dict) -> bool:
+    """网盘分享链接 → 转存 → 可播放地址（上游 app.py 同款分支）。
+
+    上游（完整版 app.py:8120 起）就是这样做的：_pan_match 识别是哪家网盘
+    → mod.resolve_share(share, pwd) 转存拿到 items[{fid,...}] → 把 picked.url
+    换成本服务的 /v/api/ext/pan/{key}/play?fid=... 并标记 picked["pan"]=True。
+    我们之前只有网页嗅探（providers.resolve_share），对网盘分享链接无效，
+    导致「网盘结果在线路里播不出来」。
+
+    返回 True 表示已解析成可播地址。
+    """
+    if not isinstance(picked, dict):
+        return False
+    raw = str(picked.get("url") or "")
+    if not raw:
+        return False
+    import asyncio as _aio
+    import urllib.parse as _up
+    from panmatch import _PAN_LINKSTART_RE, _PAN_PROVIDERS, _pan_match
+
+    pv = _pan_match(raw)
+    share = ""
+    if pv:
+        m = pv["re"].search(raw)
+        if not m:
+            return False
+        # 分享地址用【完整原始 URL】：网盘正则不覆盖 ?pwd= 提取码，
+        # 截断后 parse_share 取不到提取码，转存会失败（分享需要提取码时）。
+        # 只在没有提取码参数时用正则匹配段兜底。
+        if re.search(r"[?&](?:pwd|passcode)=", raw):
+            share = raw
+        else:
+            share = m.group(0)
+            if not share.lower().startswith(("http://", "https://")):
+                share = "https://" + share
+    else:
+        # 四盘聚合（Seedhub）中转：跟随 302 解真实链接。
+        lm = _PAN_LINKSTART_RE.search(raw)
+        if not lm:
+            return False
+        try:
+            import pan as _panq
+            resolved = await _aio.to_thread(_panq.resolve_linkstart, lm.group(1))
+        except Exception:
+            _log.debug("_resolve_pan_share linkstart failed", exc_info=True)
+            return False
+        if not resolved:
+            picked["_pan_error"] = ("该资源是四盘聚合中转，本机无法自动解出真实网盘链接")
+            return False
+        pv = _pan_match(resolved) or _PAN_PROVIDERS[0]
+        share = resolved
+
+    if not pv or not pv.get("playable"):
+        picked["_pan_error"] = ("该资源来自暂未支持的网盘家"
+                                "（目前支持夸克 / UC / 阿里）")
+        return False
+    key = pv["key"]
+    mod = None
+    for _k, _m in (("quark", "pan"), ("uc", "panuc"), ("ali", "panali")):
+        if _k != key:
+            continue
+        try:
+            mod = __import__(_m)
+        except Exception:
+            mod = None
+        break
+    if mod is None:
+        picked["_pan_error"] = "当前构建不含该网盘的播放模块"
+        return False
+    hint = _up.parse_qs(_up.urlparse(share).query).get("pwd", [""])[0]
+    try:
+        r = await _aio.to_thread(mod.resolve_share, share, hint)
+    except Exception as exc:  # noqa: BLE001
+        picked["_pan_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return False
+    items = [x for x in (r.get("items") or []) if x.get("url")]
+    if not items:
+        picked["_pan_error"] = "分享内没有可播放的视频文件"
+        return False
+    try:
+        idx = int(picked.get("index", 0) or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    item = items[min(idx, len(items) - 1)]
+    play_path = ("/v/api/ext/pan/play" if key == "quark"
+                 else f"/v/api/ext/pan/{key}/play")
+    picked["url"] = f"{play_path}?fid={item['fid']}"
+    picked["resolve"] = False
+    picked["pan"] = True
+    picked["pan_provider"] = key
+    picked["headers"] = {"User-Agent": "Mozilla/5.0"}
+    picked["m3u8"] = False
+    return True
+# <<< PRIVATE:PAN
+
+
 def _request_without_line(request: Request) -> Request:
     """复制一个去掉 query 里 line 参数的 Request（浅拷贝 scope，state 共享）。
 

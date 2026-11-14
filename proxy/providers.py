@@ -188,6 +188,22 @@ def _bootstrap_spider_sources() -> None:
 _bootstrap_spider_sources()
 # <<< PRIVATE:SPIDER
 
+# >>> PRIVATE:PAN
+# PanSou 网盘搜索源：搜索结果作为真实的一集注入线路（上游同款行为 ——
+# 上游 pansou.py 把每条分享链接映射为该标题下的一集，播放时转存出直链）。
+def _bootstrap_pansou_source() -> None:
+    try:
+        import pansou_search as _pss
+        d = _pss.source_def()
+        if not any(s.get("id") == d["id"] for s in DEFAULT_SOURCES):
+            DEFAULT_SOURCES.append(d)
+    except Exception:
+        _log.debug("_bootstrap_pansou_source failed", exc_info=True)
+
+
+_bootstrap_pansou_source()
+# <<< PRIVATE:PAN
+
 HTTP_TIMEOUT = 12.0
 _DIRECT_RE = re.compile(r"^https?://", re.I)
 _MEDIA_RE = re.compile(r"\.(m3u8|mp4|flv|mkv|ts)(\?|$)", re.I)
@@ -1132,6 +1148,17 @@ async def _dispatch_search(client, source, keyword):
     if features.DRPY and source.get("drpy"):
         return await drpy_search_source(client, source, keyword)
     # <<< PRIVATE:DRPY
+    # >>> PRIVATE:PAN
+    # PanSou 网盘搜索：结果映射为真实的一集（上游同款行为 ——
+    # 上游 pansou.py 把每条分享链接作为该标题下的一集，播放时转存出直链）。
+    if source.get("pansou"):
+        import pansou_search as _pss
+        try:
+            return await _pss.search(client, source, keyword)
+        except Exception as exc:
+            _log.warning("pansou search failed: %s", exc, exc_info=True)
+            return []
+    # <<< PRIVATE:PAN
     # >>> PRIVATE:SPIDER
     if source.get("spider_src"):
         return await spider_search_source(client, source, keyword)

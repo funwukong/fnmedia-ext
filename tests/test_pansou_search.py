@@ -59,7 +59,8 @@ def _transport(payload=None, status=200, raw=None, capture=None,
 
 class PansouSearchAdapterTests(unittest.TestCase):
     def test_base_constant_is_user_supplied_instance(self):
-        self.assertEqual(pansou._PANSOU_SEARCH_BASE,
+        # 2026-11-13：地址改为可配置（pansou_url），默认仍是该实例。
+        self.assertEqual(pansou._pansou_base_url(),
                          "https://bus.wulii.eu.cc")
 
     def test_request_shape(self):

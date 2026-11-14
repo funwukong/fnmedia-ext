@@ -370,6 +370,13 @@ DEFAULTS = {
     "pan_cache_ttl_hours": 6,
     # 网盘播放缓存保留天数（1/3/7 天）；0 表示沿用 pan_cache_ttl_hours。
     "pan_cache_ttl_days": 0,
+    # PanSou 网盘搜索（自托管实例；上游同款配置键）
+    "pansou_enabled": True,
+    "pansou_url": "https://bus.wulii.eu.cc",
+    "pansou_cloud_types": "quark,uc,aliyun",
+    "pansou_src": "all",
+    "pansou_timeout": 30.0,
+    "pansou_limit": 30,
     # m3u8 流层去广告总开关（TVBox/OK影视 Pro rules 引擎 + 通用启发式）。
     "ad_filter_enabled": True,
     # 播放时动态检测（无订阅 rules 时，按 DISCONTINUITY 分段+时长/CDN/位置识别广告段）。
@@ -1076,6 +1083,30 @@ class Config:
             self._persist(cfg)
             self.load()
             return True, "ok"
+
+    def remove_sources(self, api_keys: list[str]) -> list[str]:
+        """按 api 精确删除源（不是禁用）。返回实际删掉的 api 列表。
+
+        用于导入订阅后的「失效自动清理」与「风险源清理」。
+        """
+        want = {str(a or "").strip().rstrip("/").lower()
+                for a in api_keys if str(a or "").strip()}
+        if not want:
+            return []
+        removed: list[str] = []
+        with _LOCK:
+            srcs = list(self._cfg.get("sources") or [])
+            kept = []
+            for s in srcs:
+                api = str(s.get("api") or "").strip().rstrip("/").lower()
+                if api in want:
+                    removed.append(str(s.get("api") or ""))
+                else:
+                    kept.append(s)
+            if removed:
+                self._cfg["sources"] = kept
+                self._persist(self._cfg)
+        return removed
 
     def restore_builtin(self) -> tuple[bool, str]:
         with _LOCK:

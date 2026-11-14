@@ -123,6 +123,8 @@ _PYTEST_CMD = [
     "--ignore=tests/test_memory_caches.py",
     # 网盘二维码烧 TS 模块（panqr.py）在公开构建被剥离，测试收集期会 import 失败。
     "--ignore=tests/test_panqr.py",
+    # 网盘分享转存/线路切换测试依赖已剥离的 pan/panuc/panali 模块。
+    "--ignore=tests/test_pan_share_and_lines.py",
     # 占位 TS 路由测试同样覆盖网盘二维码烧录分支（依赖已剥离的 panqr）。
     "--ignore=tests/test_gaps_play.py",
     # 海报裁切测试需要 Pillow（公开构建不带该依赖）。
@@ -132,6 +134,8 @@ _PYTEST_CMD = [
     "--ignore=tests/test_seven_fixes.py",
     "--ignore=tests/test_scan_and_fallback.py",
     "--ignore=tests/test_bilibili_removed.py",
+    # 含 PanSou 网盘搜索断言（公开构建剥掉 PAN 块，源/搜索都不存在）。
+    "--ignore=tests/test_three_features.py",
     "-k", "not dduo_probe_source",
 ]
 

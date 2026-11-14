@@ -110,7 +110,9 @@ class PansouContractTests(_PansouBase):
         # 搜索钩子已接通用户提供的自托管实例（行为见
         # tests/test_pansou_search.py，本文件 _pansou_run 测试默认
         # 把搜索打桩为空以保持离线）。
-        self.assertEqual(pansou._PANSOU_SEARCH_BASE,
+        # 2026-11-13：地址改为可配置（pansou_url），默认仍是该实例 ——
+        # 该实例已不可达，用户可在管理台「网盘登录」换成自己的。
+        self.assertEqual(pansou._pansou_base_url(),
                          "https://bus.wulii.eu.cc")
 
 

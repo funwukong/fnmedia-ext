@@ -108,6 +108,18 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 .live-dev details{margin-top:6px}
 .diag{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px}
 
+/* ---------- 资源站列表：不分页，自适应列宽 + 可滚动 ---------- */
+.src-wrap{max-height:min(62vh,620px);overflow:auto;border:1px solid var(--line);
+  border-radius:10px}
+.src-wrap.expanded{max-height:none;overflow:visible}
+.src-wrap table{width:100%;table-layout:fixed}
+.src-wrap td,.src-wrap th{font-size:13px;padding:7px 9px;overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap}
+.src-wrap td.src-name{white-space:normal;line-height:1.45}
+.src-wrap td.src-name .meta{overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;max-width:100%}
+.src-wrap.compact td,.src-wrap.compact th{font-size:12px;padding:5px 7px}
+
 /* ---------- 已缓存条目：容器内滚动 + 自适应缩放 ---------- */
 .cache-wrap{max-height:340px;overflow:auto;border:1px solid var(--line);
   border-radius:10px;background:#fff}
@@ -428,13 +440,12 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <option value="off">仅已停用</option>
           </select>
           <span class="muted sm" id="srcPageInfo"></span>
-          <button class="small" onclick="srcPage(-1)">上一页</button>
-          <button class="small" onclick="srcPage(1)">下一页</button>
+          <button class="small" id="srcExpandBtn" onclick="toggleSrcExpand()">展开全部</button>
         </div>
-        <div style="overflow-x:auto">
+        <div class="src-wrap" id="srcWrap">
         <table>
           <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
-            <th style="width:150px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
+            <th style="width:130px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
           <tbody id="srcRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
         </table>
         </div>
@@ -606,6 +617,27 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="btn danger small" onclick="resetAll()">一键重置所有设置</button>
         </div>
         <div class="hint" id="resetMsg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">PanSou 网盘搜索</div>
+        <p class="card-sub">网盘搜索线路的来源。填自己的自托管 PanSou 实例地址（上游 <code>fish2018/pansou</code>）。</p>
+        <label class="field"><span>实例地址</span>
+          <input type="text" id="pansouUrl" placeholder="http://你的NAS:8888"/></label>
+        <label class="field"><span>网盘类型（逗号分隔）</span>
+          <input type="text" id="pansouClouds" placeholder="quark,uc,aliyun"/></label>
+        <div class="row">
+          <label class="field" style="max-width:140px"><span>单次超时（秒）</span>
+            <input type="number" id="pansouTimeout" min="3" max="120" style="width:100%"/></label>
+          <label class="field" style="max-width:140px"><span>结果条数上限</span>
+            <input type="number" id="pansouLimit" min="1" max="80" style="width:100%"/></label>
+        </div>
+        <label class="switch-row"><input type="checkbox" id="pansouEnabled" checked/>
+          <span>启用网盘搜索线路<span class="sub">搜索结果作为真实的一集出现在线路里，播放时自动转存</span></span></label>
+        <div class="btn-row">
+          <button class="btn primary small" onclick="savePansouCfg()">保存</button>
+          <span class="hint" id="pansouCfgMsg"></span>
+        </div>
       </div>
 
       <div class="card">
@@ -874,7 +906,7 @@ async function switchPage(page){
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
   // >>> PRIVATE:SCANLOGIN
-  if(page==="scanlogin"){try{await refreshPanScan();}catch(e){}}
+  if(page==="scanlogin"){try{await refreshPanScan();}catch(e){}try{await loadPansouCfg();}catch(e){}}
   // <<< PRIVATE:SCANLOGIN
 }
 $$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
@@ -1458,7 +1490,7 @@ async function savePreferQ(){
 /* 资源站分页/筛选（P1-16）：纯前端分页/筛选，不改后端接口；CFG.sources
    已在页内。筛选或切换启用状态时回到第 1 页；列表缩短时 renderSources
    会把超出的页码夹回最后一页。 */
-let SRC_FILTER="",SRC_ENABLED="all",SRC_PAGE=1;const SRC_PAGE_SIZE=20;
+let SRC_FILTER="",SRC_ENABLED="all",SRC_EXPANDED=false;
 function srcFiltered(){const q=SRC_FILTER.trim().toLowerCase();
   return (CFG.sources||[]).filter(s=>{
     if(SRC_ENABLED==="on"&&!s.enabled)return false;
@@ -1466,18 +1498,27 @@ function srcFiltered(){const q=SRC_FILTER.trim().toLowerCase();
     if(q&&!(String(s.name||"").toLowerCase().includes(q)
       ||String(s.api||"").toLowerCase().includes(q)))return false;
     return true;});}
-function onSrcFilter(v){SRC_FILTER=v;SRC_PAGE=1;renderSources();}
-function onSrcEnabledFilter(v){SRC_ENABLED=v;SRC_PAGE=1;renderSources();}
-function srcPage(d){SRC_PAGE=Math.max(1,SRC_PAGE+d);renderSources();}
+function onSrcFilter(v){SRC_FILTER=v;renderSources();}
+function onSrcEnabledFilter(v){SRC_ENABLED=v;renderSources();}
+function toggleSrcExpand(){
+  SRC_EXPANDED=!SRC_EXPANDED;
+  const w=$("srcWrap");
+  if(w)w.classList.toggle("expanded",SRC_EXPANDED);
+  const b=$("srcExpandBtn");
+  if(b)b.textContent=SRC_EXPANDED?"收起":"展开全部";
+  renderSources();
+}
 function renderSources(){
+  // 2026-11-13：不分页 —— 一次渲染筛选后的全部源；容器内滚动 + 列宽自适应；
+  // 点「展开全部」则整表展开不再内部滚动。
   const srcsAll=srcFiltered();
-  const pages=Math.max(1,Math.ceil(srcsAll.length/SRC_PAGE_SIZE));
-  if(SRC_PAGE>pages)SRC_PAGE=pages;
-  const srcs=srcsAll.slice((SRC_PAGE-1)*SRC_PAGE_SIZE,SRC_PAGE*SRC_PAGE_SIZE);
+  const srcs=srcsAll;
   const all=CFG.sources||[];
   $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
   const pi=$("srcPageInfo");
-  if(pi)pi.textContent=`第 ${SRC_PAGE}/${pages} 页 · 本页 ${srcs.length} 条 · 筛选后 ${srcsAll.length} 条`;
+  if(pi)pi.textContent=`共 ${srcsAll.length} 条（已全部显示）`;
+  const wrap=$("srcWrap");
+  if(wrap)wrap.classList.toggle("compact",srcsAll.length>40);
   $("srcRows").innerHTML=srcs.length?srcs.map(src=>{
     let extraCell="",extraTag="";
     // >>> PRIVATE:ADULT
@@ -1501,7 +1542,7 @@ function renderSources(){
            ${(src.enabled&&src.standalone&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:var(--warn)"/>非过滤</label>
         ${extraCell}
       </td>
-      <td><div style="font-weight:500">${esc(src.name)}${src.kind==="t4"?'<span class="tag">T4</span>':''}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
+      <td class="src-name" title="${esc(src.api)}"><div style="font-weight:500">${esc(src.name)}${src.kind==="t4"?'<span class="tag">T4</span>':''}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
         <div class="meta">${esc(src.api)}</div></td>
       <td class="st wait" data-st>未测</td>
       <td><button class="small" data-test>测试</button></td>
@@ -2350,6 +2391,31 @@ function xyCrumbUp(){browseXiaoya();}
 // <<< PRIVATE:CATVOD
 
 // >>> PRIVATE:SCANLOGIN
+async function loadPansouCfg(){
+  try{
+    const cfg=(await jget('/v/api/ext/status')).data.config||{};
+    const set=(id,v)=>{const el=$(id);if(el)el.value=v;};
+    set('pansouUrl',cfg.pansou_url||'');
+    set('pansouClouds',cfg.pansou_cloud_types||'quark,uc,aliyun');
+    set('pansouTimeout',cfg.pansou_timeout||30);
+    set('pansouLimit',cfg.pansou_limit||30);
+    const en=$('pansouEnabled');if(en)en.checked=cfg.pansou_enabled!==false;
+  }catch(e){}
+}
+async function savePansouCfg(){
+  const body={
+    pansou_url:($('pansouUrl').value||'').trim().replace(/\/+$/,''),
+    pansou_cloud_types:($('pansouClouds').value||'quark,uc,aliyun').trim(),
+    pansou_timeout:parseInt($('pansouTimeout').value||'30',10),
+    pansou_limit:parseInt($('pansouLimit').value||'30',10),
+    pansou_enabled:!!$('pansouEnabled').checked};
+  try{
+    const j=await jpost('/v/api/ext/config',body);
+    if(j.code!==0)throw new Error(j.msg||'保存失败');
+    $('pansouCfgMsg').textContent='已保存';
+    toast('网盘搜索设置已保存');
+  }catch(e){$('pansouCfgMsg').textContent=e.message;toast('保存失败：'+e.message,'fail');}
+}
 async function savePanCache(){
   const days=parseInt($("panCacheDays").value||"1",10);
   const enabled=$("panCacheAuto").checked;

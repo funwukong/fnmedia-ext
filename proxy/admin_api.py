@@ -793,6 +793,8 @@ async def ext_set_config(request: Request):
         "prewarm_mode",
         "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
         "pan_cache_ttl_days",
+        "pansou_enabled", "pansou_url", "pansou_cloud_types",
+        "pansou_src", "pansou_timeout", "pansou_limit",
         "update_proxy",
     }
     # >>> PRIVATE:CATVOD
@@ -836,6 +838,8 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "pansou_enabled" in patch:
+        patch["pansou_enabled"] = bool(patch["pansou_enabled"])
     if "filter_junk" in patch:
         patch["filter_junk"] = bool(patch["filter_junk"])
     if "online_first" in patch:
@@ -1564,6 +1568,28 @@ async def ext_import_subscription(request: Request):
                    for x in skipped):
             skipped.append({"name": nm, "reason": "探测不可达"})
 
+    # ---------- 导入后复核：失效源自动删除 + 风险源删除 ----------
+    # 1) 风险源（网盘类）：即便能跑也默认拖慢聚合、缺登录态即报错 —— 直接删。
+    # 2) 本轮新增但探活已失效的源：从配置里删掉（不是禁用）。
+    deleted: list[dict] = []
+    try:
+        from tvbox import _PAN_API as _RISK_RE  # 风险源特征（网盘类）
+        import re as _re
+        risky = [s for s in config.all_sources()
+                 if _RISK_RE.search(str(s.get("api") or ""))]
+        if risky:
+            gone = config.remove_sources([s.get("api") or "" for s in risky])
+            for s in risky:
+                deleted.append({"name": s.get("name") or "", "api": s.get("api") or "",
+                                "reason": "风险源（网盘类），已自动删除"})
+            try:
+                config.load()
+            except Exception:
+                _log.debug("ext_import_subscription failed", exc_info=True)
+    except Exception:
+        _log.debug("ext_import_subscription failed", exc_info=True)
+        pass
+
     # ---------- 普通 csp_ 爬虫 与 远程 drpyS（仅完整私有构建） ----------
     csp_report = None
     drpy_report = None
@@ -1646,6 +1672,9 @@ async def ext_import_subscription(request: Request):
         "skipped": len(skipped),
         "skipped_detail": skipped[:60],
         "ad_rules_added": ad_rules_added,
+        # 导入后自动清理掉的源（失效 / 风险源）
+        "deleted": len(deleted),
+        "deleted_detail": deleted[:60],
     }}
 
 

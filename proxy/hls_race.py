@@ -1027,12 +1027,24 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
             picked["redirect"] = False
             picked["m3u8"] = bool(re.search(r"\.m3u8(\?|$)", real, re.I))
     if picked and picked.get("resolve"):
-        real = await providers.resolve_share(
-            ext_client(request), picked["url"],
-            (picked.get("headers") or {}).get("Referer", ""))
-        if real:
-            picked["url"] = real
-            picked["resolve"] = False
+        # 网盘分享链接：先走转存分支（上游同款），失败再退回网页嗅探。
+        # 顺序不能反 —— providers.resolve_share 只认网页播放页，对网盘分享
+        # 链接必然抓不到 m3u8。
+        _pan_done = False
+        # >>> PRIVATE:PAN
+        try:
+            from app import _resolve_pan_share  # noqa: E402 延迟导入：避免与 app.py 循环导入
+            _pan_done = await _resolve_pan_share(picked)
+        except Exception:
+            _log.debug("_resolve_pan_share failed", exc_info=True)
+        # <<< PRIVATE:PAN
+        if not _pan_done:
+            real = await providers.resolve_share(
+                ext_client(request), picked["url"],
+                (picked.get("headers") or {}).get("Referer", ""))
+            if real:
+                picked["url"] = real
+                picked["resolve"] = False
     return picked
 
 

@@ -54,10 +54,57 @@ _log = get_logger(__name__)
 PANSOU_LINE = "builtin-pansou::PanSou网盘高清"
 PANSOU_LABEL = "🎞️网盘高清（PanSou）"
 
-# 自托管 PanSou 搜索实例（用户 2026-11-12 提供并令接线；默认值硬编码，
-# 本批不新增配置项）。auth_enabled=false，无需 Authorization。
-_PANSOU_SEARCH_BASE = "https://bus.wulii.eu.cc"
-_PANSOU_SEARCH_TIMEOUT = 60.0   # 单次搜索超时（秒；实例冷启动曾 30 秒超时）
+# 自托管 PanSou 搜索实例：地址/云类型/超时/条数全部走配置
+# （上游 pansou.py 同款配置键）。默认地址仅作兜底，实例不可达时用户可在
+# 管理页「网盘登录」里换成自己的实例。
+_DEFAULT_PANSOU_URL = "https://bus.wulii.eu.cc"
+
+
+def _pansou_cfg(key: str, default):
+    try:
+        import config as _cfg
+        v = _cfg.config.get().get(key, default)
+    except Exception:
+        v = default
+    return v
+
+
+def _pansou_base_url() -> str:
+    u = str(_pansou_cfg("pansou_url", _DEFAULT_PANSOU_URL) or "").strip()
+    return u.rstrip("/")
+
+
+def _pansou_timeout() -> float:
+    try:
+        return max(3.0, float(_pansou_cfg("pansou_timeout", 30.0)))
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _pansou_limit() -> int:
+    try:
+        return max(1, min(80, int(_pansou_cfg("pansou_limit", 30))))
+    except (TypeError, ValueError):
+        return 30
+
+
+def _pansou_cloud_types() -> list[str]:
+    raw = str(_pansou_cfg("pansou_cloud_types", "quark,uc,aliyun") or "").strip()
+    if not raw:
+        return ["quark", "uc", "aliyun"]
+    out: list[str] = []
+    for t in raw.replace("，", ",").split(","):
+        t = t.strip().lower()
+        if t in ("quark", "uc", "aliyun") and t not in out:
+            out.append(t)
+    return out or ["quark", "uc", "aliyun"]
+
+
+def _pansou_src() -> str:
+    s = str(_pansou_cfg("pansou_src", "all") or "all").strip().lower()
+    return s if s in ("all", "tg", "plugin") else "all"
+
+
 _PANSOU_SEARCH_PER_TYPE_MAX = 6  # 每盘最多取几条
 _PANSOU_SEARCH_TOTAL_MAX = 12   # 搜索结果总数上限
 # merged_by_type 的遍历顺序：键是服务端类型名，aliyun 不是 ali。
@@ -276,7 +323,7 @@ def _pansou_dedupe_key(url: str) -> str:
 def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
     """PanSou 自托管搜索适配器（2026-11-12 接通）。
 
-    向 ``_PANSOU_SEARCH_BASE`` POST /api/search，取 quark/uc/aliyun
+    向配置的自托管实例 POST /api/search，取配置网盘类型
     三盘的分享链接字符串列表（``_pansou_run`` 按序逐条转存）。
     失败（超时/HTTP 错误/非 JSON/业务码非 0）一律返回 []，绝不抛错；
     不做标题精确过滤（note 可能是合集标题），转存按序试、首条可播
@@ -286,13 +333,13 @@ def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
     if not title:
         return []
     try:
-        with httpx.Client(timeout=_PANSOU_SEARCH_TIMEOUT,
+        with httpx.Client(timeout=_pansou_timeout(),
                           transport=_transport) as client:
             resp = client.post(
-                _PANSOU_SEARCH_BASE + "/api/search",
+                _pansou_base_url() + "/api/search",
                 json={"kw": title,
-                      "cloud_types": ["quark", "uc", "aliyun"],
-                      "res": "merge", "src": "all"})
+                      "cloud_types": _pansou_cloud_types(),
+                      "res": "merge", "src": _pansou_src()})
     except Exception:
         _log.debug("_pansou_search request failed: title=%s", title,
                    exc_info=True)
@@ -319,7 +366,7 @@ def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
         return []
     out: list[str] = []
     seen: set[str] = set()
-    for server_key in _PANSOU_SEARCH_ORDER:
+    for server_key in _pansou_cloud_types():
         items = merged.get(server_key) or []
         if not isinstance(items, list):
             continue
@@ -349,6 +396,76 @@ def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
         if len(out) >= _PANSOU_SEARCH_TOTAL_MAX:
             break
     _log.debug("_pansou_search ok: title=%s total=%s", title, len(out))
+    return out
+
+
+def _pansou_search_rows(title: str, _transport=None) -> list[tuple[str, str, str]]:
+    """同 _pansou_search，但保留 (云类型, url, 备注)。
+
+    供 pansou_search.search() 把网盘结果映射成真实的一集（上游行为）：
+    上游用 merged_by_type 的键作云类型、用 note 作标题；这里保持一致。
+    """
+    title = (title or "").strip()
+    if not title:
+        return []
+    try:
+        with httpx.Client(timeout=_pansou_timeout(),
+                          transport=_transport) as client:
+            resp = client.post(
+                _pansou_base_url() + "/api/search",
+                json={"kw": title,
+                      "cloud_types": _pansou_cloud_types(),
+                      "res": "merge", "src": _pansou_src()})
+    except Exception:
+        _log.debug("_pansou_search_rows request failed", exc_info=True)
+        return []
+    if resp.status_code >= 400:
+        return []
+    try:
+        payload = resp.json()
+    except Exception:
+        return []
+    if not isinstance(payload, dict) or payload.get("code", 0) != 0:
+        return []
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    merged = data.get("merged_by_type")
+    if not isinstance(merged, dict):
+        return []
+    out: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for server_key in _pansou_cloud_types():
+        items = merged.get(server_key) or []
+        if not isinstance(items, list):
+            continue
+        taken = 0
+        for item in items:
+            if len(out) >= _PANSOU_SEARCH_TOTAL_MAX:
+                break
+            if taken >= _PANSOU_SEARCH_PER_TYPE_MAX:
+                break
+            if not isinstance(item, dict):
+                continue
+            url = (item.get("url") or "").strip()
+            if not url or url.lower().startswith("magnet:"):
+                continue
+            pv = _pan_match(url)
+            fork_key = _PANSOU_SERVER_KEY.get(server_key)
+            if pv is None or pv.get("key") not in _PAN_MODULES \
+                    or pv.get("key") != fork_key:
+                continue
+            key = _pansou_dedupe_key(url)
+            if key in seen:
+                continue
+            seen.add(key)
+            note = (item.get("note") or "").strip()
+            out.append((server_key,
+                        _pansou_with_password(url, (item.get("password") or "").strip()),
+                        note))
+            taken += 1
+        if len(out) >= _PANSOU_SEARCH_TOTAL_MAX:
+            break
     return out
 
 

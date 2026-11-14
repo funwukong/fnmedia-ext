@@ -41,6 +41,8 @@ WHITELIST = {
     "skip_outro_enabled", "skip_outro_seconds",
     "pan_cache_cleanup_enabled", "pan_cache_ttl_hours",
     "pan_cache_ttl_days", "update_proxy",
+    "pansou_enabled", "pansou_url", "pansou_cloud_types",
+    "pansou_src", "pansou_timeout", "pansou_limit",
     "pan_lib_enabled",
 }
 
@@ -138,7 +140,7 @@ def test_defaults_fully_classified():
     keys = set(config_mod.DEFAULTS)
     # 79 → 77：2026-11-12 upstream-merge 去 guard，删 guard_zone_enabled /
     # guard_native_enabled 两项默认配置。
-    assert len(keys) == 78
+    assert len(keys) == 84
     assert WHITELIST & DEDICATED == set()
     assert WHITELIST & NOT_WRITABLE == set()
     assert DEDICATED & NOT_WRITABLE == set()
