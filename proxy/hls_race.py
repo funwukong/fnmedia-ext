@@ -1937,7 +1937,7 @@ def _is_slow_line(p: dict) -> bool:
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
 async def hls_preset(mg: str, request: Request):
     from app import _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _fastest_on, _online_target_viewable, _pan_match, _pick_episode, _viewer_ctx, app, chart_guid_by_media, remembered_fast_line, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    from app import PANSOU_LABEL, PANSOU_LINE, _pansou_available, _pansou_manual_target, _pansou_mark_user_pick  # noqa: E402,F401 PanSou 手动线
+    from app import PANSOU_LABEL, PANSOU_LINE, _pansou_available, _pansou_manual_target, _pansou_mark_user_pick, _pansou_reset  # noqa: E402,F401 PanSou 手动线
     idx0 = int(request.query_params.get("index", 0) or 0)
     # 用户手切网盘线的意图必须【最先】登记：影片此刻可能尚未绑定，下面
     # _pick_episode 为空会直接回占位 master 提前返回；若标记放在那之后，首次进
@@ -1945,6 +1945,11 @@ async def hls_preset(mg: str, request: Request):
     explicit_line = request.query_params.get("line")
     if explicit_line == PANSOU_LINE:
         _pansou_mark_user_pick(mg)
+    elif explicit_line:
+        # 播放页手切到任何“非网盘线”都要清掉网盘手切意图，否则后续不带
+        # line 的 main/preset 请求会被残留意图反复拉回网盘线（表现为从网盘线
+        # 切其他线路后放不出来、又被弹回网盘线）。
+        _pansou_reset(mg)
     # direct/mp4 取流失败回跳入口：直接给占位 master，不再枚举可能同样失效的线路
     if request.query_params.get("ph") == "1":
         return _placeholder_master_response(idx0)
@@ -2195,7 +2200,9 @@ def _err_response(body: str, status: int, code: str,
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
     from app import _autofail_on, _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _ensure_playable, _get_playlist_cached, _main_slow_budget, _online_target_viewable, _pick_episode, _verify_rewritten_first_seg, _viewer_ctx, app, chart_guid_by_media  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    from app import _PANSOU_MAN_SNAP, _pansou_manual_arm, _pansou_manual_state, store  # noqa: E402,F401 PanSou 手动线
+    from app import (_PANSOU_MAN_SNAP, _pansou_manual_arm,  # noqa
+                     _pansou_manual_state, _pansou_reset, store)
+    from pansou import _pansou_snapshot  # noqa: E402 PanSou 手动线
     _req_t0 = time.time()  # hls_main 入口处、任何分支之前（上游 v1.0.0）
 
     def _budget_left(floor: float) -> float:
@@ -2380,7 +2387,8 @@ async def hls_main(mg: str, request: Request):
     if picked.get("_pansou_manual"):
         _pidx = int(picked.get("index", 0) or 0)
         if _pansou_manual_state(mg) == "ready":
-            _snap = _PANSOU_MAN_SNAP.get(mg)
+            # 同 _pick_episode：过期快照直接丢弃，退回占位等重转存。
+            _snap = _pansou_snapshot(mg, mark_stale=True)
             if _snap:
                 _np = dict(_snap, index=_pidx)
                 _np.setdefault("online_guid", picked.get("online_guid") or "")

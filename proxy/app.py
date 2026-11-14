@@ -356,6 +356,7 @@ from panmatch import _PAN_LINKSTART_RE, _PAN_PROVIDERS, _pan_match
 # _pansou_available() 为 False，播放链路按无网盘线走）——
 from pansou import (
     _PANSOU_MAN_SNAP,
+    _pansou_snapshot,
     PANSOU_LABEL,
     PANSOU_LINE,
     _is_pansou_line_name,
@@ -367,6 +368,7 @@ from pansou import (
     _pansou_manual_state,
     _pansou_manual_target,
     _pansou_mark_user_pick,
+    _pansou_reset,
 )
 
 
@@ -6442,7 +6444,10 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
             except ValueError:
                 _idx = 0
             if _pansou_manual_state(mg) == "ready":
-                _snap = _PANSOU_MAN_SNAP.get(mg)
+                # 快照必须校验新鲜度：网盘直链 2~4h 失效，过期快照会让
+                # 播放拿到死链（「同一集有时能播有时不能」）。过期则退
+                # armed 重转存，下面走 manual_target 分支。
+                _snap = _pansou_snapshot(mg, mark_stale=True)
                 if _snap:
                     _base = store.resolve_media_guid(mg)
                     _og = (_base or {}).get("online_guid") or \
@@ -6473,6 +6478,12 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
                 idx = int(request.query_params.get("index", seeded.get("index", 0)))
             except ValueError:
                 idx = seeded.get("index", 0)
+            # 手切离开网盘线（或从别的线切到网盘线）时同步清/设手切意图：
+            # 意图残留会让后续不带 line 的 master 请求又被拉回网盘线。
+            if qline == PANSOU_LINE:
+                _pansou_mark_user_pick(mg)
+            else:
+                _pansou_reset(mg)
             r = store.resolve_episode(seeded["online_guid"], qline, idx)
             if r:
                 return dict(r, online_guid=seeded["online_guid"],

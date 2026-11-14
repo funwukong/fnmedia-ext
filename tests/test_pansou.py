@@ -77,10 +77,10 @@ class _PansouBase(unittest.TestCase):
         self.addCleanup(self._patcher.stop)
         # 搜索适配器已接通线上实例：_pansou_run 测试默认不联网，
         # 搜索行为本身由 tests/test_pansou_search.py 用 MockTransport 覆盖。
-        self._search_patcher = patch.object(
+        self._search_patch = patch.object(
             pansou, "_pansou_search", return_value=[])
-        self._search_patcher.start()
-        self.addCleanup(self._search_patcher.stop)
+        self._search_mock = self._search_patch.start()
+        self.addCleanup(self._search_patch.stop)
         self.addCleanup(pansou._pansou_reset, self.mg)
         self.addCleanup(pansou._PANSOU_QR.clear)
 
@@ -166,12 +166,20 @@ class PansouRunTests(_PansouBase):
         self.assertEqual(snap["provider"], "quark")
         self.assertEqual(self.fakes["quark"].resolve_calls, [_QUARK_URL])
 
-    def test_run_dead_when_no_candidates(self):
+    def test_run_retries_after_no_candidates(self):
+        """搜不到不再进 dead 终态（dead 会让这一集永远不再尝试），
+        而是回 armed + 冷却，冷却期内 kick 不重复扇出搜索。"""
         self._all_logged_in()
         pansou._pansou_manual_arm(self.mg, "假影片", 0)
         asyncio.run(pansou._pansou_run(self.mg))
-        self.assertEqual(pansou._pansou_manual_state(self.mg), "dead")
+        self.assertEqual(pansou._pansou_manual_state(self.mg), "armed")
         self.assertIn("PanSou", pansou._pansou_status(self.mg)["error"])
+        rec = pansou._PANSOU_STATE[self.mg]
+        self.assertGreater(rec.get("next_try") or 0, 0)
+        # 冷却期内再 kick 不得重复搜索
+        calls_before = self._search_mock.call_count
+        pansou._pansou_manual_kick(self.mg)
+        self.assertEqual(self._search_mock.call_count, calls_before)
 
     def test_run_search_hook_path(self):
         self._all_logged_in()
@@ -197,7 +205,9 @@ class PansouRunTests(_PansouBase):
         pansou._pansou_manual_arm(self.mg, "假影片", 0)
         pansou._pansou_set_manual_share(self.mg, _QUARK_URL, 0)
         asyncio.run(pansou._pansou_run(self.mg))
-        self.assertEqual(pansou._pansou_manual_state(self.mg), "dead")
+        # 知名分享转存失败 → 退避重试而非 dead（上游偶发 502 不该废掉这一集）
+        self.assertEqual(pansou._pansou_manual_state(self.mg), "armed")
+        self.assertIn("失败", pansou._pansou_status(self.mg)["error"])
 
     def test_arm_keeps_ready(self):
         self._all_logged_in()

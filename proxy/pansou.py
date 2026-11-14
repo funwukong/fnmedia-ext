@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import re
 import time
 import urllib.parse
 
@@ -142,6 +143,19 @@ _PANSOU_QR: dict[str, dict] = {}
 # mg -> 在途 _pansou_run 任务（单飞）。
 _PANSOU_TASKS: dict[str, "asyncio.Task"] = {}
 
+# ready 快照有效期：网盘直链（夸克/UC/阿里）通常 2~4 小时就换链，快照
+# 留 90 分钟，过期即退 armed 重转存——否则「同一集有时能播有时不能」。
+_PANSOU_SNAP_TTL = 90 * 60.0
+# 三张表的上限（原先全无界，长期挂机会缓慢吃内存）。
+_PANSOU_MAX = 600
+_PANSOU_SNAP_MAX = 400
+# 片名里的追剧后缀：「 第05集 / 第5话 / 更新至12集 / EP05 / (12)」
+_PANSOU_EP_SUFFIX_RE = re.compile(
+    r"[\s\-—_]*[（(【\[]?\s*(?:第\s*\d+\s*[集话期回]|EP\s*\d+|更新至\s*\d+\s*[集话]?)"
+    r"\s*[)】\]]?\s*$", re.I)
+_PANSOU_EP_CN_RE = re.compile(r"第\s*(\d+)\s*[集话期回]")
+_PANSOU_EP_RE = re.compile(r"(?:EP|E)(?![A-Za-z])\s*(\d+)|[\[\(【]\s*(\d{1,4})\s*[\]\)】]", re.I)
+
 
 def _pan_module(key: str):
     """取网盘驱动模块；公开构建已剥离时返回 None（不抛错）。"""
@@ -208,11 +222,52 @@ def _pansou_manual_target(index: int = 0) -> dict:
             "headers": {}}
 
 
+def _pansou_cooldown(rec: dict) -> None:
+    """失败后回 armed 并记冷却时间。
+
+    指数退避：1min → 2× → 封顶 10min。冷却期内 kick 不重复搜（避免每次
+    占位分片轮询都扇出一次搜索把上游打爆），冷却过后自动重试。
+    """
+    now = time.time()
+    retries = int(rec.get("retries") or 0) + 1
+    rec["retries"] = retries
+    rec["state"] = "armed"
+    rec["next_try"] = now + min(600.0, 60.0 * (2 ** min(retries - 1, 4)))
+
+
 def _pansou_manual_state(mg: str) -> str:
     rec = _PANSOU_STATE.get(mg or "")
     if not rec:
         return ""
     return rec.get("state") or ""
+
+
+def _bounded_state_put(mg: str, rec: dict) -> None:
+    """写入状态表并裁剪到上限（原先无界，长期挂机缓慢吃内存）。"""
+    _PANSOU_STATE[mg] = rec
+    if len(_PANSOU_STATE) <= _PANSOU_MAX:
+        return
+    # 先丢 dead，再按 updated 丢最旧（不动 pending/need_login）
+    for k in [k for k, v in _PANSOU_STATE.items()
+              if v.get("state") == "dead"][: max(1, _PANSOU_MAX // 4)]:
+        if k != mg:
+            _PANSOU_STATE.pop(k, None)
+    if len(_PANSOU_STATE) <= _PANSOU_MAX:
+        return
+    olds = sorted((v.get("updated") or 0, k) for k, v in _PANSOU_STATE.items()
+                  if k != mg and v.get("state") not in ("pending", "need_login"))
+    for _ts, k in olds[: len(_PANSOU_STATE) - _PANSOU_MAX]:
+        _PANSOU_STATE.pop(k, None)
+
+
+def _bounded_snap_put(mg: str, snap: dict) -> None:
+    _PANSOU_MAN_SNAP[mg] = snap
+    if len(_PANSOU_MAN_SNAP) <= _PANSOU_SNAP_MAX:
+        return
+    olds = sorted((v.get("ts") or 0, k) for k, v in _PANSOU_MAN_SNAP.items()
+                  if k != mg)
+    for _ts, k in olds[: len(_PANSOU_MAN_SNAP) - _PANSOU_SNAP_MAX]:
+        _PANSOU_MAN_SNAP.pop(k, None)
 
 
 def _pansou_manual_arm(mg: str, title: str, index: int = 0) -> None:
@@ -232,9 +287,11 @@ def _pansou_manual_arm(mg: str, title: str, index: int = 0) -> None:
         idx = 0
     title = (title or "").strip()
     rec = _PANSOU_STATE.get(mg)
+    # ready 也要校验快照新鲜度：网盘直链 2~4h 就失效，旧快照留着会让
+    # 播放拿到死链——这是「同一集有时能播有时不能」的主因。
     if rec is not None and rec.get("state") == "ready" \
             and rec.get("title") == title and int(rec.get("index") or 0) == idx \
-            and mg in _PANSOU_MAN_SNAP:
+            and _pansou_snap_fresh(_PANSOU_MAN_SNAP.get(mg) or {}):
         return
     if rec is not None and rec.get("state") == "pending":
         rec["title"] = title
@@ -245,7 +302,7 @@ def _pansou_manual_arm(mg: str, title: str, index: int = 0) -> None:
         rec = {"title": title, "index": idx, "state": "armed",
                "provider": "", "share_url": "", "error": "",
                "manual_shares": [], "updated": time.time()}
-        _PANSOU_STATE[mg] = rec
+        _bounded_state_put(mg, rec)
     else:
         rec.update({"title": title, "index": idx, "updated": time.time()})
         _PANSOU_MAN_SNAP.pop(mg, None)
@@ -265,8 +322,15 @@ def _pansou_manual_kick(mg: str) -> None:
     rec = _PANSOU_STATE.get(mg or "")
     if not rec:
         return
-    if rec.get("state") == "ready" and mg in _PANSOU_MAN_SNAP:
+    if rec.get("state") == "ready" and _pansou_snap_fresh(
+            _PANSOU_MAN_SNAP.get(mg) or {}):
         return
+    # 失败冷却中：不重复扇出搜索，保持 armed 让占位继续轮询
+    if rec.get("state") == "armed" and (rec.get("next_try") or 0) > time.time():
+        return
+    if rec.get("state") == "ready":
+        # 快照过期：退 armed 重新转存
+        _pansou_drop_snap(mg)
     if rec.get("state") not in ("need_login", "armed", "pending", "dead"):
         return
     try:
@@ -524,6 +588,120 @@ def _pansou_status(mg: str) -> dict:
             "manual_shares": list(rec.get("manual_shares") or [])}
 
 
+def _pansou_clean_title(title: str) -> str:
+    """去掉追剧后缀，只留片名给 PanSou 搜索。
+
+    原标题常常是「凡人修仙传 第05集」「斗罗大陆更新至123集」，直接拿去搜
+    命中率极低（分享的 note 是整剧名），会造成「有时能播有时不能」——
+    同一条目不同集改名后搜不到。
+    """
+    t = (title or "").strip()
+    if not t:
+        return ""
+    t = _PANSOU_EP_SUFFIX_RE.sub("", t)
+    t = re.sub(r"\s*[（(\[【]?\s*更新至\s*\d+\s*[集话期]?\s*[）)\]】]?", "", t)
+    t = re.sub(r"\s*[-—－]\s*\d+\s*$", "", t)
+    return t.strip() or (title or "").strip()
+
+
+def _pansou_parse_ep(title: str) -> int:
+    """从片名里解析集数（1-based）。解析不到返回 0。"""
+    t = (title or "").strip()
+    if not t:
+        return 0
+    for pat in (_PANSOU_EP_CN_RE, _PANSOU_EP_RE):
+        m = pat.search(t)
+        if not m:
+            continue
+        for g in m.groups():
+            if not g:
+                continue
+            try:
+                n = int(g)
+            except (TypeError, ValueError):
+                continue
+            if 0 < n <= 2000:      # [1080] 这类分辨率标记不算集数
+                return n
+    return 0
+
+
+def _pansou_pick_item(items: list, index: int, want_ep: int):
+    """在分享的文件里挑第 index 集。
+
+    优先按文件名里的集数匹配（``want_ep``，1-based），匹配不上才回退
+    按排序取 index。原先直接用 ``items[index]``，而 ``resolve_share`` 的
+    顺序是网盘返回的文件序，集数一多就错位——这是「选第 5 集放出来是第 2
+    集」和「有的集直接没声音没画面」的主因。
+    """
+    if not items:
+        return None
+    if want_ep > 0:
+        for it in items:
+            name = (it.get("name") or "")
+            if _pansou_parse_ep(name) == want_ep:
+                return it
+    try:
+        idx = int(index or 0)
+    except (TypeError, ValueError):
+        idx = 0
+    idx = min(max(idx, 0), len(items) - 1)
+    return items[idx]
+
+
+def _pansou_snap_fresh(snap: dict) -> bool:
+    """ready 快照是否还能用。
+
+    网盘直链（夸克/UC/阿里）有效期只有 2~4 小时，原先快照永不过期，
+    隔一段时间点同一集必失败——这是「同一集有时能播有时不能」的主因。
+    """
+    try:
+        age = time.time() - float(snap.get("ts") or 0)
+    except (TypeError, ValueError):
+        return False
+    return age < _PANSOU_SNAP_TTL
+
+
+def _pansou_drop_snap(mg: str) -> None:
+    """丢弃过期/失效快照并把状态退回 armed，等下一次 kick 重转存。"""
+    if mg:
+        _PANSOU_MAN_SNAP.pop(mg, None)
+    rec = _PANSOU_STATE.get(mg or "")
+    if rec and rec.get("state") == "ready":
+        rec.update({"state": "armed", "updated": time.time(),
+                    "error": "网盘直链已过期，正在重新转存"})
+
+
+def _pansou_snapshot(mg: str, mark_stale: bool = False):
+    """取可用快照；过期则丢弃。``mark_stale`` 为真时同时退状态重转存。"""
+    snap = _PANSOU_MAN_SNAP.get(mg or "")
+    if not snap:
+        return None
+    if _pansou_snap_fresh(snap):
+        return snap
+    if mark_stale:
+        _pansou_drop_snap(mg)
+    return None
+
+
+def _pansou_snapshot_for(index: int, mark_stale: bool = False):
+    """按集序找任一派生目标的快照（同一部片的所有集共用 mg 命运，这里按
+    target 上的 index 精确取，取不到再退回任意快照）。"""
+    best = None
+    for mg, snap in list(_PANSOU_MAN_SNAP.items()):
+        if not _pansou_snap_fresh(snap):
+            if mark_stale:
+                _pansou_drop_snap(mg)
+            continue
+        try:
+            if int(snap.get("index") or 0) == int(index or 0):
+                return snap
+        except (TypeError, ValueError):
+            continue
+        if best is None:
+            best = snap
+    return best
+
+
 def _pansou_reset(mg: str) -> None:
     """清掉一部片的 PanSou 状态（测试/重试用）。"""
     if not mg:
@@ -631,6 +809,7 @@ async def _pansou_run(mg: str) -> None:
         except (TypeError, ValueError):
             index = 0
         candidates: list[str] = []
+        want_ep = _pansou_parse_ep(title)
         for url in list(rec.get("manual_shares") or []):
             if isinstance(url, str) and url and url not in candidates:
                 candidates.append(url)
@@ -638,17 +817,25 @@ async def _pansou_run(mg: str) -> None:
             try:
                 # 同步 httpx 搜索约 10 秒：放 to_thread，不堵事件循环
                 #（同函数内 resolve_share 也是 to_thread）。
+                # 搜索用去后缀的干净片名（「凡人修仙传 第05集」搜不到分享）
                 for url in await asyncio.to_thread(
-                        _pansou_search, title, index) or []:
+                        _pansou_search, _pansou_clean_title(title),
+                        index) or []:
                     if isinstance(url, str) and url and url not in candidates:
                         candidates.append(url)
             except Exception:
                 _log.debug("_pansou_run search failed: mg=%s", mg, exc_info=True)
         if not candidates:
-            rec["state"] = "dead"
+            # 关键：转存失败不能直接 dead。dead 会被 manual_state 视为
+            # 终态——之后这一集永远不再尝试，「有时能播有时不能」里
+            # 「不能」的那一半就是这么来的。退回 armed（带退避冷却），
+            # 下一次 kick 会重新搜索（PanSou 上游按时间滚动，隔一会儿
+            # 就可能有新分享）。
+            _pansou_cooldown(rec)
             rec["error"] = ("未找到网盘分享（PanSou 搜索无结果），"
-                            "可从管理页贴分享链接后重试"
+                            "稍后自动重试，也可从管理页贴分享链接"
                             if title else "缺少片名，无法搜索网盘")
+            rec["updated"] = time.time()
             return
         last_err = ""
         for url in candidates:
@@ -677,7 +864,7 @@ async def _pansou_run(mg: str) -> None:
             if not items:
                 last_err = "分享内没有可播放的视频文件"
                 continue
-            pick = items[min(max(index, 0), len(items) - 1)]
+            pick = _pansou_pick_item(items, index, want_ep)
             play_url = pick.get("url") or ""
             if not play_url:
                 last_err = "转存成功但未取到播放地址"
@@ -687,18 +874,20 @@ async def _pansou_run(mg: str) -> None:
                         title=title or (res or {}).get("title") or "",
                         provider=key, share_url=url,
                         fid=pick.get("fid") or "")
-            _PANSOU_MAN_SNAP[mg] = snap
+            snap["ts"] = time.time()
+            snap["index"] = index
+            _bounded_snap_put(mg, snap)
             rec["state"] = "ready"
             rec["provider"] = key
             rec["share_url"] = url
             rec["error"] = ""
             rec["updated"] = time.time()
             return
-        rec["state"] = "dead"
+        _pansou_cooldown(rec)
         rec["error"] = last_err or "网盘分享均无法转存"
         rec["updated"] = time.time()
     except Exception:
         _log.debug("_pansou_run failed: mg=%s", mg, exc_info=True)
         if rec.get("state") != "ready":
-            rec["state"] = "dead"
-            rec["error"] = "网盘转存内部异常，可重试"
+            _pansou_cooldown(rec)
+            rec["error"] = "网盘转存内部异常，稍后自动重试"
