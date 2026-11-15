@@ -68,7 +68,7 @@ def _line_is_bad(picked: dict) -> bool:
 def _autofail_on() -> bool:
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("line_autofail", True))
+        return bool(config.read("line_autofail",True))
     except Exception:
         _log.debug("_autofail_on failed", exc_info=True)
         return True
@@ -83,7 +83,7 @@ def _source_health_enabled() -> bool:
     """
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("source_health_enabled", True))
+        return bool(config.read("source_health_enabled",True))
     except Exception:
         _log.debug("_source_health_enabled failed", exc_info=True)
         return True
@@ -96,7 +96,7 @@ def _domain_heal_enabled() -> bool:
     """
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("domain_heal_enabled", True))
+        return bool(config.read("domain_heal_enabled",True))
     except Exception:
         _log.debug("_domain_heal_enabled failed", exc_info=True)
         return True
@@ -603,7 +603,7 @@ def remembered_fast_line(picked: dict) -> str | None:
 def _fastest_on() -> bool:
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("line_fastest", True))
+        return bool(config.read("line_fastest",True))
     except Exception:
         _log.debug("_fastest_on failed", exc_info=True)
         return True
@@ -617,7 +617,7 @@ def _fixed_line_direct_on() -> bool:
     """
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("fixed_line_direct", True))
+        return bool(config.read("fixed_line_direct",True))
     except Exception:
         _log.debug("_fixed_line_direct_on failed", exc_info=True)
         return True
@@ -684,7 +684,7 @@ def _mid_switch_on() -> bool:
     关时恢复旧行为：劣化走既有失败路径。"""
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("mid_playback_switch", True))
+        return bool(config.read("mid_playback_switch",True))
     except Exception:
         _log.debug("_mid_switch_on failed", exc_info=True)
         return True
@@ -797,7 +797,7 @@ def _zero_race_on() -> bool:
     """
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        return bool(config.get().get("linepredict_zero_race", True))
+        return bool(config.read("linepredict_zero_race",True))
     except Exception:
         _log.debug("_zero_race_on failed", exc_info=True)
         return True
@@ -829,7 +829,7 @@ def trusted_predicted_target(picked: dict) -> dict | None:
         return None
     from app import _episode_candidates, _line_is_bad, _line_speed, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     try:
-        if not bool(config.get().get("linepredict_enabled", True)):
+        if not bool(config.read("linepredict_enabled",True)):
             return None
     except Exception:
         _log.debug("trusted_predicted_target failed", exc_info=True)
@@ -864,14 +864,14 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
     # trusted_predicted_target，可信就直接起播、根本不进这里。
     pred = None
     try:
-        if bool(config.get().get("linepredict_enabled", True)):
+        if bool(config.read("linepredict_enabled",True)):
             pred = linepredict.fastest(_episode_key(picked))
     except Exception:
         _log.debug("_race_candidates failed", exc_info=True)
         pred = None
     cands = [c for c in cands if not _line_is_bad(c)] or cands
     try:
-        n = int(config.get().get("line_fastest_max", 6))
+        n = int(config.read("line_fastest_max",6))
     except Exception:
         _log.debug("_race_candidates failed", exc_info=True)
         n = 6

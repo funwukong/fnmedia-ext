@@ -230,6 +230,9 @@ class _CfgStub:
     def get(self):
         return dict(self._skip)
 
+    def read(self, key, default=None):
+        return self._skip.get(key, default)
+
 
 class _StoreStub:
     def __init__(self, brief):

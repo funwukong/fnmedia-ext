@@ -45,7 +45,7 @@ class T4Browser:
             self._nodes.popitem(last=False)
 
     def sources(self):
-        if not self.config.get().get("t4_library_enabled", True):
+        if not self.config.read("t4_library_enabled",True):
             return []
         return [s for s in self.config.enabled_sources() if s.get("kind") == "t4"]
 

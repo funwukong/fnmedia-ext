@@ -344,7 +344,7 @@ async def ext_admin_token_rotate(request: Request):
 @admin_router.get("/v/api/ext/status")
 async def ext_status(request: Request):
     from app import BUILD_LABEL, app, chart_cache, config, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    overrides = config.get().get("source_priority") or {}
+    overrides = config.read("source_priority") or {}
     priorities = {s["id"]: providers.source_priority(s, overrides)
                   for s in config.all_sources()}
     return {"ok": True,
@@ -412,7 +412,7 @@ async def ext_continue(request: Request, limit: int = 20):
 @admin_router.get("/v/api/ext/follow")
 async def ext_follow_list(request: Request):
     from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    if not config.get().get("follow_enabled", True):
+    if not config.read("follow_enabled",True):
         return {"code": 0, "msg": "", "data": []}
     return {"code": 0, "msg": "", "data": follow_list.list()}
 
@@ -467,7 +467,7 @@ async def ext_source_heal(request: Request):
     if not _domain_heal_enabled():
         # 域名自愈开关关闭：不试备用域名、不换域名，直接返回空结果。
         return {"code": 0, "msg": "domain heal disabled", "data": None}
-    backups = (config.get().get("source_domain_backups") or {}).get(sid, [])
+    backups = (config.read("source_domain_backups") or {}).get(sid, [])
     import httpx as _httpx
 
     def _fetch(url: str):
@@ -490,7 +490,7 @@ async def ext_favorite_enrich(request: Request):
     from app import _favorite_viewable, _viewer_ctx, app, config, marks, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     recs = [r for r in marks.favorite_records()
             if _favorite_viewable(request, r, _ctx=_viewer_ctx(request))]
-    if not config.get().get("metadata_enabled", True):
+    if not config.read("metadata_enabled",True):
         return {"code": 0, "msg": "", "data": recs}
     # 候选：当前已缓存的全部标题 brief。
     cands = []
@@ -1126,6 +1126,124 @@ async def ext_source_restore(request: Request):
     config.restore_builtin()
     _search_cache.clear(); _AGG_CACHE.clear()
     return {"code": 0, "msg": "restored"}
+
+
+@admin_router.post("/v/api/ext/source/refresh")
+async def ext_source_refresh(request: Request):
+    """刷新站点列表：重建分类路由 + 清空搜索/聚合缓存，返回最新健康画像。
+
+    用途：用户批量改启用/停用、改接口地址、或发现「海量片库」分类不对时，
+    不必重启插件——一次调用把派生数据全部对齐到当前配置。
+
+    body:
+      scope   "routes"（默认，只重建路由）/ "all"（再清搜索缓存+重载配置）
+      probe   bool，为 True 时顺带并发探活所有已启用源（较慢，默认 False）
+
+    返回：
+      sources      当前源列表（id/name/api/enabled/standalone/kind/priority）
+      counts       total / enabled / standalone
+      health       每个源的健康等级（0 健康 / 1 慢 / 2 高失败率 / 3 冷却中）
+      routes       catalog 重建结果（分类数、耗时）
+      elapsed_ms   整体耗时
+    """
+    from app import _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, config  # noqa: E402,F401
+    t0 = time.perf_counter()
+    try:
+        body = await request.json()
+    except Exception:  # noqa: BLE001
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    scope = str(body.get("scope") or "routes").lower()
+    do_probe = bool(body.get("probe"))
+
+    # 1) 强制重载配置文件：用户在容器外手改了 config.json 也能生效。
+    if scope == "all":
+        try:
+            config.load()
+        except Exception:  # noqa: BLE001
+            _log.debug("refresh: config.load failed", exc_info=True)
+
+    # 2) 清缓存：配置变了，旧的搜索结果/聚合结果一律不再可信。
+    cleared = {}
+    try:
+        _search_cache.clear()
+        cleared["search"] = True
+    except Exception:  # noqa: BLE001
+        cleared["search"] = False
+    try:
+        _AGG_CACHE.clear()
+        cleared["agg"] = True
+    except Exception:  # noqa: BLE001
+        cleared["agg"] = False
+
+    # 3) 重建分类路由（海量片库按站点分类深翻要用）。
+    #    这一步要拉每个 CMS 源的分类表 + 每类探一个代表叶子，站点多时会
+    #    跑很久（18 个源实测约 6s，几百个源更久）。用户点「刷新」通常只想
+    #    让列表/缓存对齐，不该被网络拖着等，所以给个短超时：超时就先返回，
+    #    后台继续跑完（catalog 内部有 _refreshing 去重，不会叠加多轮）。
+    routes_info: dict = {}
+    refresh_timeout = 3.0
+    try:
+        refresh_timeout = float(body.get("routes_timeout") or 3.0)
+    except (TypeError, ValueError):
+        pass
+    refresh_timeout = max(0.0, min(60.0, refresh_timeout))
+    try:
+        routes_info = await asyncio.wait_for(
+            catalog.refresh_routes(config.enabled_sources()),
+            timeout=refresh_timeout) or {}
+    except asyncio.TimeoutError:
+        # 后台补跑：这里不能直接 await，起个任务就走。
+        routes_info = {"pending": True, "timeout_s": refresh_timeout}
+        _schedule_routes_refresh()
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("refresh: refresh_routes failed", exc_info=True)
+        routes_info = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+
+    # 4) 可选：并发探活（复用现有探活实现，慢，默认关）。
+    if do_probe:
+        try:
+            await source_probe.start(config.enabled_sources(), limit=0)
+            await asyncio.wait_for(source_probe.wait(), timeout=120)
+        except Exception:  # noqa: BLE001
+            _log.debug("refresh: probe failed", exc_info=True)
+
+    # 5) 汇总：源列表 + 健康画像。
+    sources = config.all_sources()
+    overrides = config.read("source_priority") or {}
+    snap = {}
+    try:
+        snap = sourcehealth.snapshot()
+    except Exception:  # noqa: BLE001
+        _log.debug("refresh: health snapshot failed", exc_info=True)
+    out_sources = []
+    for s in sources:
+        st = snap.get(s.get("id") or "") or {}
+        out_sources.append({
+            "id": s.get("id"), "name": s.get("name"), "api": s.get("api"),
+            "enabled": bool(s.get("enabled")),
+            "standalone": bool(s.get("standalone")),
+            "kind": s.get("kind") or "cms",
+            "builtin": bool(s.get("builtin")),
+            "priority": providers.source_priority(s, overrides),
+            "grade": st.get("grade"),
+            "samples": st.get("samples", 0),
+            "success_rate": st.get("success_rate"),
+            "avg_latency": st.get("avg_latency"),
+        })
+    return {"code": 0, "msg": "", "data": {
+        "sources": out_sources,
+        "counts": {
+            "total": len(out_sources),
+            "enabled": sum(1 for s in out_sources if s["enabled"]),
+            "standalone": sum(1 for s in out_sources if s["standalone"]),
+        },
+        "health": snap,
+        "routes": routes_info,
+        "cleared": cleared,
+        "elapsed_ms": int((time.perf_counter() - t0) * 1000),
+    }}
 
 
 @admin_router.post("/v/api/ext/source/test")
@@ -2191,11 +2309,11 @@ async def linepredict_status():
                                   ).get("title", r.get("og", "")[:12]))
                    for r in linepredict.snapshot(40)],
         "config": {
-            "enabled": bool(config.get().get("linepredict_enabled", True)),
-            "max_lines": int(config.get().get("linepredict_max_lines", 2) or 2),
-            "ttl_min": int(config.get().get("linepredict_ttl_min", 30) or 30),
-            "zero_race": bool(config.get().get("linepredict_zero_race", True)),
-            "browse_probe": bool(config.get().get("browse_probe", True)),            "prewarm_mode": str(config.get().get("prewarm_mode", "realtime")),
+            "enabled": bool(config.read("linepredict_enabled",True)),
+            "max_lines": int(config.read("linepredict_max_lines",2) or 2),
+            "ttl_min": int(config.read("linepredict_ttl_min",30) or 30),
+            "zero_race": bool(config.read("linepredict_zero_race",True)),
+            "browse_probe": bool(config.read("browse_probe",True)),            "prewarm_mode": str(config.read("prewarm_mode","realtime")),
             "chart_bindings": chartbind.bind_store.status()}}})
 
 

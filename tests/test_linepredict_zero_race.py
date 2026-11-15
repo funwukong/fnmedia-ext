@@ -85,6 +85,10 @@ def _patch_switch_off(monkeypatch):
             return {"linepredict_zero_race": False,
                     "linepredict_enabled": True}
 
+        def read(self, key, default=None):
+            return {"linepredict_zero_race": False,
+                    "linepredict_enabled": True}.get(key, default)
+
     monkeypatch.setattr(appmod, "config", _Cfg())
 
 

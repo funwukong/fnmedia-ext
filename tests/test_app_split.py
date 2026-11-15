@@ -108,6 +108,7 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/source/adult'),
     (('POST',), '/v/api/ext/source/delete'),
     (('POST',), '/v/api/ext/source/restore'),
+    (('POST',), '/v/api/ext/source/refresh'),
     (('POST',), '/v/api/ext/source/test'),
     (('POST',), '/v/api/ext/source/test-all'),
     (('POST',), '/v/api/ext/source/health-check'),
@@ -216,7 +217,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 123  # 上游 121（去 guard +6 探活/订阅） + 网盘缓存/重置 2 条
+    assert len(admin_api.admin_router.routes) == 124  # 上游 121（去 guard +6 探活/订阅） + 网盘缓存/重置 2 条 + 站点刷新 1 条
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable
@@ -251,6 +252,6 @@ def test_turbo_freeze_after_split():
     assert appmod._race_fastest.__module__ == "app"
     digest = hashlib.sha256(
         inspect.getsource(appmod._race_fastest).encode()).hexdigest()
-    assert digest == "82c4f45a3a9372e21cdb464a0dcbd93b96ae7c458db09e3fc87fa28dca141700"
+    assert digest == "7035805c9d5021d3442a1116e92c2e6b8c4e6e0c236adbf06d22e82e14d2190a"
     import hls_race
     assert hls_race.ONLINE_PREFIX == appmod.ONLINE_PREFIX

@@ -381,7 +381,7 @@ class _PanUnsupported(Exception):
 # —— 小雅（AList）分类媒体库：按网盘目录建立多张独立库卡片 ——
 def _xlib_on() -> bool:
     try:
-        return bool(config.get().get("pan_lib_enabled", True)) and features.CATVOD
+        return bool(config.read("pan_lib_enabled",True)) and features.CATVOD
     except Exception:
         _log.debug("_xlib_on failed", exc_info=True)
         return False
@@ -421,12 +421,12 @@ def _xlib_cat(lib_guid: str) -> dict | None:
 
 
 def charts_enabled() -> bool:
-    return bool(config.get().get("hot_library_enabled", True))
+    return bool(config.read("hot_library_enabled",True))
 
 
 def catalog_enabled() -> bool:
     """海量四库独立开关（与热门榜单互不影响）。"""
-    return bool(config.get().get("catalog_library_enabled", True))
+    return bool(config.read("catalog_library_enabled",True))
 
 
 def any_virtual_lib_enabled() -> bool:
@@ -501,7 +501,7 @@ def prewarm_persist_mode() -> bool:
     """预热方式开关：
     True  = 方案B 持久化（绑定结果落盘，重启直接恢复，少重新搜源）；
     False = 方案A 实时（重启后启动任务现场 resolve，默认）。"""
-    return str(config.get().get("prewarm_mode", "realtime")) == "persist"
+    return str(config.read("prewarm_mode","realtime")) == "persist"
 
 
 def _persist_chart_binding(guid: str, bound: dict) -> None:
@@ -715,7 +715,7 @@ def _folder_bind_wait() -> float:
     配置缺失/非法时回落默认 8.0；0 表示本次请求不等待、只后台绑定。
     """
     try:
-        v = float(config.get().get("folder_bind_wait", _FOLDER_BIND_WAIT))
+        v = float(config.read("folder_bind_wait",_FOLDER_BIND_WAIT))
     except (TypeError, ValueError):
         return _FOLDER_BIND_WAIT
     return max(0.0, min(25.0, v))
@@ -1035,7 +1035,7 @@ async def lifespan(app: FastAPI):
             await asyncio.sleep(90)  # 启动后等服务稳定再首轮
             while True:
                 try:
-                    if bool(config.get().get("pan_cache_cleanup_enabled", True)):
+                    if bool(config.read("pan_cache_cleanup_enabled",True)):
                         await _pan_cache_cleanup_once()
                 except Exception:
                     _log.debug("_pan_cache_loop failed", exc_info=True)
@@ -1210,7 +1210,7 @@ async def startup_prewarm_hot() -> None:
     """
     try:
         await asyncio.sleep(8)
-        if not bool(config.get().get("linepredict_enabled", True)):
+        if not bool(config.read("linepredict_enabled",True)):
             return
         try:
             if catalog.routes_stale():
@@ -1779,7 +1779,7 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                                         early_min_wait=early_min_wait,
                                         early_min_results=early_min_results)
     if maxn is None:
-        maxn = int(config.get().get("max_per_keyword", 12))
+        maxn = int(config.read("max_per_keyword",12))
     # 跨源同名合并：同 规范化片名+年份 聚成一个条目，每个来源各成一条
     # 播放线路（供播放器「切换线路」）；过滤解说/预告/无直链。
     loose_ids = {s["id"] for s in sources if s.get("loose_filter")}
@@ -1853,9 +1853,9 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
                 g["lines"][lkey] = [e.__dict__ for e in play]
     # 排序：热门资源优先高质量源（源质量权重），同权重再按可播直链总数（跨线路）降序；
     # 开启「自动优选」时叠加实测健康度（死亡/高失败率/慢源排后，上游 v0.2.47）。
-    prefer_q = bool(config.get().get("prefer_quality_source", True))
-    auto_best = bool(config.get().get("auto_best_source", True))
-    overrides = config.get().get("source_priority") or {}
+    prefer_q = bool(config.read("prefer_quality_source",True))
+    auto_best = bool(config.read("auto_best_source",True))
+    overrides = config.read("source_priority") or {}
     _now_h = time.time()
 
     def _group_key(g) -> tuple:
@@ -2073,7 +2073,7 @@ def _brief_best_speed(brief: dict) -> float:
 
 def _poster_speed_badge_on() -> bool:
     try:
-        return bool(config.get().get("poster_speed_badge", True))
+        return bool(config.read("poster_speed_badge",True))
     except Exception:  # noqa: BLE001
         _log.debug("_poster_speed_badge_on failed", exc_info=True)
         return True
@@ -3976,7 +3976,7 @@ async def item_list(request: Request):
             "dir": "", "total": 0, "list": [], "jump_list": None,
         }})
     # 榜单只读、秒开；缓存过期时后台补刷（stale-while-revalidate），不阻塞本次响应。
-    interval = max(1800, int(config.get().get("hot_refresh_interval", 6 * 3600)))
+    interval = max(1800, int(config.read("hot_refresh_interval",6 * 3600)))
     try:
         if chart_cache.stale(interval) and not chart_cache._refreshing:
             asyncio.create_task(chart_cache.refresh(force=True))
@@ -4045,7 +4045,7 @@ async def search_list(request: Request):
     # 在线片库更齐全，默认把在线结果排到前面；可在管理页关闭
     if online:
         online = clientmod.normalize_cards(online, _client_of(request))
-    if config.get().get("online_first", True):
+    if config.read("online_first",True):
         data["data"] = hgdj_online + online + items
     else:
         data["data"] = items + online + hgdj_online
@@ -4831,7 +4831,7 @@ def _attach_related(data: dict, brief: dict) -> None:
     文档里核实；客户端是否渲染以真机实测为准。关掉 related_enabled 即停用。
     """
     try:
-        if not config.get().get("related_enabled", True):
+        if not config.read("related_enabled",True):
             return
     except Exception as exc:
         _log.debug("related config check failed: %s", type(exc).__name__)
@@ -6882,7 +6882,7 @@ async def _browse_probe_worker(ogs: list[str], request: Request) -> None:
     只抓播放清单 / Range 首字节（_probe_latency，build_hls=False，不转码不转存）。
     总预算内完成多少记多少，超时即停；在途标记无论成败/超时/取消都清理。"""
     try:
-        max_lines = int(config.get().get("linepredict_max_lines", 3) or 3)
+        max_lines = int(config.read("linepredict_max_lines",3) or 3)
     except Exception:
         max_lines = 3
     max_lines = max(1, min(8, max_lines))
@@ -6999,8 +6999,8 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
         return None
     default = store.best_line(picked.get("online_guid", ""))
     try:
-        timeout = float(config.get().get("line_fastest_timeout", 4.0))
-        prefer = float(config.get().get("line_fastest_prefer", 0.25))
+        timeout = float(config.read("line_fastest_timeout",4.0))
+        prefer = float(config.read("line_fastest_prefer",0.25))
     except Exception:
         timeout, prefer = 4.0, 0.25
     sem = asyncio.Semaphore(_RACE_CONCURRENCY)
@@ -7420,7 +7420,7 @@ def _up_status() -> str:
 # ------------------------------------------------------------- 管理 API
 
 # P2 拆分：管理 API（/v/api/ext/* 管理端点）。已移入 proxy/admin_api.py；以下重导出（对外 import 名称不变）。
-from admin_api import _ADMIN_LOGIN_LIMITER, _admin_client_key, _admin_limiter_from_config, _cache_sizes, _is_pure_cms, _schedule_routes_refresh, _virtual_lib_list, admin_page, ext_account_acl, ext_account_defaults, ext_accounts, ext_adfilter_replace_rules, ext_adfilter_status, ext_adfilter_toggle, ext_admin_login, ext_admin_token_rotate, ext_admin_token_status, ext_cache_clear, ext_cache_status, ext_continue, ext_diag_resume, ext_favorite_enrich, ext_follow_check, ext_follow_list, ext_follow_set, ext_hot_refresh, ext_import_subscription, ext_import_tvbox, ext_junk_keywords, ext_lib_order, ext_lib_pin, ext_lib_visibility, ext_libs, ext_live, ext_live_clear, ext_local_libs, ext_online, ext_set_config, ext_set_source_proxy, ext_set_subscription_proxy, ext_source_add, ext_source_delete, ext_source_export, ext_source_heal, ext_source_health, ext_source_health_check, ext_source_health_reset, ext_source_import_file, ext_source_loose, ext_source_priority, ext_source_restore, ext_source_standalone, ext_source_test, ext_source_test_all, ext_source_update, ext_status, ext_titles_cache, ext_titles_cache_clear, ext_update_check, ext_update_now, ext_update_status, ext_whoami, linepredict_config, linepredict_reset, linepredict_status, source_health, source_health_reset, admin_router
+from admin_api import _ADMIN_LOGIN_LIMITER, _admin_client_key, _admin_limiter_from_config, _cache_sizes, _is_pure_cms, _schedule_routes_refresh, _virtual_lib_list, admin_page, ext_account_acl, ext_account_defaults, ext_accounts, ext_adfilter_replace_rules, ext_adfilter_status, ext_adfilter_toggle, ext_admin_login, ext_admin_token_rotate, ext_admin_token_status, ext_cache_clear, ext_cache_status, ext_continue, ext_diag_resume, ext_favorite_enrich, ext_follow_check, ext_follow_list, ext_follow_set, ext_hot_refresh, ext_import_subscription, ext_import_tvbox, ext_junk_keywords, ext_lib_order, ext_lib_pin, ext_lib_visibility, ext_libs, ext_live, ext_live_clear, ext_local_libs, ext_online, ext_set_config, ext_set_source_proxy, ext_set_subscription_proxy, ext_source_add, ext_source_delete, ext_source_export, ext_source_heal, ext_source_health, ext_source_health_check, ext_source_health_reset, ext_source_import_file, ext_source_loose, ext_source_priority, ext_source_restore, ext_source_refresh, ext_source_standalone, ext_source_test, ext_source_test_all, ext_source_update, ext_status, ext_titles_cache, ext_titles_cache_clear, ext_update_check, ext_update_now, ext_update_status, ext_whoami, linepredict_config, linepredict_reset, linepredict_status, source_health, source_health_reset, admin_router
 app.router.routes.extend(admin_router.routes)
 
 

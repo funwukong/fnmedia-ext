@@ -39,7 +39,7 @@ def subscription_proxy() -> str:
     """当前订阅资源代理 URL（空串=直连）。惰性读取 config，避免循环导入。"""
     try:
         import config
-        return str(config.config.get().get("subscription_proxy") or "").strip()
+        return str(config.read("subscription_proxy") or "").strip()
     except Exception:  # noqa: BLE001
         _log.debug("subscription_proxy failed", exc_info=True)
         return ""

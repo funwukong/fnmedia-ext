@@ -139,7 +139,7 @@ def normalize_key(key) -> str:
 def hidden_libs() -> set[str]:
     """管理员手动隐藏的库键集合。"""
     try:
-        return set(config.get().get("lib_hidden", []) or [])
+        return set(config.read("lib_hidden",[]) or [])
     except Exception:
         _log.debug("hidden_libs failed", exc_info=True)
         return set()
@@ -153,7 +153,7 @@ def set_hidden(key: str, hidden: bool) -> tuple[bool, str]:
     """设置某库的全局显隐（管理员级，不分账号）。非法库键拒绝。"""
     if not normalize_key(key):
         return False, "库键非法"
-    cur = set(config.get().get("lib_hidden", []) or [])
+    cur = set(config.read("lib_hidden",[]) or [])
     (cur.add if hidden else cur.discard)(key)
     _update({"lib_hidden": sorted(cur)})
     return True, "ok"
@@ -171,18 +171,18 @@ def _update(patch: dict) -> None:
 def lib_order() -> list[str]:
     """虚拟库的自定义相对顺序（库键数组）。未列入的库按默认顺序追加在后。"""
     try:
-        return list(config.get().get("lib_order", []) or [])
+        return list(config.read("lib_order",[]) or [])
     except Exception:
         _log.debug("lib_order failed", exc_info=True)
         return []
 
 
 def lib_placement_default() -> str:
-    return str(config.get().get("lib_placement", "front"))  # front/back/after
+    return str(config.read("lib_placement","front"))  # front/back/after
 
 
 def lib_anchor() -> str:
-    return str(config.get().get("lib_anchor", "") or "")
+    return str(config.read("lib_anchor","") or "")
 
 
 def order_index(key: str) -> int:
@@ -236,7 +236,7 @@ def sort_keys(keys: list[str]) -> list[str]:
 
 def _acl() -> dict:
     try:
-        return dict(config.get().get("lib_acl", {}) or {})
+        return dict(config.read("lib_acl",{}) or {})
     except Exception:
         _log.debug("_acl failed", exc_info=True)
         return {}
@@ -278,7 +278,7 @@ def account_allowlist(user_guid: str):
 def acl_default_visible() -> bool:
     """未配置账号默认能否看到虚拟库（True=可见，fail-open 默认）。"""
     try:
-        return bool(config.get().get("acl_default_visible", True))
+        return bool(config.read("acl_default_visible",True))
     except Exception:
         _log.debug("acl_default_visible failed", exc_info=True)
         return True
@@ -287,7 +287,7 @@ def acl_default_visible() -> bool:
 def acl_default_online() -> bool:
     """未配置账号默认能否用在线搜索（True=允许，fail-open 默认）。"""
     try:
-        return bool(config.get().get("acl_default_online", True))
+        return bool(config.read("acl_default_online",True))
     except Exception:
         _log.debug("acl_default_online failed", exc_info=True)
         return True

@@ -422,6 +422,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
       <div class="card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
+          <button class="small primary" id="srcRefreshBtn" onclick="refreshSources()" title="重建分类路由、清空搜索缓存，把列表与运行时状态对齐到当前配置（不重启插件）">⟳ 刷新</button>
           <button class="small" style="margin-left:auto" onclick="testAll()">全部测速</button>
           <button class="small" id="srcProbeBtn" onclick="sourceProbeStart()">批量探活</button>
           <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
@@ -1508,30 +1509,33 @@ function toggleSrcExpand(){
   if(b)b.textContent=SRC_EXPANDED?"收起":"展开全部";
   renderSources();
 }
-function renderSources(){
-  // 2026-11-13：不分页 —— 一次渲染筛选后的全部源；容器内滚动 + 列宽自适应；
-  // 点「展开全部」则整表展开不再内部滚动。
-  const srcsAll=srcFiltered();
-  const srcs=srcsAll;
-  const all=CFG.sources||[];
-  $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
-  const pi=$("srcPageInfo");
-  if(pi)pi.textContent=`共 ${srcsAll.length} 条（已全部显示）`;
-  const wrap=$("srcWrap");
-  if(wrap)wrap.classList.toggle("compact",srcsAll.length>40);
-  $("srcRows").innerHTML=srcs.length?srcs.map(src=>{
-    let extraCell="",extraTag="";
-    // >>> PRIVATE:ADULT
-    extraCell=FEAT_ADULT?`
+/* ---------- 资源站列表渲染（性能优化版） ----------
+   旧实现两个致命点：
+   1) 每行 querySelector × 6 + addEventListener × 6 —— 500 个源就是 3000 个
+      监听器，每次筛选/切页整表重建，主线程卡死数百毫秒。
+   2) innerHTML 一次性拼整表，几百行大字符串会让排版一次重算。
+   现改为：
+   - 事件委托：一个监听器挂在 tbody，靠 closest + data-* 分发，零 per-row 绑定。
+   - 分帧渲染：首屏先铺 SRC_FIRST 行，剩余用 requestAnimationFrame 分批追加，
+     首屏立刻可交互，滚动时后续行陆续填满。
+   - 渲染代数（SRC_GEN）：筛选条件一变就 ++，旧的 rAF 批次发现代数不符自动放弃，
+     避免"快速输入筛选词"时多批渲染互相覆盖。 */
+const SRC_FIRST=60, SRC_CHUNK=120;
+let SRC_GEN=0, SRC_ROWS_HTML=[], SRC_RAF=0;
+
+function srcRowHtml(src){
+  let extraCell="",extraTag="";
+  // >>> PRIVATE:ADULT
+  extraCell=FEAT_ADULT?`
       <label title="🔞 限制级独立库（18+）：与主库隔离、不进全局搜索；开启即表示你已年满 18 周岁并自行承担责任"
         style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer;margin-left:4px">
         <input type="checkbox" class="ad" ${src.adult?"checked":""}
          ${(src.enabled&&src.standalone&&!(FEAT_DDUO&&src.xsrc))?"":"disabled"} style="width:15px;height:15px;accent-color:#be123c"/>🔞</label>`:"";
-    // <<< PRIVATE:ADULT
-    // >>> PRIVATE:DDUO
-    extraTag=(FEAT_DDUO&&src.xsrc)?'<span class="tag amber" title="非苹果CMS自研站，WASM实时解码">WASM</span>':'';
-    // <<< PRIVATE:DDUO
-    return `<tr data-id="${src.id}">
+  // <<< PRIVATE:ADULT
+  // >>> PRIVATE:DDUO
+  extraTag=(FEAT_DDUO&&src.xsrc)?'<span class="tag amber" title="非苹果CMS自研站，WASM实时解码">WASM</span>':'';
+  // <<< PRIVATE:DDUO
+  return `<tr data-id="${src.id}">
       <td><input type="checkbox" class="en" ${src.enabled?"checked":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
       <td style="white:nowrap">
         <label title="把该资源站单独生成一张媒体库卡片" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer">
@@ -1548,25 +1552,109 @@ function renderSources(){
       <td><button class="small" data-test>测试</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
-  }).join(""):'<tr><td colspan="6" class="muted">没有匹配的资源站（调整筛选条件或清空筛选）。</td></tr>';
-  $$("#srcRows tr").forEach(tr=>{
-    const id=tr.dataset.id;
-    tr.querySelector(".en").addEventListener("change",()=>toggleEnable(id,tr.querySelector(".en").checked));
-    const sa=tr.querySelector(".sa");sa.addEventListener("change",()=>toggleStandalone(id,sa.checked));
-    const lf=tr.querySelector(".lf");if(lf)lf.addEventListener("change",()=>toggleLoose(id,lf.checked));
-    // >>> PRIVATE:ADULT
-    const ad=tr.querySelector(".ad");if(FEAT_ADULT&&ad)ad.addEventListener("change",()=>toggleAdult(id,ad.checked,ad));
-    // <<< PRIVATE:ADULT
-    tr.querySelector("[data-test]").addEventListener("click",()=>testOne(id,tr));
-    tr.querySelector("[data-del]").addEventListener("click",()=>delSource(id,srcName(id)));
-  });
-  // T4 远程源清单（已接入：进 sources 且 kind=t4，在 T4 选片库中可搜可播）
+}
+
+function renderSources(){
+  const srcsAll=srcFiltered();
+  const all=CFG.sources||[];
+  $("srcCount").textContent=all.filter(x=>x.enabled).length+"/"+all.length+" 启用";
+  const pi=$("srcPageInfo");
+  const wrap=$("srcWrap");
+  if(wrap)wrap.classList.toggle("compact",srcsAll.length>40);
+  const tb=$("srcRows");
+  SRC_GEN++;
+  const gen=SRC_GEN;
+  if(SRC_RAF){cancelAnimationFrame(SRC_RAF);SRC_RAF=0;}
+  SRC_ROWS_HTML=[];
+  if(!srcsAll.length){
+    tb.innerHTML='<tr><td colspan="6" class="muted">没有匹配的资源站（调整筛选条件或清空筛选）。</td></tr>';
+    if(pi)pi.textContent="共 0 条";
+  }else{
+    // 首屏：同步铺前 SRC_FIRST 行
+    const head=srcsAll.slice(0,SRC_FIRST);
+    tb.innerHTML=head.map(srcRowHtml).join("");
+    if(pi)pi.textContent=srcsAll.length>SRC_FIRST
+      ? `共 ${srcsAll.length} 条（已显示 ${head.length}，向下滚动自动加载）`
+      : `共 ${srcsAll.length} 条（已全部显示）`;
+    // 余量：分帧追加，每帧 SRC_CHUNK 行
+    let pos=SRC_FIRST;
+    const step=()=>{
+      if(gen!==SRC_GEN)return;           // 被新一轮渲染取代
+      const slice=srcsAll.slice(pos,pos+SRC_CHUNK);
+      if(!slice.length){SRC_RAF=0;
+        if(pi)pi.textContent=`共 ${srcsAll.length} 条（已全部显示）`;
+        return;}
+      const frag=document.createElement("tbody");
+      frag.innerHTML=slice.map(srcRowHtml).join("");
+      while(frag.firstChild)tb.appendChild(frag.firstChild);
+      pos+=SRC_CHUNK;
+      SRC_RAF=requestAnimationFrame(step);
+    };
+    if(srcsAll.length>SRC_FIRST)SRC_RAF=requestAnimationFrame(step);
+  }
+  // T4 远程源清单
   const t4=(CFG.sources||[]).filter(s=>s.kind==="t4");
-  $("t4Count").textContent=t4.length?(t4.length+" 个"):"";
-  $("t4Rows").innerHTML=t4.length?t4.map(x=>{
+  const t4c=$("t4Count");if(t4c)t4c.textContent=t4.length?(t4.length+" 个"):"";
+  const t4r=$("t4Rows");
+  if(t4r)t4r.innerHTML=t4.length?t4.map(x=>{
     const bad=x.invalid?'<span class="tag warn">地址无效</span>':'<span class="tag">T4</span>';
     return `<div class="subrow"><span><b>${esc(x.name||x.api||"")}</b><br><span class="meta">${esc(x.api||"")}</span></span>${bad}</div>`;
   }).join(""):'<div class="muted sm">暂无 T4 源：去「导入订阅」导一次含 type=4 的订阅。</div>';
+}
+
+/* 事件委托：整张表只挂一个 change + 一个 click，靠 closest 分发。 */
+function bindSrcDelegate(){
+  const tb=$("srcRows");
+  if(!tb||tb.dataset.bound)return;
+  tb.dataset.bound="1";
+  tb.addEventListener("change",e=>{
+    const tr=e.target.closest("tr[data-id]");
+    if(!tr)return;
+    const id=tr.dataset.id;
+    const t=e.target;
+    if(t.classList.contains("en"))toggleEnable(id,t.checked);
+    else if(t.classList.contains("sa"))toggleStandalone(id,t.checked);
+    else if(t.classList.contains("lf"))toggleLoose(id,t.checked);
+    // >>> PRIVATE:ADULT
+    else if(FEAT_ADULT&&t.classList.contains("ad"))toggleAdult(id,t.checked,t);
+    // <<< PRIVATE:ADULT
+  });
+  tb.addEventListener("click",e=>{
+    const tr=e.target.closest("tr[data-id]");
+    if(!tr)return;
+    const id=tr.dataset.id;
+    if(e.target.closest("[data-test]")){testOne(id,tr);return;}
+    if(e.target.closest("[data-del]")){delSource(id,srcName(id));return;}
+  });
+}
+async function refreshSources(){
+  const btn=$("srcRefreshBtn");
+  const old=btn?btn.textContent:"";
+  if(btn){btn.disabled=true;btn.textContent="⟳ 刷新中…";}
+  try{
+    const r=await jpost("/v/api/ext/source/refresh",{scope:"all"});
+    if(r.code!==0){toast("刷新失败："+(r.msg||""),"fail");return;}
+    const d=r.data||{};
+    // 用后端回传的最新源列表覆盖内存配置，顺带把健康等级灌进去。
+    await loadStatus();
+    bindSrcDelegate();
+    renderSources();
+    try{await loadHealth();}catch(_){}
+    const c=d.counts||{};
+    const rt=d.routes||{};
+    let msg=`已刷新：${c.enabled||0}/${c.total||0} 启用`;
+    if(rt.pending)msg+=` · 路由后台更新中`;
+    else if(rt.error)msg+=` · 路由告警 ${rt.error}`;
+    else if(rt.categories!==undefined)msg+=` · 分类 ${rt.categories}`;
+    if(d.elapsed_ms!==undefined)msg+=` · ${d.elapsed_ms}ms`;
+    toast(msg);
+    const gs=$("globalState");
+    if(gs)gs.textContent="接管运行中 · 已缓存 "+(STATUS&&STATUS.cached_titles||0);
+  }catch(e){
+    toast("刷新请求失败："+String(e),"fail");
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent=old||"⟳ 刷新";}
+  }
 }
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
 async function toggleEnable(id,on){
@@ -2524,7 +2612,7 @@ async function init(){
   $("linePredictZeroRace").checked=CFG.linepredict_zero_race!==false;
   $("browseProbe").checked=CFG.browse_probe!==false;  $("linePredictMax").value=CFG.linepredict_max_lines||3;
   $("linePredictTtl").value=CFG.linepredict_ttl_min||30;
-  renderKw();renderSources();initSrcProxy();
+  renderKw();bindSrcDelegate();renderSources();initSrcProxy();
   const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
   const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
   loadOnline();

@@ -369,7 +369,7 @@ def _segment_url_count(text: str) -> int:
 # ---- 播放时动态检测（OK影视 Pro 式：当下分析分片序列识别广告段） ----------
 def _dynamic_enabled() -> bool:
     try:
-        return bool(_cfg.config.get().get("ad_filter_dynamic", True))
+        return bool(_cfg.read("ad_filter_dynamic",True))
     except Exception:
         _log.debug("_dynamic_enabled failed", exc_info=True)
         return True
@@ -719,7 +719,7 @@ _sps_cache_lock = threading.RLock()
 def sps_enabled() -> bool:
     """SPS 编码指纹去广告开关，默认开启；可在管理页单独关闭。"""
     try:
-        return bool(_cfg.config.get().get("ad_filter_sps", True))
+        return bool(_cfg.read("ad_filter_sps",True))
     except Exception:
         _log.debug("sps_enabled failed", exc_info=True)
         return True

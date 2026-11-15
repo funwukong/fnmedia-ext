@@ -127,11 +127,22 @@ class SourceListNoPagingTests(unittest.TestCase):
         self.assertIn(".src-wrap.expanded{", self.ui)
 
     def test_all_rows_rendered(self):
-        """renderSources 不再按页切片。"""
+        """renderSources 全量渲染，不做分页截断。
+
+        2026-11-14：渲染改为「首屏同步 + 剩余分帧追加」，因此允许出现
+        ``slice(pos, pos+SRC_CHUNK)`` —— 那是把同一份全量列表分批铺进 DOM，
+        不是页大小切分。这里改为断言「没有分页大小常量」且「分批循环的第
+        三步是继续追加，直到列表取空」，从而保证最终行数等于筛选结果数。
+        """
         i = self.ui.index("function renderSources()")
-        seg = self.ui[i:i + 1500]
+        seg = self.ui[i:i + 4000]
         self.assertNotIn("SRC_PAGE_SIZE", seg)
-        self.assertNotIn(".slice(", seg)
+        # 全量来源：直接对整个筛选结果切片，无 page*size 偏移
+        self.assertIn("srcsAll.slice(", seg)
+        self.assertNotIn("SRC_PAGE_SIZE*", seg)
+        # 分批推进：位置按批次递增，取空即止（不是取到某页上限就停）
+        self.assertIn("pos+=SRC_CHUNK", seg)
+        self.assertIn("if(!slice.length)", seg)
 
 
 if __name__ == "__main__":

@@ -76,7 +76,9 @@ def _isolate_speed_table():
 def _switch_on(monkeypatch):
     monkeypatch.setattr(
         appmod, "config",
-        types.SimpleNamespace(get=lambda: {"poster_speed_badge": True}))
+        types.SimpleNamespace(
+            get=lambda: {"poster_speed_badge": True},
+            read=lambda k, d=None: {"poster_speed_badge": True}.get(k, d)))
     return True
 
 
@@ -251,7 +253,9 @@ def test_switch_off_hides_badge(monkeypatch):
     _seed("cms::A", 860.0)
     monkeypatch.setattr(
         appmod, "config",
-        types.SimpleNamespace(get=lambda: {"poster_speed_badge": False}))
+        types.SimpleNamespace(
+            get=lambda: {"poster_speed_badge": False},
+            read=lambda k, d=None: {"poster_speed_badge": False}.get(k, d)))
     assert appmod._poster_speed_badge_on() is False
     assert appmod._brief_speed_badge(_brief()) == ""
     card = inject.search_item(_brief())
@@ -262,7 +266,8 @@ def test_switch_off_hides_badge(monkeypatch):
 def test_switch_missing_key_defaults_on(monkeypatch):
     # 旧配置没有该键：get() 缺键时按 True 处理（与 DEFAULTS 一致）。
     monkeypatch.setattr(
-        appmod, "config", types.SimpleNamespace(get=lambda: {}))
+        appmod, "config", types.SimpleNamespace(
+            get=lambda: {}, read=lambda k, d=None: {} .get(k, d)))
     assert appmod._poster_speed_badge_on() is True
 
 

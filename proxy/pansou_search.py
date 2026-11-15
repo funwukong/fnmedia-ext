@@ -30,7 +30,7 @@ def enabled() -> bool:
     """网盘搜索源是否启用（与手动线同一开关语义）。"""
     try:
         from config import config
-        return bool(config.get().get("pansou_search_enabled", True))
+        return bool(config.read("pansou_search_enabled",True))
     except Exception:
         return True
 

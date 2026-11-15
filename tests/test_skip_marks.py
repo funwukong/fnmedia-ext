@@ -132,6 +132,9 @@ class PlayConfigForTests(unittest.TestCase):
         def get(self):
             return dict(self._values)
 
+        def read(self, key, default=None):
+            return self._values.get(key, default)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

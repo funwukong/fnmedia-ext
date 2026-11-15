@@ -33,7 +33,7 @@ GOOD = {"id": "good-src", "name": "Good",
 DEAD = {"id": "dead-src", "name": "Dead",
         "api": "https://dead.test/api.php/provide/vod/at/json", "enabled": True}
 
-RACE_FASTEST_SHA256 = "82c4f45a3a9372e21cdb464a0dcbd93b96ae7c458db09e3fc87fa28dca141700"
+RACE_FASTEST_SHA256 = "7035805c9d5021d3442a1116e92c2e6b8c4e6e0c236adbf06d22e82e14d2190a"
 
 
 def _title(vod_id, name, src, play_url, year="2024"):

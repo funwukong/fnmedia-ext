@@ -409,7 +409,7 @@ class HotCache:
 def config_hot_enabled() -> bool:
     try:
         from config import config
-        return bool(config.get().get("hot_library_enabled", True))
+        return bool(config.read("hot_library_enabled",True))
     except Exception:
         _log.debug("config_hot_enabled failed", exc_info=True)
         return True

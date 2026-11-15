@@ -115,7 +115,7 @@ def lib_guid() -> str:
 
 
 def enabled() -> bool:
-    return bool(config.get().get("hgdj_enabled", False))
+    return bool(config.read("hgdj_enabled",False))
 
 
 def _cfg() -> tuple[bool, str]:
@@ -123,7 +123,7 @@ def _cfg() -> tuple[bool, str]:
     now = time.time()
     if now - _config_cache[0] < 2.0:
         return _config_cache[1]
-    val = (enabled(), config.get().get("hgdj_url", HGDJ_DEFAULT_URL) or HGDJ_DEFAULT_URL)
+    val = (enabled(), config.read("hgdj_url",HGDJ_DEFAULT_URL) or HGDJ_DEFAULT_URL)
     _config_cache = (now, val)
     return val
 

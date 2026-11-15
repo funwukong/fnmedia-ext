@@ -187,10 +187,12 @@ def _cache_cfg() -> tuple[int, int, float]:
     config 在函数内导入，避免与 config->providers 形成模块加载环。"""
     try:
         import config
-        c = config.get()
-        max_n = int(c.get("titles_cache_max_entries", _MAX_TITLES))
-        max_mb = float(c.get("titles_cache_max_mb", 4))
-        debounce = float(c.get("titles_flush_debounce", 5))
+        # 单键读，不深拷贝整份配置：本函数在每次落盘/裁剪时都会调用，
+        # 走 config.get() 每次要 json 往返一遍（约 370µs），纯属浪费。
+        c = config.config
+        max_n = int(c.read("titles_cache_max_entries", _MAX_TITLES))
+        max_mb = float(c.read("titles_cache_max_mb", 4))
+        debounce = float(c.read("titles_flush_debounce", 5))
     except Exception:
         _log.debug("_cache_cfg failed", exc_info=True)
         max_n, max_mb, debounce = _MAX_TITLES, 4.0, 5.0
@@ -391,10 +393,11 @@ class Store:
                 i += 1
             return i
 
-        def parse_titles(i: int, keep: deque, max_n: int) -> int:
+        def parse_titles(i: int, keep: deque, max_n: int, budget: int) -> int:
             if text[i] != "{":
                 raise ValueError("'titles' is not an object")
             i += 1
+            kept_bytes = 0
             while True:
                 i = skip_ws(i)
                 if i >= len(text):
@@ -406,15 +409,20 @@ class Store:
                 if text[i] != ":":
                     raise ValueError("expected ':' in 'titles'")
                 i = skip_ws(i + 1)
+                bstart = i
                 brief, i = dec.raw_decode(text, i)
                 if isinstance(brief, dict):
-                    full = _expand_brief(brief)
-                    size = len(json.dumps(
-                        _compact_brief(full),
-                        ensure_ascii=False).encode("utf-8"))
-                    keep.append((key, full, size))
-                    while len(keep) > max_n:
-                        keep.popleft()
+                    # 落盘形态就是紧凑形态：原始 JSON 切片的字节数即该条
+                    # 在文件里占的字节，直接取用，不再对每条做
+                    # _expand_brief + _compact_brief + json.dumps 往返测字节。
+                    # 展开也推迟到最后，只展开最终存活的条目。
+                    size = len(text[bstart:i].encode("utf-8"))
+                    keep.append((key, brief, size))
+                    kept_bytes += size
+                    while keep and (len(keep) > max_n
+                                    or (budget > 0 and kept_bytes > budget)):
+                        _, _, old = keep.popleft()
+                        kept_bytes -= old
                 else:
                     _log.warning("_load: dropping non-object title entry %r",
                                  key)
@@ -456,6 +464,8 @@ class Store:
         max_n, max_bytes, _ = _cache_cfg()
         keep: deque = deque()
         orig: dict = {}
+        # 字节预算：解析时即按落盘字节增量裁剪，读完无需再整体算一遍。
+        budget = int(max_bytes * 0.92) if max_bytes > 0 else 0
         i = skip_ws(0)
         if i >= len(text) or text[i] != "{":
             raise ValueError("titles.json top level is not an object")
@@ -472,7 +482,7 @@ class Store:
                 raise ValueError("expected ':' at top level")
             i = skip_ws(i + 1)
             if key == "titles":
-                i = parse_titles(i, keep, max_n)
+                i = parse_titles(i, keep, max_n, budget)
             elif key == "orig":
                 i, orig = parse_orig(i)
             else:
@@ -484,23 +494,12 @@ class Store:
             if text[i] == "}":
                 break
             raise ValueError("expected ',' or '}' at top level")
-        # 字节上限：条数上限已在解析时增量执行，这里只做字节裁剪。
-        items = list(keep)
-        if max_bytes > 0:
-            sizes = [sz + len(json.dumps(orig.get(k, ""),
-                                         ensure_ascii=False).encode("utf-8"))
-                     for k, _, sz in items]
-            total = sum(sizes) + 256
-            budget = max_bytes * 0.92
-            drop = 0
-            while total > budget and drop < len(items):
-                total -= sizes[drop]
-                drop += 1
-            if drop:
-                items = items[drop:]
-        titles = {k: b for k, b, _ in items}
+        # 条数与字节上限都已在解析时增量执行；这里只把存活的紧凑形态
+        # 展开成内存完整形态（每条只展开一次，不再往返压缩）。
+        titles = {k: _expand_brief(b) for k, b, _ in keep}
         keep_keys = set(titles)
         return titles, {k: v for k, v in orig.items() if k in keep_keys}
+
 
     def _direct_eps(self, brief: dict, line: str) -> list[dict]:
         # 可直接播放，或可按需解析的播放页（/share/<id>）
