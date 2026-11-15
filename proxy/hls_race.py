@@ -1937,7 +1937,7 @@ def _is_slow_line(p: dict) -> bool:
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
 async def hls_preset(mg: str, request: Request):
     from app import _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _fastest_on, _online_target_viewable, _pan_match, _pick_episode, _viewer_ctx, app, chart_guid_by_media, remembered_fast_line, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    from app import PANSOU_LABEL, PANSOU_LINE, _pansou_available, _pansou_manual_target, _pansou_mark_user_pick, _pansou_reset  # noqa: E402,F401 PanSou 手动线
+    from app import PANSOU_LABEL, PANSOU_LINE, _pansou_available, _pansou_manual_target, _pansou_mark_real_play, _pansou_mark_user_pick, _pansou_reset  # noqa: E402,F401 PanSou 手动线
     idx0 = int(request.query_params.get("index", 0) or 0)
     # 用户手切网盘线的意图必须【最先】登记：影片此刻可能尚未绑定，下面
     # _pick_episode 为空会直接回占位 master 提前返回；若标记放在那之后，首次进
@@ -1946,6 +1946,10 @@ async def hls_preset(mg: str, request: Request):
     if explicit_line == PANSOU_LINE:
         _pansou_mark_user_pick(mg)
     elif explicit_line:
+        # 播放器带着一条真实线路来拉流 = 这部片正在用真实线路播放（正常起播
+        # 或从网盘线切回来都走这里）。登记「本片有真实起播证据」，作为之后
+        # 从清晰度菜单切网盘线的前提。
+        _pansou_mark_real_play(mg)
         # 播放页手切到任何“非网盘线”都要清掉网盘手切意图，否则后续不带
         # line 的 main/preset 请求会被残留意图反复拉回网盘线（表现为从网盘线
         # 切其他线路后放不出来、又被弹回网盘线）。
@@ -2053,10 +2057,7 @@ async def hls_preset(mg: str, request: Request):
         # 多线路：无 RESOLUTION 的变体，飞牛 HLS 播放器呈现为可切换「线路」
         out = ["#EXTM3U", "#EXT-X-VERSION:3"]
         for i, t in enumerate(hls_targets):
-            name = _line_display_name(t)
-            # NAME 供支持的播放器显示线路名；BANDWIDTH 差异化避免变体被合并
-            out.append(f'#EXT-X-STREAM-INF:BANDWIDTH={1000000 + i * 100000},'
-                       f'PROGRAM-ID=1,NAME="{name}"')
+            out.append(_variant_stream_inf(t, i))
             # 仅首个（自动起播）变体带 auto=1
             out.append(variant_uri(t, auto_mode and i == 0))
         master = "\n".join(out) + "\n"
@@ -2580,6 +2581,20 @@ def _placeholder_playlist_response(mg: str = "", live: bool = True) -> Response:
                     headers={"Cache-Control": "no-store",
                              "Access-Control-Allow-Origin": "*",
                              "X-fnmedia-Placeholder": "1"})
+
+
+def _variant_stream_inf(target: dict, i: int) -> str:
+    """生成多线路 master 里单个变体的 EXT-X-STREAM-INF 行。
+
+    BANDWIDTH 必须差异化，否则播放器会把变体合并成一个。同时 **PanSou
+    手动线要给全场最低带宽**：它没有真实码率，只有一张占位循环图，一旦带宽
+    高于真实线路，自适应码率会主动跳到它，表现为「明明选的是真实线路，画面
+    却是网盘占位、切来切去都放不出来」。
+    """
+    name = _line_display_name(target)
+    bw = 1 if target.get("_pansou_manual") else 1000000 + i * 100000
+    return (f'#EXT-X-STREAM-INF:BANDWIDTH={bw},'
+            f'PROGRAM-ID=1,NAME="{name}"')
 
 
 def _placeholder_master_response(idx: int = 0) -> Response:

@@ -556,11 +556,14 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         self.protected = True
         _, eg = await self.load_episode()
         mg = storemod.ep_media_guid(eg)
+        qualities = (await self.client.get(
+            f"/v/api/v1/stream/list/{eg}")).json()["data"]["qualities"]
+        br_b = [q for q in qualities if q["resolution"] == "B"][0]["bitrate"]
         link = f"/v/media/online/{mg}/t4?line=B"
         for ua in ("com.trim.tv", "Dalvik/2.1.0 Android", "com.trim.media.ios"):
             for query, headers in [
                 ({"direct_link_quality_index": "1"}, {}),
-                ({"bitrate": "90010001"}, {}),
+                ({"bitrate": str(br_b)}, {}),
                 ({"playlink": link}, {}),
                 ({}, {"Play-Link": link}),
                 ({"line": "B"}, {}),
@@ -582,15 +585,19 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_and_play_use_same_selected_t4_line(self):
         _, eg = await self.load_episode()
         mg = storemod.ep_media_guid(eg)
+        # 档位编码按线路名稳定哈希（与菜单顺序无关），不能写死数值
+        qualities = (await self.client.get(
+            f"/v/api/v1/stream/list/{eg}")).json()["data"]["qualities"]
+        br_b = [q for q in qualities if q["resolution"] == "B"][0]["bitrate"]
         response = await self.client.post("/v/api/v1/stream", json={
-            "media_guid": mg, "bitrate": 90010001})
+            "media_guid": mg, "bitrate": br_b})
         self.assertEqual(response.status_code, 200)
         played = [r for r in self.calls if "play" in r.url.params][-1]
         self.assertEqual(played.url.params["play"], "b2")
         self.assertEqual(response.json()["data"]["video_stream"]["resolution_type"], "B")
-        self.assertEqual(response.json()["data"]["video_stream"]["bps"], 90010001)
+        self.assertEqual(response.json()["data"]["video_stream"]["bps"], br_b)
         response = await self.client.post("/v/api/v1/play/play", json={
-            "media_guid": mg, "bitrate": 90010001})
+            "media_guid": mg, "bitrate": br_b})
         self.assertEqual(response.json()["data"]["play_link"], "https://media.test/b2.mp4")
 
     async def test_invalid_t4_line_does_not_silently_play_default(self):

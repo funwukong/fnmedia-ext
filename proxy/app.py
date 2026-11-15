@@ -367,7 +367,10 @@ from pansou import (
     _pansou_manual_kick,
     _pansou_manual_state,
     _pansou_manual_target,
+    _pansou_mark_real_play,
     _pansou_mark_user_pick,
+    _pansou_real_played,
+    _pansou_clear_user_pick,
     _pansou_reset,
 )
 
@@ -5388,6 +5391,57 @@ async def ext_skip_marks_delete(request: Request):
     return JSONResponse({"code": 0, "msg": "", "data": True})
 
 
+def _pansou_real_lines(target: dict | None) -> list[str] | None:
+    """该片当前可切的真实线路名（不含网盘线）。
+
+    网盘线是虚拟手动线：**没有真实线路可回时绝不能把它设为当前线**，否则
+    客户端线路菜单里只剩网盘线一项，用户「切回其它线路」没有目标，只能
+    一直停在占位画面——正是用户报的现象。
+    """
+    if not target:
+        # 目标解析不出来（新片首次进播放页、mg 尚未绑定记录）：无从判断，
+        # 返回 None 表示「不知道」，不阻断，交给下游原逻辑。
+        return None
+    og = target.get("online_guid") or ""
+    try:
+        if not og or store.get_title_by_guid(og) is None:
+            # store 不认识这部片（榜单骨架/外部 guid/已被淘汰）：同样未知。
+            return None
+        return [t["line"] for t in store.target_lines(target)
+                if t.get("line") and t.get("line") != PANSOU_LINE]
+    except Exception:
+        _log.debug("_pansou_real_lines failed", exc_info=True)
+        return None
+
+
+def _pansou_pick_usable(mg: str, target: dict | None = None) -> bool:
+    """已有手切意图时，该片此刻是否仍该按网盘线播放。
+
+    用于后续**不带 bitrate** 的 preset/main 请求（含播放中的分片轮询）：
+
+    * 意图必须还在有效期内（``_pansou_is_user_pick``，含滑动续期）；
+    * 必须还有真实线路可回，否则按真实线路播。
+    """
+    if not _pansou_is_user_pick(mg):
+        return False
+    real = _pansou_real_lines(target)
+    return True if real is None else bool(real)
+
+
+def _pansou_switch_allowed(mg: str, target: dict | None = None) -> bool:
+    """play/play 解码出「网盘线 bitrate」时，判定这是不是用户此刻真的在切。
+
+    飞牛的清晰度选择是**跨片全局记忆**的：A 片切过网盘线后，点播 B 片仍会
+    带同一个 bitrate 回来。所以命中网盘线编码时必须要求 **本片真的用真实
+    线路起播过**（``_PANSOU_REAL_PLAY``，由 play/play 与 preset 拉着真实线路
+    时登记）。新片没有这份证据 => 是跨片残留，按默认线路播。
+    """
+    if not _pansou_real_played(mg):
+        return False
+    real = _pansou_real_lines(target)
+    return True if real is None else bool(real)
+
+
 def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
     """该播放目标可切换的线路：按资源站去重（同一站直链优先于 share 页），
     当前播放线路排第一；T4 保持稳定菜单顺序，防止切线后序号漂移。
@@ -5435,12 +5489,15 @@ def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
 
 
 def _line_bitrate(line: str, lines: list[str]) -> int:
-    # 用 9000 万段的稳定整数编码线路，避免与真实码率（通常<3000万）冲突
-    try:
-        idx = lines.index(line)
-    except ValueError:
-        idx = 0
-    return 90_000_000 + idx * 10001
+    """线路 -> 播放器「清晰度」菜单里的整数值。
+
+    **按线路名稳定编码，不按菜单下标**。飞牛播放器会记住上次选的档位并带到
+    下一部片，而菜单里「当前线路置顶」会让下标整体漂移：网盘线一旦成为当前
+    线，真实线路的编码全部 +1，播放器记着的「A 线」实际落到「B 线」，切回来
+    就永远放不出画面（用户报的正是这个现象）。改按名字哈希后，同一线路在
+    任何菜单顺序下都是同一个整数。
+    """
+    return 90_000_000 + (zlib.crc32((line or "").encode("utf-8")) % 1_000_000)
 
 
 def _line_of_bitrate(br, lines: list[str]) -> str | None:
@@ -5448,10 +5505,17 @@ def _line_of_bitrate(br, lines: list[str]) -> str | None:
         b = int(br or 0)
     except (TypeError, ValueError):
         return None
-    if 90_000_000 <= b < 91_000_000:
-        idx = (b - 90_000_000) // 10001
-        if 0 <= idx < len(lines):
-            return lines[idx]
+    if not 90_000_000 <= b < 91_000_000:
+        return None
+    # 先按稳定哈希精确命中（新编码）
+    for line in lines:
+        if _line_bitrate(line, lines) == b:
+            return line
+    # 兼容旧编码（下标 x 10001）：只用于升级前播过的档位，以及外部直接传
+    # 下标编码的调用方；本端新生成的 URL 永远走上面的精确分支。
+    idx = (b - 90_000_000) // 10001
+    if 0 <= idx < len(lines):
+        return lines[idx]
     return None
 
 
@@ -5460,11 +5524,14 @@ def _qualities(target: dict) -> list[dict]:
     lines = _line_choices(target)
     if len(lines) <= 1:
         return []
+    names = [t["line"] for t in lines]
     out = []
-    for i, t in enumerate(lines):
+    for t in lines:
         out.append({
             "resolution": t.get("label") or _friendly_line(t["line"]),
-            "bitrate": 90_000_000 + i * 10001,
+            # 与 _line_of_bitrate 同一套稳定编码：菜单顺序变了也不会让播放器
+            # 记住的档位指向另一条线路。
+            "bitrate": _line_bitrate(t["line"], names),
             "progressive": True,
             "is_m3u8": False,  # 置 False 才不会被菜单项置灰
         })
@@ -5767,11 +5834,21 @@ async def play_play(request: Request):
             return JSONResponse({"code": -1, "msg": str(exc), "data": None},
                                 status_code=400)
         return await _t4_play_response(mg, target, body, request)
-    # 播放器「清晰度/线路」菜单切换时会带我们编码的 bitrate，据此选线路
+    # 播放器「清晰度/线路」菜单切换时会带我们编码的 bitrate，据此选线路。
+    # 注意：飞牛的清晰度选择是**跨片全局记忆**的——上一部片切到网盘线后，
+    # 点播下一部片仍会带同一个 bitrate 回来。所以这里的命中不是「用户想
+    # 切到那条线」，只是「播放器记得上次的档位」。命中网盘线时必须另有
+    # 本片的起播证据（见 _pansou_switch_allowed），否则按默认线路起播。
     choices = _line_choices(base_target)
     chosen_line = None
     if len(choices) > 1:
         chosen_line = _line_of_bitrate(body.get("bitrate"), [t["line"] for t in choices])
+        if chosen_line and _is_pansou_line_name(chosen_line):
+            if not _pansou_switch_allowed(mg, base_target):
+                # 跨片残留的档位 / 没有真实线路可回：按默认线路起播，
+                # 并清掉可能过期的意图，避免后续 preset 又被拉回网盘线。
+                chosen_line = None
+                _pansou_clear_user_pick(mg)
     if chosen_line and chosen_line != base_target.get("line"):
         if base_target.get("kind") == "episode" and base_target.get("ep_guid"):
             target = store.get_episode_target(base_target["ep_guid"], chosen_line) or base_target
@@ -5817,6 +5894,12 @@ async def play_play(request: Request):
     # 起播体验：此处【不再同步解析】播放页/302/专有解码（慢源要 1~3 秒，会把用户
     # 卡在海报墙像“点了没反应”）。先瞬时返回播放地址让播放器立刻进入加载页转圈，
     # 真正的解析延迟到播放器内部取 main.m3u8 / direct 时再做（那里本就有加载指示）。
+    # 走到这里 = 用真实线路起播（上面网盘分支已早返回）。登记为本片的
+    # 「真实起播证据」：之后从播放中的清晰度菜单切网盘线才被认。
+    try:
+        _pansou_mark_real_play(mg)
+    except Exception:
+        _log.debug("pansou mark real play failed", exc_info=True)
     wrapper, is_hls = _guess_wrapper(target)
     # 线路卡起播：仍带 auto=1 走竞速；种子只经 seed_line 传递，不 pin line。
     # （冻结：上游 _fixed_line 式“去 auto + 固定线”不搬；见 _seeded_media_target。）
@@ -6436,7 +6519,9 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
     # 有意图时返回手动 target（ready 时直接返回转存快照），不解析 store。
     _qline = request.query_params.get("line")
     if _qline and _is_pansou_line_name(_qline):
-        if not _pansou_is_user_pick(mg):
+        if not _pansou_pick_usable(mg, store.resolve_media_guid(mg)):
+            # 无意图 / 意图过期 / 本片从未真实起播 / 已无真实线路可回：
+            # 一律忽略该线按正常选线，网盘永不作跨片残留默认。
             request = _request_without_line(request)
         else:
             try:
@@ -6483,6 +6568,8 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
             if qline == PANSOU_LINE:
                 _pansou_mark_user_pick(mg)
             else:
+                # 明确切到真实线路：只清手切意图，保留已转存的网盘快照
+                # （切回网盘线时免重转存），且清除网盘态避免残留臂。
                 _pansou_reset(mg)
             r = store.resolve_episode(seeded["online_guid"], qline, idx)
             if r:

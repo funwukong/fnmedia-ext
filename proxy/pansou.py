@@ -135,9 +135,15 @@ _MANUAL_SHARE_MAX = 8      # 每部片暂存的手动分享链接上限
 _PANSOU_STATE: dict[str, dict] = {}
 # mg -> ready 后可直接播放的 target（与上游 _PANSOU_MAN_SNAP 同名同义）。
 _PANSOU_MAN_SNAP: dict[str, dict] = {}
-# mg -> True：用户亲手切过 PanSou 线（preset?line=PanSou / play/play
-# bitrate / 线路墙卡）。无此意图时 PanSou 永不作默认线、不自动触发。
-_PANSOU_USER_PICK: dict[str, bool] = {}
+# mg -> {"ts": float}：用户亲手切过 PanSou 线（preset?line=PanSou / play/play
+# bitrate / 线路墙卡）。无此意图时 PanSou 永不作默认线、不自动触发。存时间戳
+# 而不是 True：飞牛播放器的「清晰度」选择是全局记忆的，A 片切过网盘线后播
+# B 片仍会带同一个 bitrate 回来，旧意图必须能过期。
+_PANSOU_USER_PICK: dict[str, dict] = {}
+# mg -> 最近一次「真实线路起播」时间戳。网盘高清线只能从播放中的清晰度
+# 菜单切到，所以建立该意图时本片必须已经用真实线路起播过；没有这层证据
+# 的菜单切线一律视为播放器跨片残留（否则新片一进就被拉到网盘占位画面）。
+_PANSOU_REAL_PLAY: dict[str, float] = {}
 # provider key -> {"session","png","ts"}：进行中的扫码会话（按网盘家共享）。
 _PANSOU_QR: dict[str, dict] = {}
 # mg -> 在途 _pansou_run 任务（单飞）。
@@ -146,6 +152,11 @@ _PANSOU_TASKS: dict[str, "asyncio.Task"] = {}
 # ready 快照有效期：网盘直链（夸克/UC/阿里）通常 2~4 小时就换链，快照
 # 留 90 分钟，过期即退 armed 重转存——否则「同一集有时能播有时不能」。
 _PANSOU_SNAP_TTL = 90 * 60.0
+# 手切网盘线意图的有效期：只覆盖「播放中切清晰度」这一次操作。播放器把
+# 上次的 bitrate 带到下一部片时，间隔通常已远超此值，自然失效。
+_PANSOU_PICK_TTL = 10 * 60.0
+# 「真实线路起播过」的证据有效期：一部片的播放会话不会超过这个量级。
+_PANSOU_REAL_PLAY_TTL = 6 * 3600.0
 # 三张表的上限（原先全无界，长期挂机会缓慢吃内存）。
 _PANSOU_MAX = 600
 _PANSOU_SNAP_MAX = 400
@@ -351,13 +362,80 @@ def _pansou_manual_kick(mg: str) -> None:
 
 
 def _pansou_mark_user_pick(mg: str) -> None:
-    if mg:
-        _PANSOU_USER_PICK[mg] = True
+    """登记「用户手切网盘高清线」意图。
 
+    能调到这里的都是**已确认**的显式入口：线路墙网盘卡、网盘线专属
+    item guid、播放中清晰度菜单切到网盘线、请求显式带 ``line=<网盘线>``。
+    唯一需要提防的是「播放器跨片带来的残留 bitrate」，那一条在
+    ``app.play_play`` 解码时就用 :func:`_pansou_real_played` 拦掉，
+    不会走到这里。
+    """
+    if mg:
+        _PANSOU_USER_PICK[mg] = {"ts": time.time()}
+        _pansou_trim_maps()
 
 def _pansou_is_user_pick(mg: str) -> bool:
-    return bool(_PANSOU_USER_PICK.get(mg or ""))
+    """该片此刻是否在用（或刚切到）网盘高清线。
 
+    只做「时效 + 滑动续期」：
+
+    * **时效**：超过 ``_PANSOU_PICK_TTL`` 的登记作废（飞牛的清晰度选择是
+      跨片全局记忆的，旧档位不该无限期有效）；
+    * **滑动续期**：播放器每次拉 main.m3u8 都会走到这里，正在播的网盘线
+      不会播到一半因 TTL 到期被拉回真实线路。
+
+    跨片污染不在这里判：新片根本没有任何登记，天然隔离；同一 mg 的误登记
+    在建立意图那一刻就被拦（见 ``app.play_play``）。
+    """
+    key = mg or ""
+    if not key:
+        return False
+    rec = _PANSOU_USER_PICK.get(key)
+    if not rec:
+        return False
+    if time.time() - (rec.get("ts") or 0) > _PANSOU_PICK_TTL:
+        _PANSOU_USER_PICK.pop(key, None)
+        return False
+    rec["ts"] = time.time()
+    _PANSOU_REAL_PLAY[key] = rec["ts"]
+    return True
+
+def _pansou_clear_user_pick(mg: str) -> None:
+    """只清手切意图，保留已转存的快照（切回网盘线时免重转存）。"""
+    if mg:
+        _PANSOU_USER_PICK.pop(mg, None)
+
+def _pansou_mark_real_play(mg: str) -> None:
+    """登记「这部片刚用真实线路起播过」，为后续切网盘线留证据。"""
+    if mg:
+        _PANSOU_REAL_PLAY[mg] = time.time()
+        _pansou_trim_maps()
+
+def _pansou_real_played(mg: str) -> bool:
+    key = mg or ""
+    ts = _PANSOU_REAL_PLAY.get(key)
+    if not ts:
+        return False
+    if time.time() - ts > _PANSOU_REAL_PLAY_TTL:
+        _PANSOU_REAL_PLAY.pop(key, None)
+        return False
+    return True
+
+def _pansou_forget_play_evidence(mg: str) -> None:
+    """手动清掉起播证据（仅供测试与显式重置使用；``_pansou_reset`` 不调）。"""
+    if mg:
+        _PANSOU_REAL_PLAY.pop(mg, None)
+
+def _pansou_trim_maps() -> None:
+    """两张意图表都按时间裁剪，长期挂机不会无界增长。"""
+    if len(_PANSOU_USER_PICK) > _PANSOU_MAX:
+        olds = sorted((v.get("ts") or 0, k) for k, v in _PANSOU_USER_PICK.items())
+        for _ts, k in olds[: len(_PANSOU_USER_PICK) - _PANSOU_MAX]:
+            _PANSOU_USER_PICK.pop(k, None)
+    if len(_PANSOU_REAL_PLAY) > _PANSOU_MAX:
+        olds = sorted(_PANSOU_REAL_PLAY.items(), key=lambda kv: kv[1] or 0)
+        for k, _ts in olds[: len(_PANSOU_REAL_PLAY) - _PANSOU_MAX]:
+            _PANSOU_REAL_PLAY.pop(k, None)
 
 def _pansou_url_has_pwd(url: str) -> bool:
     """分享链接是否已带提取码参数（pwd/code/passcode 任一）。"""
@@ -703,12 +781,23 @@ def _pansou_snapshot_for(index: int, mark_stale: bool = False):
 
 
 def _pansou_reset(mg: str) -> None:
-    """清掉一部片的 PanSou 状态（测试/重试用）。"""
+    """清掉一部片的 PanSou 状态（用户切回真实线路 / 重试 / 测试）。
+
+    在途的转存任务必须一并取消：否则它跑完会把状态写回 ready、把
+    ``_PANSOU_MAN_SNAP`` 重新填上，用户已经切回真实线路却又被悄悄拉回
+    网盘线（表现为「切回其它线路也不能播放」）。
+    """
     if not mg:
         return
+    task = _PANSOU_TASKS.pop(mg, None)
+    if task is not None and not task.done():
+        task.cancel()
     _PANSOU_STATE.pop(mg, None)
     _PANSOU_MAN_SNAP.pop(mg, None)
     _PANSOU_USER_PICK.pop(mg, None)
+    # 注意：**不**清 _PANSOU_REAL_PLAY。切到真实线路本身就是「真实起播」，
+    # 抹掉它会让紧接着的菜单切网盘线失去证据、被判成跨片残留。起播证据
+    # 由 _PANSOU_REAL_PLAY_TTL 自然过期。
 
 
 async def _pansou_login_qr_png(mg: str):
