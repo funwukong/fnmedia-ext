@@ -39,6 +39,8 @@ rsync -a --delete \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
   "${TESTS_EXCLUDE[@]}" \
   --exclude='.tools/' --exclude='.pytest_cache/' \
+  --exclude='.coverage' --exclude='.coverage.*' --exclude='htmlcov/' \
+  --exclude='.mypy_cache/' --exclude='.ruff_cache/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \
   --exclude='/proxy/assets/spiders/jars/' \
