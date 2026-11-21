@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""小雅（AList 网盘）分类媒体库索引（完整版私有特性 CATVOD）。
+"""小雅（AList 网盘）分类媒体库索引（完整版私有网盘媒体库特性）。
 
 背景：用户接入的小雅资源本身按目录做好了影视分类，且大量为 4K / 原盘。
 爬虫 jar 的聚合分类接口在该部署上会被拦（403），但 AList 标准接口
@@ -8,7 +8,7 @@
 取最终公网网盘 CDN 直链（raw_url），交由客户端直连（NAS 到该 CDN 不通，
 服务端不代流）。
 
-仅在完整版（features.CATVOD）存在；公开构建整文件删除。
+通过 AList HTTP 接口工作，不依赖 Java。
 """
 from __future__ import annotations
 

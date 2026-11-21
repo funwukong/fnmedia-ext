@@ -88,6 +88,65 @@ from store import (store, make_guid, media_guid, video_guid, is_online_guid,
                    season_guid, episode_guid, ep_media_guid, ep_video_guid)
 
 t4_service = T4Service(store, config)
+
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_BACKGROUND_TASK_HISTORY: list[dict] = []
+_BACKGROUND_TASK_HISTORY_LIMIT = 50
+
+
+def _managed_task(coro, *, name: str, registry=None) -> asyncio.Task:
+    tasks = _BACKGROUND_TASKS if registry is None else registry
+    task = asyncio.create_task(coro, name=name)
+    task._fnmedia_started_at = time.monotonic()
+    tasks.add(task)
+
+    def finished(done):
+        tasks.discard(done)
+        row = {"name": done.get_name(),
+               "state": "cancelled" if done.cancelled() else "completed",
+               "finished_at": time.time()}
+        if not done.cancelled():
+            exc = done.exception()
+            if exc is not None:
+                row["state"] = "failed"
+                row["error_type"] = type(exc).__name__
+        _BACKGROUND_TASK_HISTORY.append(row)
+        del _BACKGROUND_TASK_HISTORY[:-_BACKGROUND_TASK_HISTORY_LIMIT]
+    task.add_done_callback(finished)
+    return task
+
+
+def _background_task_snapshot(tasks) -> list[dict]:
+    """Return a safe, read-only summary of registered background tasks."""
+    now = time.monotonic()
+    rows = []
+    for task in list(tasks or ()):
+        if task.done():
+            continue
+        started = getattr(task, "_fnmedia_started_at", now)
+        rows.append({"name": task.get_name(), "state": "running",
+                     "running_seconds": round(max(0.0, now - started), 1)})
+    return sorted(rows, key=lambda row: row["name"])
+
+
+def _background_task_history() -> list[dict]:
+    return [dict(row) for row in _BACKGROUND_TASK_HISTORY[-_BACKGROUND_TASK_HISTORY_LIMIT:]]
+
+
+def _dedupe_media_cards(cards):
+    seen = set()
+    out = []
+    for card in cards or ():
+        if not isinstance(card, dict):
+            continue
+        guid = card.get("guid")
+        if guid and guid in seen:
+            continue
+        if guid:
+            seen.add(guid)
+        out.append(card)
+    return out
+
 t4_media = T4Media()
 t4_browser = T4Browser(store, config)
 
@@ -102,6 +161,8 @@ ONLINE_PREFIX = "/v/media/online"
 # 骨架（表现为大小 0、路径=在线/加载中.m3u8），而播放侧又无超时地等同一个任务，
 # 于是首次点播一直转圈。这里把两个等待窗做成可配：
 _CHART_DETAIL_WAIT = float(os.environ.get("FNMEDIA_CHART_DETAIL_WAIT", "2.5"))
+# T4 detail must never hold the TV/App detail spinner indefinitely.
+_T4_DETAIL_WAIT = float(os.environ.get("FNMEDIA_T4_DETAIL_WAIT", "12"))
 _CHART_PLAY_WAIT = float(os.environ.get("FNMEDIA_CHART_PLAY_WAIT", "12"))
 
 # ------------------------------------------------------------------ DNS 缓存
@@ -269,35 +330,7 @@ _CHART_FAILED_TS: dict[str, float] = {}
 _CHART_FAILED_TTL = 10 * 60
 
 # 海量分类片库（方案 C：按资源站分类深翻，每类数千部，无限滚动）。
-CATALOG_LIB_GUIDS: dict[str, str] = {
-    "movie":   "e91dd7347a49dbd874fb8a0e78ad7ad7",
-    "tv":      "196381f891d66a4de32f9032e8f244f3",
-    "anime":   "97fc49015edcb20cc423658401711b6c",
-    "variety": "cfff30730cffca2d1357e0c2b52fc2f5",
-    # 福利分类库（跟随海量主开关 catalog_enabled，不设独立开关）：
-    # 纪录片 / 4K / 短剧 —— 与基座扩展版保持同一稳定 guid，客户端缓存不丢。
-    "documentary": "155f2305c2cbc76c85f981ef31cc192f",
-    "uhd":         "262ce51312d7e72020514db5fd5f63e9",
-    "shortdrama":  "037ed7c6df4a9deb8d815c823fd15f79",
-    # P2 新增：guid 由固定串 md5 派生，保持稳定（与上方注释的生成方式一致）。
-    # md5("fnmedia-catalog-lib:overseas") / md5("fnmedia-catalog-lib:ai_comic")
-    # md5("fnmedia-catalog-lib:ted")
-    "overseas":    "c2fe61ae4d3adc87756a253cb108066e",
-    "ai_comic":    "6784f423ff4be5af4fe60cde6c8da303",
-    "ted":         "34883d4af44ca4a5539cb38827158294",
-    # cat-wiring 新增：guid 由固定串 md5 派生，保持稳定（与上方注释的生成方式一致）。
-    # md5("fnmedia-catalog-lib:sports") / md5("fnmedia-catalog-lib:live")
-    # md5("fnmedia-catalog-lib:kids") / md5("fnmedia-catalog-lib:opera")
-    # md5("fnmedia-catalog-lib:music")
-    "sports":      "9b93ebd34f12099811bcb2e700825169",
-    "live":        "465e85f3a6cb1a4ce5d4e397de29384b",
-    "kids":        "cd91e59c8f342225b8741f18d70a26be",
-    "opera":       "495704bcc69d765082a218219fbf3c1e",
-    "music":       "00a744b183e5c4ef1d375ab8514f515b",
-    # 福利独立库（md5("fnmedia-welfare-lib")，GUID 种子保持不变）：独立开关 welfare_library_enabled
-    # 控制是否建库/显示，反查 cat = catalog.ADULT_CAT，走同一条海量深翻链路。
-    "adult":       "411515e17c85709cf1966697b7b2c58e",
-}
+CATALOG_LIB_GUIDS: dict[str, str] = dict(catalogmod.CATALOG_GUIDS)
 CATALOG_GUID_CAT = {g: c for c, g in CATALOG_LIB_GUIDS.items()}
 
 # —— 单源独立媒体库：每个启用 standalone 的源生成一张库卡片 ——
@@ -336,6 +369,91 @@ def hgdj_enabled() -> bool:
 
 def standalone_sources_active() -> list[dict]:
     return [s for s in config.enabled_sources() if s.get("standalone")]
+
+
+async def _catalog_card_posters(cat: str, *, scope: str = catalogmod.AGG_SCOPE,
+                                limit: int = 8, wait: float = 1.2,
+                                deadline: float | None = None) -> list[str]:
+    """Use cached posters first, with one bounded first-page warm on cold start."""
+    started = time.monotonic()
+    with _CATALOG_POSTER_METRICS_LOCK:
+        _CATALOG_POSTER_METRICS["requests"] += 1
+    posters = catalog.cached_page_posters(cat, limit, scope)
+    if posters:
+        with _CATALOG_POSTER_METRICS_LOCK:
+            _CATALOG_POSTER_METRICS["cache_hits"] += 1
+            _CATALOG_POSTER_METRICS["wait_ms_total"] += (time.monotonic()-started)*1000
+        return [inj._poster(p) for p in posters if p]
+    if not catalog.available(cat, scope):
+        return []
+    with _CATALOG_POSTER_METRICS_LOCK:
+        _CATALOG_POSTER_METRICS["warm_attempts"] += 1
+    remaining = max(0.0, deadline - time.monotonic()) if deadline is not None else wait
+    if remaining <= 0:
+        _schedule_catalog_card_warm(cat, scope)
+        return []
+    try:
+        rows = await asyncio.wait_for(catalog.get_page(cat, 1, scope),
+                                      timeout=min(wait, remaining))
+    except asyncio.TimeoutError:
+        with _CATALOG_POSTER_METRICS_LOCK:
+            _CATALOG_POSTER_METRICS["warm_timeout"] += 1
+        _log.debug("catalog card poster warm timeout: cat=%s scope=%s", cat, scope)
+        _schedule_catalog_card_warm(cat, scope)
+        return []
+    except (httpx.HTTPError, OSError, ValueError, TypeError):
+        with _CATALOG_POSTER_METRICS_LOCK:
+            _CATALOG_POSTER_METRICS["warm_failed"] += 1
+        _log.debug("catalog card poster warm failed: cat=%s scope=%s",
+                   cat, scope, exc_info=True)
+        return []
+    out, seen = [], set()
+    for row in rows:
+        poster = str(row.get("poster") or "")
+        if poster and poster not in seen:
+            seen.add(poster)
+            out.append(inj._poster(poster))
+            if len(out) >= limit:
+                break
+    with _CATALOG_POSTER_METRICS_LOCK:
+        _CATALOG_POSTER_METRICS["warm_success"] += 1
+        _CATALOG_POSTER_METRICS["wait_ms_total"] += (time.monotonic()-started)*1000
+    return out
+
+
+_CATALOG_CARD_WARM: set[tuple[str, str]] = set()
+_CATALOG_POSTER_METRICS = {
+    "requests": 0, "cache_hits": 0, "warm_attempts": 0,
+    "warm_success": 0, "warm_timeout": 0, "warm_failed": 0,
+    "wait_ms_total": 0.0,
+}
+_CATALOG_POSTER_METRICS_LOCK = threading.Lock()
+
+
+def _catalog_poster_metrics(reset: bool = False) -> dict:
+    with _CATALOG_POSTER_METRICS_LOCK:
+        data = dict(_CATALOG_POSTER_METRICS)
+        data["avg_wait_ms"] = round(
+            data["wait_ms_total"] / max(1, data["requests"]), 1)
+        if reset:
+            for key in _CATALOG_POSTER_METRICS:
+                _CATALOG_POSTER_METRICS[key] = 0
+        return data
+
+
+def _schedule_catalog_card_warm(cat: str, scope: str) -> None:
+    key = (scope, cat)
+    if key in _CATALOG_CARD_WARM:
+        return
+    _CATALOG_CARD_WARM.add(key)
+    async def warm():
+        try:
+            await catalog.get_page(cat, 1, scope)
+        except Exception:
+            _log.debug("catalog card background warm failed", exc_info=True)
+        finally:
+            _CATALOG_CARD_WARM.discard(key)
+    _managed_task(warm(), name=f"catalog-card-warm:{scope}:{cat}")
 
 
 def standalone_lib_name(src: dict) -> str:
@@ -384,7 +502,7 @@ class _PanUnsupported(Exception):
 # —— 小雅（AList）分类媒体库：按网盘目录建立多张独立库卡片 ——
 def _xlib_on() -> bool:
     try:
-        return bool(config.read("pan_lib_enabled",True)) and features.CATVOD
+        return bool(config.read("pan_lib_enabled",True))
     except Exception:
         _log.debug("_xlib_on failed", exc_info=True)
         return False
@@ -1028,9 +1146,10 @@ async def lifespan(app: FastAPI):
     app.state.ext = httpx.AsyncClient(
         timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
     app.state.stop_hot = asyncio.Event()
-    app.state.hot_task = asyncio.create_task(_hot_worker(app))
+    catalog.set_task_registrar(lambda coro, *, name: _managed_task(coro, name=name))
+    app.state.hot_task = _managed_task(_hot_worker(app), name="hot-worker")
     # 重启后后台预热热门四库首屏（纯 CMS 冠军线），消除冷启动首批片慢/无线路
-    app.state.startup_warm = asyncio.create_task(startup_prewarm_hot())
+    app.state.startup_warm = _managed_task(startup_prewarm_hot(), name="startup-prewarm")
 
     # 网盘转存缓存定时清理（默认保留 6h，每小时检查；配置关闭则不跑）。
     async def _pan_cache_loop():
@@ -1046,7 +1165,7 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             pass
-    app.state.pan_cache_task = asyncio.create_task(_pan_cache_loop())
+    app.state.pan_cache_task = _managed_task(_pan_cache_loop(), name="pan-cache-cleanup")
 
     # 方案B（上游 v0.2.69 chartbind）：persist 模式下从磁盘恢复榜单绑定（线路），
     # 重启后热门片无需重新全网搜源。恢复的绑定只作起播种子，起播仍走竞速。
@@ -1074,13 +1193,13 @@ async def lifespan(app: FastAPI):
             except Exception:
                 _log.debug("_health_flush_loop failed", exc_info=True)
                 pass
-    app.state.health_task = asyncio.create_task(_health_flush_loop())
+    app.state.health_task = _managed_task(_health_flush_loop(), name="source-health-flush")
 
 
     # 后台只读检查 GitHub 更新（仅提示，绝不自动安装）
     app.state.stop_update = asyncio.Event()
-    app.state.update_task = asyncio.create_task(
-        updater.periodic_loop(app.state.stop_update))
+    app.state.update_task = _managed_task(
+        updater.periodic_loop(app.state.stop_update), name="update-check")
 
     # 订阅按各自周期有界刷新（移植上游 beta.3，B8）：单次≤5、并发≤2、
     # 连续失败 3 次暂停；失败保留旧源，不在起播/搜索关键路径执行。
@@ -1142,6 +1261,15 @@ async def lifespan(app: FastAPI):
         except Exception:
             _log.debug("lifespan failed", exc_info=True)
             pass
+        try:
+            catalog.set_task_registrar(None)
+            for _task in list(_BACKGROUND_TASKS):
+                if _task is not asyncio.current_task():
+                    _task.cancel()
+            if _BACKGROUND_TASKS:
+                await asyncio.gather(*list(_BACKGROUND_TASKS), return_exceptions=True)
+        except Exception:
+            _log.debug("catalog task registrar cleanup failed", exc_info=True)
         await t4_media.metadata.close()
         await app.state.up.aclose()
         await app.state.ext.aclose()
@@ -2669,6 +2797,7 @@ async def mediadb_list(request: Request):
         return upstream
     # 当前账号（用于按账号显隐；识别失败按默认开关处理，管理员始终可见）
     viewer = fnusersmod.resolve(request)
+    _card_deadline = time.monotonic() + 2.0
     payload = await _json_from_upstream(upstream)
     dbs = payload.get("data") if payload else None
     vlib_guids = _all_virtual_lib_guids()
@@ -2717,11 +2846,8 @@ async def mediadb_list(request: Request):
                         ps.append(p)
                     if len(ps) >= 8:
                         break
-                # 库列表封面用 /v/api/v1/sys/img/ 前缀：App 端不会解析裸
-                # /online/<b64>.jpg（那是插件内部路径，仅代理服务认识），
-                # 404 后 App 直接留白。sys/img 前缀两端（UDS/外部入口）都可达。
-                ps = ["/v/api/v1/sys/img/" + q[1:]
-                      for q in ps if q.startswith("/online/")]
+                # App/TV 首页卡片使用上游兼容的 /online/<token>.jpg。
+                ps = [q for q in ps if q.startswith("/online/")]
                 inserts.append({
                     "guid": CHART_LIB_GUIDS[cat],
                     "title": chartmod.chart_cat_title(cat),
@@ -2738,10 +2864,7 @@ async def mediadb_list(request: Request):
             for cat, _t, _c in catalogmod.CATALOG_CATEGORIES:
                 if not catalog.available(cat):
                     continue
-                ps = [inj._poster(p) for p in catalog.cached_page_posters(cat, 8)]
-                # 与榜单四库一致：/online/ 前缀 App 端拉不到，改写为 sys/img 前缀
-                ps = ["/v/api/v1/sys/img/" + q[1:]
-                      for q in ps if q.startswith("/online/")]
+                ps = await _catalog_card_posters(cat, limit=8, deadline=_card_deadline)
                 inserts.append({
                     "guid": CATALOG_LIB_GUIDS[cat],
                     "title": catalogmod.catalog_title(cat),
@@ -2750,42 +2873,50 @@ async def mediadb_list(request: Request):
                     "category": catalogmod.catalog_mdb(cat),
                     "view_type": 0, "poster_type": 0, "refresh_disabled": True,
                 })
-        # 2b) 福利独立库：只受 welfare_library_enabled 独立开关控制
-        # （打开开关即收编各源的伦理类目，无需逐源标记）；开关关闭时
-        # 不建路由、不抓取、不显示。海报同样走 sys/img 前缀。
-        if catalogmod._welfare_on() and catalog.available(catalogmod.ADULT_CAT):
-            ps = [inj._poster(p) for p in
-                  catalog.cached_page_posters(catalogmod.ADULT_CAT, 8)]
-            ps = ["/v/api/v1/sys/img/" + q[1:]
-                  for q in ps if q.startswith("/online/")]
-            inserts.append({
-                "guid": CATALOG_LIB_GUIDS[catalogmod.ADULT_CAT],
-                "title": catalogmod.catalog_title(catalogmod.ADULT_CAT),
-                "poster": ps[0] if ps else "",
-                "posters": ps,
-                "category": catalogmod.catalog_mdb(catalogmod.ADULT_CAT),
-                "view_type": 0, "poster_type": 0, "refresh_disabled": True,
-            })
+        # 福利卡库仅在总开关打开时显示，并与普通分类共用同一有界海报预热逻辑。
+        if catalogmod._welfare_on():
+            for _cat, _title, _mdb in catalogmod.visible_categories():
+                if _cat not in catalogmod.WELFARE_CATS or not catalog.available(_cat):
+                    continue
+                ps = await _catalog_card_posters(_cat, limit=8, deadline=_card_deadline)
+                inserts.append({
+                    "guid": CATALOG_LIB_GUIDS[_cat],
+                    "title": _title,
+                    "poster": ps[0] if ps else "",
+                    "posters": ps,
+                    "category": _mdb,
+                    "view_type": 0, "poster_type": 0, "refresh_disabled": True,
+                })
         # 3) 单源独立媒体库（用户在管理页为某个源勾选“作为独立媒体库”）
         for s in standalone_sources_active():
             scope = s["id"]
             if not catalog.standalone_available(scope):
-                continue
+                # 用户显式启用的独立库不能因重启或一次路由探测失败而消失；
+                # 后台重建路由，当前先展示空海报卡片。
+                if catalog.routes_stale() and not catalog._refreshing:
+                    _schedule_routes_refresh()
             ps: list[str] = []
-            # 同样只用缓存海报，不联网；后台预热会逐步填充海报
             try:
-                for cat in list(catalogmod.CATALOG_CATEGORIES):
-                    if catalog.available(cat, scope):
-                        for p in catalog.cached_page_posters(cat, 8, scope):
-                            if p not in ps:
-                                ps.append(p)
-                            if len(ps) >= 8:
-                                break
+                scope_cats = list(catalogmod.CATALOG_CATEGORIES)
+                if catalogmod._welfare_on() and s.get("adult"):
+                    scope_cats.extend((c, catalogmod.catalog_title(c), catalogmod.catalog_mdb(c))
+                                      for c in catalogmod.WELFARE_CATS)
+                for cat, _title, _mdb in scope_cats:
+                    if time.monotonic() >= _card_deadline:
+                        _schedule_catalog_card_warm(cat, scope)
+                        break
+                    if not catalog.available(cat, scope):
+                        continue
+                    for poster in await _catalog_card_posters(cat, scope=scope, limit=8):
+                        if poster not in ps:
+                            ps.append(poster)
+                        if len(ps) >= 8:
+                            break
                     if len(ps) >= 8:
                         break
             except Exception:
-                _log.debug("mediadb_list failed", exc_info=True)
-                pass
+                _log.debug("mediadb_list standalone poster lookup failed: scope=%s",
+                           scope, exc_info=True)
             inserts.append({
                 "guid": standalone_lib_guid(scope),
                 "title": standalone_lib_name(s),
@@ -2828,8 +2959,7 @@ async def mediadb_list(request: Request):
 
         # 6) 红果短剧伪媒体库（开关打开且已载入至少一条条目时展示；缺省关闭）
         if hgdj_enabled() and hgdjmod.total() > 0:
-            ps = ["/v/api/v1/sys/img/" + q[1:]
-                  for q in hgdjmod.cached_posters(8)
+            ps = [q for q in hgdjmod.cached_posters(8)
                   if q.startswith("/online/")]
             inserts.append({
                 "guid": hgdjmod.lib_guid(),
@@ -2918,6 +3048,7 @@ async def mediadb_list(request: Request):
             dbs[0:0] = pinned
         if not isinstance(payload, dict):
             payload = {"code": 0, "msg": "", "data": []}
+        dbs = _dedupe_media_cards(dbs)
         # 官方该接口失败时我们用虚拟库兜底，必须把整体码改为成功，否则 App 直接报错
         if payload.get("code") != 0:
             payload["code"] = 0
@@ -3942,7 +4073,8 @@ async def item_list(request: Request):
                 "dir": "", "total": 0, "list": [], "jump_list": None}})
         # 路由表过期则后台重建（不阻塞）
         if catalog.routes_stale() and not catalog._refreshing:
-            asyncio.create_task(catalog.refresh_routes(config.enabled_sources()))
+            _managed_task(catalog.refresh_routes(config.enabled_sources()),
+                          name=f"catalog-refresh:{ccat}")
         page = int(body.get("page") or body.get("p") or body.get("page_index")
                    or body.get("pn") or 1)
         page = max(1, page)
@@ -3982,7 +4114,7 @@ async def item_list(request: Request):
     interval = max(1800, int(config.read("hot_refresh_interval",6 * 3600)))
     try:
         if chart_cache.stale(interval) and not chart_cache._refreshing:
-            asyncio.create_task(chart_cache.refresh(force=True))
+            _managed_task(chart_cache.refresh(force=True), name=f"charts-refresh:{cat}")
     except Exception:
         _log.debug("item_list failed", exc_info=True)
         pass
@@ -4068,7 +4200,13 @@ async def _load_t4_detail(guid: str, request: Request):
         if meta:
             guid = meta["online_guid"]
     try:
-        await t4_service.ensure_detail(ext_client(request), guid)
+        await asyncio.wait_for(
+            t4_service.ensure_detail(ext_client(request), guid),
+            timeout=_T4_DETAIL_WAIT)
+    except asyncio.TimeoutError:
+        _log.warning("T4 detail timeout guid=%s", guid)
+        return JSONResponse({"code": -1, "msg": "T4详情加载超时，请重试或更换线路", "data": None},
+                            status_code=504)
     except t4.T4Error as exc:
         _log.warning("T4 detail %s: %s", guid, exc)
         return JSONResponse({"code": -1, "msg": str(exc), "data": None},
@@ -4430,6 +4568,38 @@ async def item_detail(guid: str, request: Request):
     if not _brief_viewable(request, brief):
         return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
     data = inj.detail_item(brief)
+    # TMDB is detail-only and bounded; search/catalog/playback never wait on it.
+    if config.read("tmdb_enabled", False):
+        try:
+            import os as _os
+            import tmdb_client as _tmdb
+            key = _os.environ.get("TMDB_API_KEY", "")
+            if key:
+                kind = "tv" if inj.is_tv(brief) else "movie"
+                year = brief.get("year") or ""
+                meta = await asyncio.wait_for(
+                    _tmdb.lookup(brief.get("title", ""), year, kind=kind,
+                                 api_key=key,
+                                 language=config.read("tmdb_language", "zh-CN"),
+                                 timeout=float(config.read("tmdb_timeout", 5)),
+                                 api_base=config.read("tmdb_api_base", "https://api.themoviedb.org/3")),
+                    timeout=0.8)
+                if meta:
+                    if not data.get("original_title"):
+                        data["original_title"] = meta.get("original_title", "")
+                    if not data.get("overview"):
+                        data["overview"] = meta.get("overview", "")
+                    if not data.get("backdrops") and meta.get("backdrop"):
+                        data["backdrops"] = inj._poster(meta["backdrop"])
+                    if not data.get("release_date"):
+                        data["release_date"] = meta.get("release_date", "")
+                    data["tmdb_id"] = meta.get("tmdb_id")
+                    data["original_language"] = meta.get("original_language", "")
+                    data["vote_count"] = meta.get("vote_count", 0)
+                    if not data.get("vote_average") or data.get("vote_average") == "0":
+                        data["vote_average"] = str(meta.get("vote_average") or "0")
+        except (asyncio.TimeoutError, ValueError, TypeError, OSError):
+            _log.debug("tmdb detail enrichment skipped", exc_info=True)
     _apply_marks(data)
     _attach_related(data, brief)
     return JSONResponse({"code": 0, "msg": "",
@@ -5488,6 +5658,9 @@ def _line_choices(target: dict, *, include_pansou: bool = True) -> list[dict]:
     return out
 
 
+from line_identity import bitrate as _stable_line_bitrate, line_of_bitrate as _stable_line_of_bitrate
+
+
 def _line_bitrate(line: str, lines: list[str]) -> int:
     """线路 -> 播放器「清晰度」菜单里的整数值。
 
@@ -5497,20 +5670,19 @@ def _line_bitrate(line: str, lines: list[str]) -> int:
     就永远放不出画面（用户报的正是这个现象）。改按名字哈希后，同一线路在
     任何菜单顺序下都是同一个整数。
     """
-    return 90_000_000 + (zlib.crc32((line or "").encode("utf-8")) % 1_000_000)
+    return _stable_line_bitrate(line)
 
 
 def _line_of_bitrate(br, lines: list[str]) -> str | None:
+    hit = _stable_line_of_bitrate(br, lines)
+    if hit is not None:
+        return hit
     try:
         b = int(br or 0)
     except (TypeError, ValueError):
         return None
     if not 90_000_000 <= b < 91_000_000:
         return None
-    # 先按稳定哈希精确命中（新编码）
-    for line in lines:
-        if _line_bitrate(line, lines) == b:
-            return line
     # 兼容旧编码（下标 x 10001）：只用于升级前播过的档位，以及外部直接传
     # 下标编码的调用方；本端新生成的 URL 永远走上面的精确分支。
     idx = (b - 90_000_000) // 10001
@@ -5756,6 +5928,13 @@ async def media_range(mg: str, request: Request):
     else:
         q = urllib.parse.urlencode({"line": target["line"], "index": target["index"]})
     if is_hls:
+        # iOS 原生 AVPlayer 需要直接获得最终主播放列表；TV/安卓仍保留
+        # preset 占位与线路自修复入口，避免改变其既有起播协议。
+        if _client_of(request).kind == clientmod.IOS:
+            main_scope = dict(request.scope)
+            main_scope["path"] = f"{ONLINE_PREFIX}/{mg}/main.m3u8"
+            main_scope["query_string"] = q.encode()
+            return await hls_main(mg, Request(main_scope))
         return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/preset.m3u8?{q}",
                                 status_code=302)
     return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
@@ -5994,7 +6173,7 @@ async def direct_proxy(mg: str, request: Request):
     # >>> PRIVATE:CATVOD
     # 小雅网盘文件在 115/阿里等网盘 CDN，NAS 服务器侧到该 CDN 不通；且为大文件，
     # 直接让客户端 302 到小雅签名 /d 链（客户端再跟随到网盘 CDN 直连播放）。
-    if features.CATVOD and target.get("catvod_direct"):
+    if target.get("catvod_direct"):
         # 兜底再验死活（小雅对不存在文件回 200+JSON 假活），坏则换线
         if not (await _probe_target(target, request)):
             _mark_line_bad(target)
@@ -6828,77 +7007,11 @@ async def _resolve_drpy(picked: dict) -> bool:
 
 def _safe_index(picked: dict) -> int:
     """集序号容错取值：缺失/非数字/负数一律按 0 集处理，绝不抛错。
-    集序号读取统一走这里。（原在去 guard 时误删的 guard 块内；海阔
-    spider _resolve_spider 独立使用，故为独立函数。）"""
+    集序号读取统一走这里，保持缺失或非法集序号的兼容处理。"""
     try:
         return max(0, int(picked.get("index", 0) or 0))
     except (TypeError, ValueError):
         return 0
-
-
-# >>> PRIVATE:SPIDER
-def _spider_source_for(picked: dict) -> dict | None:
-    pf = picked.get("play_from", "")
-    sid = pf.split(":", 1)[0] if ":" in pf else pf
-    for s in config.all_sources():
-        if s.get("spider_src") and s.get("id") == sid:
-            return s
-    return None
-
-
-async def _resolve_spider(picked: dict) -> bool:
-    """普通 csp_ 爬虫（订阅导入）：按各自 jar 经 redroid 解析真实播放地址。"""
-    import spiders
-    source = _spider_source_for(picked)
-    conf = providers._spider_conf(source) if source else None
-    if not conf:
-        return False
-    vod_id = picked.get("url", "")
-    if not vod_id:
-        return False
-    try:
-        want_line = (picked.get("play_from", "").split(":", 1)[1]
-                     if ":" in picked.get("play_from", "") else "")
-        if want_line and "playUrl=" not in vod_id and not vod_id.startswith("{"):
-            _log.warning(
-                "_resolve_spider: want_line=%r but vod_id=%r has no "
-                "episode shape; resolving via detail", want_line, vod_id)
-        direct_ep = bool(want_line) and (
-            "playUrl=" in vod_id or vod_id.startswith("{"))
-        if direct_ep:
-            chosen = {"line": want_line, "id": vod_id}
-        else:
-            det = await asyncio.to_thread(spiders.detail, conf, vod_id)
-            episodes = spiders.parse_episodes(det)
-            if not episodes:
-                return False
-            idx = _safe_index(picked)
-            same_line = [e for e in episodes if e["line"] == want_line] if want_line else []
-            if idx < len(same_line):
-                chosen = same_line[idx]
-            else:
-                chosen = episodes[min(idx, len(episodes) - 1)]
-        res = await asyncio.to_thread(spiders.play, conf, chosen["line"], chosen["id"])
-        if isinstance(res, str) and res.strip().startswith("{"):
-            try:
-                res = json.loads(res)
-            except ValueError:
-                _log.debug("_resolve_spider failed", exc_info=True)
-                res = {"url": res}
-        url = (res or {}).get("url", "") if isinstance(res, dict) else str(res or "")
-        url = spiders._normalize_url(url)
-        if not url:
-            return False
-        picked["url"] = url
-        picked["spider_src"] = False
-        hdrs = res.get("headers") if isinstance(res, dict) else None
-        picked["headers"] = hdrs or {"User-Agent": "Mozilla/5.0"}
-        picked["m3u8"] = url.split("?", 1)[0].lower().split(".")[-1] in ("m3u8", "m3u")
-        return True
-    except Exception:
-        _log.debug("_resolve_spider failed", exc_info=True)
-        return False
-# <<< PRIVATE:SPIDER
 
 
 # ===== 播放线路健康探测与自动换线 =====
@@ -7069,7 +7182,8 @@ def _schedule_browse_probe(rows, request) -> None:
         ogs = _browse_probe_guids(rows)
         if not ogs:
             return
-        task = asyncio.create_task(_browse_probe_worker(ogs, request))
+        task = _managed_task(_browse_probe_worker(ogs, request),
+                             name=f"browse-probe:{len(ogs)}")
         _BROWSE_PROBE_TASKS.add(task)
         task.add_done_callback(_browse_probe_task_done)
     except Exception:

@@ -18,6 +18,7 @@ from t4_browser import LIB_TITLE as T4_LIB_TITLE
 import admin_auth as admin_authmod
 import asyncio
 import base64
+import os
 from catalog import catalog
 import catalog as catalogmod
 import config as cfgmod
@@ -141,7 +142,7 @@ async def ext_titles_cache_clear(request: Request):
 
 def _cache_sizes() -> dict:
     """各类可清缓存的体积/条数（管理页缓存管理卡）。"""
-    from app import _search_cache, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import _AGG_BYTES_TOTAL, _search_cache, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     out = {}
     try:
         p = store._state
@@ -162,10 +163,21 @@ def _cache_sizes() -> dict:
                           "pages": len(catalog._page_cache),
                           "label": "海量库分类/分页缓存"}
     try:
-        out["search"] = {"entries": len(_search_cache), "label": "搜索结果内存缓存"}
+        out["search"] = {"entries": len(_search_cache), "bytes": _AGG_BYTES_TOTAL,
+                         "label": "搜索结果内存缓存"}
     except Exception:
         _log.debug("_cache_sizes failed", exc_info=True)
-        out["search"] = {"entries": 0, "label": "搜索结果内存缓存"}
+        out["search"] = {"entries": 0, "bytes": 0, "label": "搜索结果内存缓存"}
+    try:
+        import pansou as _pansou
+        out["pansou"] = {"search_entries": len(_pansou._PANSOU_SEARCH_CACHE),
+                          "states": len(_pansou._PANSOU_STATE),
+                          "snapshots": len(_pansou._PANSOU_MAN_SNAP),
+                          "label": "PanSou运行缓存"}
+    except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
+        out["pansou"] = {"search_entries": 0, "states": 0,
+                          "snapshots": 0, "label": "PanSou运行缓存"}
     try:
         out["health"] = {"entries": len(sourcehealth.snapshot())
                          if hasattr(sourcehealth, "snapshot") else 0,
@@ -338,12 +350,19 @@ async def ext_admin_token_rotate(request: Request):
             "data": {"new_token": new_token, "token": info}}
 
 
+@admin_router.get("/v/api/ext/config/export")
+async def ext_config_export(request: Request):
+    from app import config  # noqa: E402
+    from config_export import export_config
+    return {"code": 0, "msg": "", "data": export_config(config)}
+
+
 # ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
 @admin_router.get("/v/api/ext/status")
 async def ext_status(request: Request):
-    from app import BUILD_LABEL, app, chart_cache, config, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import BUILD_LABEL, _background_task_history, _background_task_snapshot, _catalog_poster_metrics, app, chart_cache, config, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     overrides = config.read("source_priority") or {}
     priorities = {s["id"]: providers.source_priority(s, overrides)
                   for s in config.all_sources()}
@@ -354,7 +373,17 @@ async def ext_status(request: Request):
             "cached_titles": len(store._titles),
             "hot": hot_cache.status(),
             "charts": chart_cache.status(),
-            "catalog": catalog.status()}
+            "catalog": catalog.status(),
+            "background_tasks": _background_task_snapshot(
+                getattr(app.state, "background_tasks", set())),
+            "background_task_history": _background_task_history(),
+            "search_metrics": providers.search_metrics_snapshot(),
+            "catalog_poster_metrics": _catalog_poster_metrics(),
+            "pansou_metrics": __import__("pansou")._pansou_metrics_snapshot(),
+            "tmdb": {"enabled": bool(config.read("tmdb_enabled", False)),
+                     "api_key_configured": bool(os.environ.get("TMDB_API_KEY")),
+                     "language": config.read("tmdb_language", "zh-CN"),
+                     "timeout": config.read("tmdb_timeout", 5)}}
 
 
 @admin_router.get("/v/api/ext/diag/resume")
@@ -566,21 +595,15 @@ def _virtual_lib_list() -> list[dict]:
                     "title": title, "kind": "chart",
                     "group": "hot", "enabled": charts_enabled(),
                     "count": len(chart_cache.items(cat))})
-    for cat, title, _c in catalogmod.CATALOG_CATEGORIES:
+    for cat, title, _c in catalogmod.visible_categories():
+        is_welfare = cat in catalogmod.WELFARE_CATS
+        available = catalog.available(cat)
         out.append({"guid": CATALOG_LIB_GUIDS[cat],
                     "key": vlibsmod.make_key(vlibsmod.K_CATALOG, cat),
                     "title": title, "kind": "catalog",
-                    "group": "catalog", "enabled": catalog_enabled() and catalog.available(cat),
-                    "count": catalog.total(cat) if catalog.available(cat) else 0})
-    # 扩展资源独立库（命名与开关语义不动，只在这里多一行展示）
-    if catalogmod._welfare_on():
-        out.append({"guid": CATALOG_LIB_GUIDS[catalogmod.ADULT_CAT],
-                    "key": vlibsmod.make_key(vlibsmod.K_CATALOG, catalogmod.ADULT_CAT),
-                    "title": catalogmod.catalog_title(catalogmod.ADULT_CAT),
-                    "kind": "catalog", "group": "catalog",
-                    "enabled": catalog.available(catalogmod.ADULT_CAT),
-                    "count": catalog.total(catalogmod.ADULT_CAT)
-                    if catalog.available(catalogmod.ADULT_CAT) else 0})
+                    "group": "catalog",
+                    "enabled": available and (catalogmod._welfare_on() if is_welfare else catalog_enabled()),
+                    "count": catalog.total(cat) if available else 0})
     for s in standalone_sources_active():
         out.append({"guid": standalone_lib_guid(s["id"]),
                     "key": vlibsmod.make_key(vlibsmod.K_STANDALONE, s["id"]),
@@ -754,6 +777,43 @@ async def ext_online(q: str = "", limit: int = 200):
     return {"code": 0, "data": items[:limit]}
 
 
+@admin_router.post("/v/api/ext/config/restore-preview")
+async def ext_config_restore_preview(request: Request):
+    from app import config  # noqa: E402
+    from config_export import preview_restore
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"code": 400, "msg": "无效JSON"}, status_code=400)
+    return {"code": 0, "msg": "", "data": preview_restore(config, body)}
+
+
+@admin_router.post("/v/api/ext/config/restore")
+async def ext_config_restore(request: Request):
+    from app import (_AGG_CACHE, _search_cache, _schedule_routes_refresh,
+                     app, chart_cache, catalog, config)  # noqa: E402
+    from config_export import apply_restore
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"code": 400, "msg": "无效JSON"}, status_code=400)
+    data = apply_restore(config, body.get("document") or body,
+                         confirm=body.get("confirm") is True)
+    if data.get("ok") and data.get("applied"):
+        _search_cache.clear()
+        _AGG_CACHE.clear()
+        try:
+            chart_cache.reset()
+            catalog.reset()
+        except Exception:
+            _log.debug("config restore cache reset failed", exc_info=True)
+        _schedule_routes_refresh()
+        from config_health import check as check_config_health
+        data["cache_reset"] = True
+        data["health"] = check_config_health(config, catalog, app)
+    return {"code": 0 if data.get("ok") else 400, "msg": "", "data": data}
+
+
 @admin_router.post("/v/api/ext/config/reset")
 async def ext_reset_config():
     """一键重置：清空所有设置与资源站列表（内置源可用「恢复内置」找回）。"""
@@ -852,8 +912,7 @@ async def ext_set_config(request: Request):
     if "t4_library_enabled" in patch:
         patch["t4_library_enabled"] = bool(patch["t4_library_enabled"])
     if "welfare_library_enabled" in patch:
-        patch["welfare_library_enabled"] = bool(
-            patch["welfare_library_enabled"])
+        patch["welfare_library_enabled"] = bool(patch["welfare_library_enabled"])
     if "prefer_quality_source" in patch:
         patch["prefer_quality_source"] = bool(patch["prefer_quality_source"])
     if "line_fastest" in patch:
@@ -1244,6 +1303,37 @@ async def ext_source_refresh(request: Request):
         "cleared": cleared,
         "elapsed_ms": int((time.perf_counter() - t0) * 1000),
     }}
+
+
+@admin_router.post("/v/api/ext/source/diagnose")
+async def ext_source_diagnose(request: Request):
+    from app import config  # noqa: E402
+    from source_diagnostics import diagnose_cms
+    body = await request.json()
+    sid = body.get("id")
+    src = next((s for s in config.all_sources() if s.get("id") == sid), None)
+    if src is None:
+        src = {"id": sid or "custom", "name": body.get("name") or "custom",
+               "api": body.get("api") or ""}
+    if not src.get("api"):
+        return JSONResponse({"code": 400, "msg": "缺少 api"}, status_code=400)
+    data = await diagnose_cms(src, str(body.get("keyword") or "庆余年")[:80])
+    return {"code": 0, "msg": "", "data": data}
+
+
+@admin_router.post("/v/api/ext/t4/diagnose")
+async def ext_t4_diagnose(request: Request):
+    from app import ext_client, t4_service, config  # noqa: E402
+    from t4_diagnostics import diagnose
+    body = await request.json()
+    sid = str(body.get("id") or "")
+    source = next((s for s in config.all_sources()
+                   if s.get("id") == sid and s.get("kind") == "t4"), None)
+    if source is None:
+        return JSONResponse({"code": 404, "msg": "T4源不存在"}, status_code=404)
+    data = await diagnose(t4_service, ext_client(request), source,
+                          str(body.get("guid") or ""))
+    return {"code": 0, "msg": "", "data": data}
 
 
 @admin_router.post("/v/api/ext/source/test")
@@ -1695,9 +1785,7 @@ async def ext_import_subscription(request: Request):
     groups = tvboxmod.classify_subscription(raw_sites, _spider, _base)
     t4_report = config.import_t4_sources(groups.get("t4", []))
     cms_cands = groups["cms"]
-    csp_items = groups.get("csp", [])
     drpy_items = groups.get("drpy", [])
-    jar_url_global = groups.get("jar_url", "")
     skipped = list(groups["skipped"])
 
     # ---------- 苹果 CMS：并发探测，通过即加入并启用 ----------
@@ -1761,38 +1849,8 @@ async def ext_import_subscription(request: Request):
         _log.debug("ext_import_subscription failed", exc_info=True)
         pass
 
-    # ---------- 普通 csp_ 爬虫 与 远程 drpyS（仅完整私有构建） ----------
-    csp_report = None
+    # ---------- 远程 drpyS（CSP Jar 爬虫已移除） ----------
     drpy_report = None
-    # >>> PRIVATE:SPIDER
-    if csp_items:
-        import spiders as _spm
-        # 先尝试下载该订阅的 spider jar（失败则源登记为缺 jar，可手动补传）
-        jar_status = None
-        jar_urls = sorted({(c.get("jar") or jar_url_global) for c in csp_items
-                           if c.get("jar") or jar_url_global})
-        for ju in jar_urls:
-            if ju:
-                jar_status = await asyncio.to_thread(_spm.download_jar, ju)
-        try:
-            res = await asyncio.to_thread(_spm.import_sites, csp_items, "smart")
-            csp_report = {
-                "added": res["added"], "updated": res["updated"],
-                "items": res["items"],
-                "jar": {"url": jar_urls[0] if jar_urls else "",
-                        **(jar_status or {"ok": False, "error": "订阅未声明 spider jar"})},
-            }
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("ext_import_subscription failed", exc_info=True)
-            csp_report = {"error": f"普通爬虫写入失败：{type(exc).__name__}"}
-        try:
-            config.load()
-        except Exception:
-            _log.debug("ext_import_subscription failed", exc_info=True)
-            pass
-    elif csp_items:
-        csp_report = {"skipped_build": True}
-    # <<< PRIVATE:SPIDER
     # >>> PRIVATE:DRPY
     if features.DRPY and drpy_items:
         import drpy as _drpym
@@ -1813,7 +1871,6 @@ async def ext_import_subscription(request: Request):
     # <<< PRIVATE:DRPY
 
     if cms_added or t4_report["added"] \
-            or (csp_report and csp_report.get("added")) \
             or (drpy_report and drpy_report.get("added")):
         _search_cache.clear(); _AGG_CACHE.clear()
         _schedule_routes_refresh()
@@ -1838,7 +1895,6 @@ async def ext_import_subscription(request: Request):
             "added_names": cms_added,
             "duplicate": cms_dup,
         },
-        "csp": csp_report,
         "drpy": drpy_report,
         "skipped": len(skipped),
         "skipped_detail": skipped[:60],
@@ -1947,173 +2003,56 @@ async def admin_page():
 
 
 # >>> PRIVATE:CATVOD
-# ---------------- 小雅网盘（catvod JVM 爬虫，仅完整构建） ----------------
-if features.CATVOD:
-    import catvod as _catvod
+# ---------------- 小雅网盘 HTTP 配置与 xlib 播放 ----------------
+import catvod as _catvod
 
-    def _catvod_gate():
-        if not _catvod.available():
-            return JSONResponse(
-                {"code": 503, "msg": "小雅运行时不可用（缺 JDK/runner）", "data": None},
-                status_code=503)
-        return None
+def _catvod_gate():
+    return None
+@admin_router.get("/v/api/ext/catvod/credentials")
+async def catvod_credentials_get():
+    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    return JSONResponse({"code": 0, "msg": "",
+                         "data": _catvod.private_status()})
 
-    @admin_router.get("/v/api/ext/catvod/credentials")
-    async def catvod_credentials_get():
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        return JSONResponse({"code": 0, "msg": "",
-                             "data": _catvod.private_status()})
+@admin_router.post("/v/api/ext/catvod/credentials")
+async def catvod_credentials_save(request: Request):
+    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    body = await request.json()
+    try:
+        st = await asyncio.to_thread(
+            _catvod.save_credentials,
+            body.get("server"), body.get("username"), body.get("password"))
+        return JSONResponse({"code": 0, "msg": "已保存并生效", "data": st})
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("catvod_credentials_save failed", exc_info=True)
+        return JSONResponse({"code": 500, "msg": str(exc)[:200],
+                             "data": None}, status_code=500)
 
-    @admin_router.post("/v/api/ext/catvod/credentials")
-    async def catvod_credentials_save(request: Request):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        body = await request.json()
-        try:
-            st = await asyncio.to_thread(
-                _catvod.save_credentials,
-                body.get("server"), body.get("username"), body.get("password"))
-            return JSONResponse({"code": 0, "msg": "已保存并生效", "data": st})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_credentials_save failed", exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200],
-                                 "data": None}, status_code=500)
-
-    @admin_router.get("/v/api/ext/catvod/home")
-    async def catvod_home():
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            tok = await _catvod.xiaoya_token()
-            home = await asyncio.to_thread(_catvod.home, True, tok)
-            data = {"classes": home.get("class", []),
-                    "filters": home.get("filters", {})}
-            return JSONResponse({"code": 0, "msg": "", "data": data})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_home failed", exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
-
-    @admin_router.get("/v/api/ext/catvod/category")
-    async def catvod_category(tid: str, pg: int = 1, f: str = ""):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            tok = await _catvod.xiaoya_token()
-            extend = {}
-            if f:
-                import urllib.parse as _up
-                extend = dict(_up.parse_qsl(f))
-            res = await asyncio.to_thread(_catvod.category, tid, pg, extend, tok)
-            return JSONResponse({"code": 0, "msg": "", "data": res})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_category failed: tid=%s", tid, exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
-
-    @admin_router.get("/v/api/ext/catvod/detail")
-    async def catvod_detail(vid: str):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            tok = await _catvod.xiaoya_token()
-            det = await asyncio.to_thread(_catvod.detail, vid, tok)
-            eps = _catvod.parse_episodes(det)
-            data = {"vod": det, "episodes": eps}
-            return JSONResponse({"code": 0, "msg": "", "data": data})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_detail failed: vid=%s", vid, exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
-
-    @admin_router.get("/v/api/ext/catvod/search")
-    async def catvod_search(q: str):
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            tok = await _catvod.xiaoya_token()
-            lst = await asyncio.to_thread(_catvod.search, q, tok)
-            return JSONResponse({"code": 0, "msg": "", "data": {"list": lst}})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_search failed", exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
-
-    @admin_router.get("/v/api/ext/catvod/play")
-    async def catvod_play(vid: str, flag: str = "", resolve: int = 1):
-        """返回小雅签名播放地址。resolve=1（默认）时服务端跟随一次 302，
-        给出网盘 CDN 最终地址；否则给小雅 /d 链（由客户端自行跟随）。"""
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            res = await _catvod.resolve_play(vid, flag)
-            url = res.get("url", "")
-            headers = res.get("headers", {})
-            if resolve and url:
-                try:
-                    async with httpx.AsyncClient(trust_env=False,
-                                                 follow_redirects=True,
-                                                 timeout=20) as _c:
-                        rr = await _c.head(url, headers=headers)
-                        if str(rr.url) != url:
-                            url = str(rr.url)
-                except Exception:
-                    _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
-                    pass
-            return JSONResponse({"code": 0, "msg": "",
-                                 "data": {"url": url, "headers": headers}})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_play failed: vid=%s", vid, exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
-
-    @admin_router.get("/v/ext/catvod/redirect")
-    async def catvod_redirect(vid: str, flag: str = ""):
-        """播放器直接用：302 到小雅签名 /d 链（携带所需 UA）。"""
-        from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        g = _catvod_gate()
-        if g:
-            return g
-        try:
-            res = await _catvod.resolve_play(vid, flag)
-            url = res.get("url", "")
-            if not url:
-                return JSONResponse({"code": 404, "msg": "无播放地址"}, status_code=404)
-            return RedirectResponse(url, status_code=302,
-                                    headers={"Cache-Control": "no-store"})
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("catvod_redirect failed: vid=%s", vid, exc_info=True)
-            return JSONResponse({"code": 500, "msg": str(exc)[:200]}, status_code=500)
-
-    @admin_router.get("/v/ext/xlib/play")
-    async def xlib_play(g: str, i: int = 0):
-        """小雅分类库播放：用 AList /api/fs/get 取最终公网 CDN 直链，302 客户端直连。
-        NAS 到该 CDN 不通，故服务端不代流，只做签名与跳转。"""
-        from app import _xlib_on, app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        gate_r = _catvod_gate()
-        if gate_r:
-            return gate_r
-        if not _xlib_on():
-            return JSONResponse({"code": 403, "msg": "小雅库未启用"}, status_code=403)
-        import xlib as _xl
-        found = _xl.library.by_guid(g)
-        if not found:
-            return JSONResponse({"code": 404, "msg": "影片不在索引"}, status_code=404)
-        files = await _xl.library.show_files(found["show"])
-        if not files:
-            return JSONResponse({"code": 404, "msg": "无视频文件"}, status_code=404)
-        i = max(0, min(i, len(files) - 1))
-        try:
-            url = await _xl.library.signed_raw(files[i])
-        except Exception as exc:  # noqa: BLE001
-            _log.debug("xlib_play failed", exc_info=True)
-            return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
-        return RedirectResponse(url, status_code=302,
-                                headers={"Cache-Control": "no-store"})
+@admin_router.get("/v/ext/xlib/play")
+async def xlib_play(g: str, i: int = 0):
+    """小雅分类库播放：用 AList /api/fs/get 取最终公网 CDN 直链，302 客户端直连。
+    NAS 到该 CDN 不通，故服务端不代流，只做签名与跳转。"""
+    from app import _xlib_on, app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    gate_r = _catvod_gate()
+    if gate_r:
+        return gate_r
+    if not _xlib_on():
+        return JSONResponse({"code": 403, "msg": "小雅库未启用"}, status_code=403)
+    import xlib as _xl
+    found = _xl.library.by_guid(g)
+    if not found:
+        return JSONResponse({"code": 404, "msg": "影片不在索引"}, status_code=404)
+    files = await _xl.library.show_files(found["show"])
+    if not files:
+        return JSONResponse({"code": 404, "msg": "无视频文件"}, status_code=404)
+    i = max(0, min(i, len(files) - 1))
+    try:
+        url = await _xl.library.signed_raw(files[i])
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("xlib_play failed", exc_info=True)
+        return JSONResponse({"code": 502, "msg": str(exc)[:200]}, status_code=502)
+    return RedirectResponse(url, status_code=302,
+                            headers={"Cache-Control": "no-store"})
 # <<< PRIVATE:CATVOD
 
 # >>> PRIVATE:DRPY
@@ -2157,7 +2096,7 @@ if features.DRPY:
             site = providers._drpy_site(src)
             home = await asyncio.to_thread(_drpy.home, site)
             return JSONResponse({"code": 0, "msg": "", "data": {
-                "classes": home.get("class", []), "filters": home.get("filters", {})}})
+                "classes": catalogmod.filter_category_list(home.get("class", [])), "filters": home.get("filters", {})}})
         except Exception as exc:  # noqa: BLE001
             _log.debug("drpy_home failed: sid=%s", sid, exc_info=True)
             return JSONResponse({"code": 500, "msg": str(exc)[:200], "data": None})
@@ -2360,143 +2299,6 @@ async def _json_body(request: Request) -> dict:
         return {}
 
 
-# >>> PRIVATE:SPIDER
-import spiders as _spider
-
-@admin_router.get("/v/api/ext/spider/status")
-async def spider_status():
-    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    return JSONResponse({"code": 0, "msg": "",
-                         "data": await asyncio.to_thread(_spider.status)})
-
-@admin_router.post("/v/api/ext/spider/toggle")
-async def spider_toggle(request: Request):
-    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    key, on = str(body.get("key", "")), bool(body.get("enabled"))
-    if not _spider.site(key):
-        return JSONResponse({"code": 404, "msg": "未知爬虫源"}, status_code=404)
-    # 启用前要求 jar 就绪
-    if on and key in _spider.jar_missing_keys():
-        return JSONResponse(
-            {"code": 409, "msg": "该源的爬虫 jar 尚未就绪，请先补传 jar 或等待下载"},
-            status_code=409)
-    _spider.set_enabled(key, on)
-    config.load()
-    return JSONResponse({"code": 0, "msg": "", "data": {"key": key, "enabled": on}})
-
-@admin_router.post("/v/api/ext/spider/remove")
-async def spider_remove(request: Request):
-    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    key = str(body.get("key", ""))
-    if not key or not await asyncio.to_thread(_spider.remove, key):
-        return JSONResponse({"code": 404, "msg": "未知爬虫源"}, status_code=404)
-    config.load()
-    return JSONResponse({"code": 0, "msg": "", "data": {"key": key}})
-
-@admin_router.post("/v/api/ext/spider/jar")
-async def spider_jar_upload(request: Request):
-    """为某个订阅 jar URL 手动补传爬虫 jar（源站下载失败时）。
-
-    body: {"jar_url": "...", "name":"x.jar", "data_b64":"<base64>"}
-    保存后联动启用引用该 jar 的非风险源，并立即尝试下发到 redroid。
-    """
-    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    import base64
-    body = await _json_body(request)
-    jar_url = str(body.get("jar_url", "")).strip()
-    if not jar_url:
-        return JSONResponse({"code": 400, "msg": "缺少 jar_url"}, status_code=400)
-    b64 = (body.get("data_b64") or "").strip()
-    if "," in b64 and b64.startswith("data:"):
-        b64 = b64.split(",", 1)[1]
-    if not b64:
-        return JSONResponse({"code": 400, "msg": "缺少 data_b64"}, status_code=400)
-    try:
-        raw = base64.b64decode(b64, validate=False)
-    except Exception as exc:  # noqa: BLE001
-        _log.debug("spider_jar_upload failed", exc_info=True)
-        return JSONResponse({"code": 400, "msg": f"base64 解码失败: {exc}"},
-                            status_code=400)
-    res = await asyncio.to_thread(_spider.upload_jar, jar_url, raw)
-    if not res.get("ok"):
-        return JSONResponse({"code": 400, "msg": res.get("error", "保存失败")},
-                            status_code=400)
-    config.load()
-    return JSONResponse({"code": 0, "msg": "", "data": res})
-
-@admin_router.post("/v/api/ext/spider/jar-retry")
-async def spider_jar_retry(request: Request):
-    """重新尝试自动下载某个 jar（源站恢复后），成功则联动启用非风险源。"""
-    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    jar_url = str(body.get("jar_url", "")).strip()
-    if not jar_url:
-        return JSONResponse({"code": 400, "msg": "缺少 jar_url"}, status_code=400)
-    res = await asyncio.to_thread(_spider.download_jar, jar_url)
-    if not res.get("ok"):
-        return JSONResponse({"code": 502, "msg": res.get("error", "下载失败")},
-                            status_code=502)
-    # 联动启用此前缺 jar 的非风险源
-    sites = _spider.load_sites()
-    changed = []
-    for k, s in sites.items():
-        if s.get("jar_url") == jar_url and not s.get("enabled") and not s.get("risk"):
-            _spider.set_enabled(k, True)
-            changed.append(k)
-    config.load()
-    return JSONResponse({"code": 0, "msg": "",
-                         "data": {"download": res, "auto_enabled": changed}})
-
-@admin_router.post("/v/api/ext/spider/probe")
-async def spider_probe(request: Request):
-    """单源体检：搜索→详情→(可选)取首集播放地址。body:{key,keyword,do_play}"""
-    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    key = str(body.get("key", "")).strip()
-    if not _spider.site(key):
-        return JSONResponse({"code": 404, "msg": "未知爬虫源"}, status_code=404)
-    kw = str(body.get("keyword", "") or "庆余年")[:20]
-    do_play = bool(body.get("do_play", False))
-    # 试播可能触发个别源 WebView 嗅探而拖长，整体给宽超时
-    data = await asyncio.wait_for(
-        asyncio.to_thread(_spider.probe, key, kw, do_play), timeout=150)
-    return JSONResponse({"code": 0, "msg": "", "data": data})
-
-@admin_router.post("/v/api/ext/spider/scan")
-async def spider_scan_start(request: Request):
-    """启动全源批量体检（后台并发）。body:{keyword,do_play,only_enabled}"""
-    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    kw = str(body.get("keyword", "") or "庆余年")[:20]
-    do_play = bool(body.get("do_play", False))
-    only_enabled = bool(body.get("only_enabled", True))
-    res = _spider.start_scan(keyword=kw, do_play=do_play,
-                             only_enabled=only_enabled)
-    if not res.get("ok"):
-        return JSONResponse({"code": 409, "msg": res.get("error", "启动失败")},
-                            status_code=409)
-    return JSONResponse({"code": 0, "msg": "", "data": res})
-
-@admin_router.get("/v/api/ext/spider/scan")
-async def spider_scan_status():
-    from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    return JSONResponse({"code": 0, "msg": "",
-                         "data": await asyncio.to_thread(_spider.scan_status)})
-
-@admin_router.post("/v/api/ext/spider/remove-many")
-async def spider_remove_many(request: Request):
-    """批量删除源。body:{keys:[...]}"""
-    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    body = await _json_body(request)
-    keys = body.get("keys") or []
-    if not isinstance(keys, list):
-        return JSONResponse({"code": 400, "msg": "keys 必须是数组"}, status_code=400)
-    res = await asyncio.to_thread(_spider.remove_many, keys)
-    config.load()
-    return JSONResponse({"code": 0, "msg": "", "data": res})
-# <<< PRIVATE:SPIDER
 
 # ================= 网盘（夸克 / UC 等）登录/转存/直链 =================
 try:

@@ -476,6 +476,10 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
         guids = {row["guid"] for row in r.json()["data"]}
         self.assertIn("local-db", guids)
         self.assertTrue(set(appmod.CHART_LIB_GUIDS.values()) <= guids)
+        for row in r.json()["data"]:
+            poster = row.get("poster") or ""
+            if poster:
+                self.assertTrue(poster.startswith("/online/"), row.get("title"))
 
     async def test_mediadb_list_all_virtual_libs_off_returns_upstream(self):
         self.config.save({"hot_library_enabled": False,

@@ -98,7 +98,7 @@ def test_search_brief_multi_provider_lines():
         "baofeng::线路1": [{"name": "第1集", "url": "http://x/1.mp4"}],
         "ffzy::线路2": [{"name": "第1集", "url": "http://x/2.mp4"}]})
     assert libfiltermod.brief_lib_keys(b) == {
-        "standalone:baofeng", "standalone:ffzy", "catalog:tv"}
+        "standalone:baofeng", "standalone:ffzy", "catalog:overseas"}
 
 
 def test_search_brief_online_id_fallback_when_no_lines():
@@ -136,7 +136,7 @@ def test_brief_lib_keys_standalone_only():
 def test_type_mapping_matches_hot_category():
     # 与 inject.hot_category 同规则（纪录片除外，见下）；类型缺失也按 tv（hot_category 默认）。
     for typ in ("动漫", "日本动漫", "综艺", "真人秀", "动作片",
-                "韩剧", "国产剧", "连续剧", "", "  "):
+                "国产剧", "连续剧", "", "  "):
         assert libfiltermod.catalog_cat_for_type(typ) == \
             injmod.hot_category({"type_name": typ})
     assert catalogmod.AGG_SCOPE == libfiltermod.AGG_SCOPE

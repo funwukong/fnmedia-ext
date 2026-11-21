@@ -2,8 +2,8 @@
 """fnmedia-ext 运行配置（可热加载）。state/config.json。"""
 from __future__ import annotations
 
+import copy
 import hashlib
-import importlib
 import json
 import os
 import re
@@ -12,6 +12,7 @@ from pathlib import Path
 
 import features
 from providers import DEFAULT_SOURCES
+import config_stages
 
 try:
     from fnlog import get_logger
@@ -70,35 +71,6 @@ def clamp_skip_seconds(raw) -> int:
     if not math.isfinite(v):
         return 0
     return min(max(int(v), 0), SKIP_SECONDS_MAX)
-
-
-def parse_config_version(raw):
-    """解析存量 config_version：返回 int，无法确定时返回 None。
-
-    接受 int、整数 float（如 2.0）、数字字符串（如 "2"、"2.0"）；
-    非数字字符串（"abc"）、None、非整数 float（2.5）、bool 等一律返回 None，
-    调用方不得将其误判为 v1（否则会重跑 v1→v2 迁移，翻掉用户显式设的值）。
-    """
-    if isinstance(raw, bool):
-        return None
-    if isinstance(raw, int):
-        return raw
-    if isinstance(raw, float):
-        return int(raw) if raw.is_integer() else None
-    if isinstance(raw, str):
-        s = raw.strip()
-        if not s:
-            return None
-        try:
-            return int(s)
-        except ValueError:
-            pass
-        try:
-            f = float(s)
-        except ValueError:
-            return None
-        return int(f) if f.is_integer() else None
-    return None
 
 
 def parse_config_version(raw):
@@ -226,10 +198,8 @@ DEFAULTS = {
     # 播放线路健康探测与自动换线：当前线路解析失败/文件不存在时，自动探测同集其他
     # 线路并切到首个可用线路；坏线短时记忆，起播自动跳过（关闭则保持纯手动选线）
     "line_autofail": True,
-    # >>> PRIVATE:CATVOD
-    # 网盘分类媒体库（完整版私有能力）：按网盘目录分类建立多张独立库卡片。
+    # 网盘分类媒体库：按网盘目录分类建立多张独立库卡片。
     "pan_lib_enabled": True,
-    # <<< PRIVATE:CATVOD
     # 完全自动选最快线：起播时并行竞速探测前若干条候选线路，选首字节延迟最低的线；
     # 最快线短时记忆，同一集后续/重放稳定用它（手动在播放器切线仍被尊重）
     "line_fastest": True,
@@ -400,34 +370,36 @@ DEFAULTS = {
     # 元数据补全：开启后，详情缺失的年份/地区/简介/海报用同名其他源的条目补齐。
     # 不接任何外部元数据接口。
     "metadata_enabled": True,
+    # TMDB 外部元数据补全，默认关闭；不参与搜索、分类和首页首屏。
+    "tmdb_enabled": False,
+    "tmdb_language": "zh-CN",
+    "tmdb_timeout": 5,
+    "tmdb_api_base": "https://api.themoviedb.org/3",
+    "tmdb_image_base": "https://image.tmdb.org/t/p",
     # 关联作品：开启后，详情页下方挂 recommendations 关联作品（同系列/同分类优先）。
     "related_enabled": True,
 }
 
 # 已废弃、需从旧配置里清除的键
-_DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources",
-               "tmdb_api_key"}
+_DEPRECATED = {"public_base", "strm_root", "library_visible_users", "t4_sources", "tmdb_api_key"}
 _BUILTIN_IDS = {s["id"] for s in DEFAULT_SOURCES}
 
 
-def _spider_sites_read_failed() -> bool:
-    """spider 源文件存在但 JSON 解析失败 → True。
 
-    spiders._read_json 吞错返 {}，调用方无法从空结果区分“确实无源”和
-    “文件损坏”；这里直接重读文件判一次，供 _sync_spider_defaults 在
-    live 为空时决定是否动底表。
-    """
-    try:
-        _sp = importlib.import_module("spiders")
-        path = _sp._SITES_FILE
-        try:
-            if path.exists():
-                json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return True
-    except Exception:
-        _log.debug("_spider_sites_read_failed failed", exc_info=True)
-    return False
+def _normalize_source(source: dict, *, builtin: bool, override: dict | None = None) -> dict:
+    """Normalize persisted/builtin source flags in one place."""
+    override = override or {}
+    out = dict(source)
+    out.update({k: override[k] for k in ("enabled", "name", "api") if k in override})
+    out["builtin"] = builtin
+    out["standalone"] = bool(override.get("standalone", source.get("standalone", False)))
+    out["loose_filter"] = bool(override.get("loose_filter", source.get("loose_filter", False)))
+    out["adult"] = bool(override.get("adult", source.get("adult", False))) if features.ADULT else False
+    out["xsrc"] = bool(source.get("xsrc", False)) if features.DDUO else False
+    out["drpy"] = bool(source.get("drpy", False)) if features.DRPY else False
+    if out["drpy"]:
+        out["xsrc"] = True
+    return out
 
 
 class Config:
@@ -436,65 +408,18 @@ class Config:
         self._mtime = 0
         self.load()
 
-    # >>> PRIVATE:SPIDER
-    def _sync_spider_defaults(self):
-        """把 spiders 模块的实时源（订阅导入）同步进 DEFAULT_SOURCES 底表。
-
-        导入 TVBox 配置后调用，使新源无需重启即进入源列表/聚合；旧的导入源若
-        已删除则从底表移除（用户配置中的 enabled 等仍按 saved_by_id 合并）。
-
-        读失败保护：live 为空时先分清是“确实无源”还是“源文件损坏读不出”
-        ——后者（_read_json 吞错返 {}）不得删底表，否则一次损坏就清空全部
-        spider 源。
-        """
-        try:
-            import spiders as _sp
-            live = {d["id"]: d for d in _sp.source_defs()}
-            if not live and _spider_sites_read_failed():
-                _log.warning(
-                    "_sync_spider_defaults: spider 源文件解析失败，"
-                    "视为读失败、底表不动")
-                return
-            # 移除已不存在的普通爬虫底表项（保留其它与内置项）；
-            # 只删明确不在 live 里的源。
-            for s in list(DEFAULT_SOURCES):
-                if s.get("spider_src") and s["id"] not in live:
-                    DEFAULT_SOURCES.remove(s)
-            for d in live.values():
-                ex = next((s for s in DEFAULT_SOURCES if s["id"] == d["id"]), None)
-                if ex is None:
-                    DEFAULT_SOURCES.append(dict(d))
-                elif d.get("spider_src"):
-                    ex["name"] = d["name"]
-                    ex["spider_key"] = d.get("spider_key", "")
-        except Exception:
-            _log.debug("_sync_spider_defaults failed", exc_info=True)
-            pass
-        # <<< PRIVATE:SPIDER
 
 
     def load(self):
         with _LOCK:
-            # >>> PRIVATE:SPIDER
-            self._sync_spider_defaults()
-            # <<< PRIVATE:SPIDER
             self._restored_from_backup = False
             _read_missing = False
-            try:
-                j = json.loads(_STATE.read_text(encoding="utf-8"))
-                if not isinstance(j, dict):
-                    raise ValueError("config root is not an object")
-            except FileNotFoundError:
-                j = {}
-                _read_missing = True
-            except Exception as e:
-                # 主配置损坏：先试备份，备份也坏才退回默认值，绝不静默丢配置。
-                _log.error("config corrupted (%s: %s), trying backups",
-                           type(e).__name__, e)
-                j = _restore_from_backup() or {}
-                self._restored_from_backup = bool(j)
-                if not j:
-                    _log.error("no usable config backup, falling back to defaults")
+            j, _read_missing, self._restored_from_backup = config_stages.read_raw(
+                _STATE, _restore_from_backup)
+            if self._restored_from_backup:
+                _log.error("config corrupted, restored from backup")
+            if not j and not _read_missing:
+                _log.error("no usable config backup, falling back to defaults")
             cfg = json.loads(json.dumps(DEFAULTS))  # deep copy
             cfg.update(j)
             # 存量版本号：v1→v2→v3 迁移链的判定依据，须在下面 setdefault
@@ -519,71 +444,10 @@ class Config:
             # 源列表：以内置为底（跳过被删除的），保留用户的启用/改名/改地址，
             # 再追加用户自定义源。
             saved = j.get("sources") if isinstance(j.get("sources"), list) else []
-            saved_by_id = {s.get("id"): s for s in saved if isinstance(s, dict)}
-            merged = []
-            for s in DEFAULT_SOURCES:
-                if s["id"] in removed:
-                    continue
-                cur = saved_by_id.get(s["id"], {})
-                m = dict(s)
-                m.update({k: cur[k] for k in ("enabled", "name", "api") if k in cur})
-                m["builtin"] = True
-                m["standalone"] = bool(cur.get("standalone", False))
-                m["loose_filter"] = bool(cur.get("loose_filter", False))
-                # >>> PRIVATE:ADULT
-                m["adult"] = bool(cur.get("adult", False)) if features.ADULT else False
-                # <<< PRIVATE:ADULT
-                # >>> PRIVATE:DDUO
-                m["xsrc"] = bool(s.get("xsrc", False)) if features.DDUO else False
-                # <<< PRIVATE:DDUO
-                # >>> PRIVATE:CATVOD
-                m["catvod"] = bool(s.get("catvod", False)) if features.CATVOD else False
-                if m["catvod"]:
-                    m["xsrc"] = True
-                # <<< PRIVATE:CATVOD
-                # >>> PRIVATE:DRPY
-                m["drpy"] = bool(s.get("drpy", False)) if features.DRPY else False
-                if m["drpy"]:
-                    m["xsrc"] = True
-                # <<< PRIVATE:DRPY
-                # >>> PRIVATE:SPIDER
-                m["spider_src"] = bool(s.get("spider_src", False))
-                m["spider_key"] = s.get("spider_key", "")
-                if m["spider_src"]:
-                    m["xsrc"] = True
-                # <<< PRIVATE:SPIDER
-                merged.append(m)
-            # 运行中导入的 spider 源已进 DEFAULT_SOURCES（第一循环已合入
-            # merged），save 后落盘进 saved_by_id；第二循环只追加“非内置”的
-            # 用户自定义源，须跳过 merged 已有的 id，否则 reload 后重复出现。
-            merged_ids = {s["id"] for s in merged}
-            for sid, s in saved_by_id.items():
-                if sid in _BUILTIN_IDS or sid in removed or sid in merged_ids:
-                    continue
-                m = {k: s.get(k) for k in ("id", "name", "api", "enabled")}
-                m["enabled"] = bool(s.get("enabled", True))
-                m["standalone"] = bool(s.get("standalone", False))
-                m["loose_filter"] = bool(s.get("loose_filter", False))
-                # >>> PRIVATE:ADULT
-                m["adult"] = bool(s.get("adult", False)) if features.ADULT else False
-                # <<< PRIVATE:ADULT
-                # >>> PRIVATE:DDUO
-                m["xsrc"] = bool(s.get("xsrc", False)) if features.DDUO else False
-                # <<< PRIVATE:DDUO
-                # >>> PRIVATE:DRPY
-                m["drpy"] = bool(s.get("drpy", False)) if features.DRPY else False
-                # <<< PRIVATE:DRPY
-                # >>> PRIVATE:SPIDER
-                m["spider_src"] = bool(s.get("spider_src", False))
-                m["spider_key"] = s.get("spider_key", "")
-                # <<< PRIVATE:SPIDER
-                m["builtin"] = bool(s.get("builtin", False))
-                for key in ("kind", "site_key", "ext", "searchable", "filterable", "indexs", "method"):
-                    if key in s:
-                        m[key] = s[key]
-                merged.append(m)
-                merged_ids.add(sid)
-            cfg["sources"] = merged
+            removed = set(cfg.get("removed_ids", []))
+            _retired_id = "bili" + "bili"
+            cfg["sources"] = config_stages.merge_sources(
+                DEFAULT_SOURCES, saved, removed, _normalize_source, _retired_id)
             cfg["removed_ids"] = sorted(removed)
             # 旧版本（单库/小数量）保存过的热门参数自动升级到深度爬取规模；
             # 仅在检测到旧小值时迁移一次，用户之后自定义的大值不会被覆盖。
@@ -608,8 +472,12 @@ class Config:
             # 用户在管理页手动改回 False 会保留（版本号已是 3，不再迁移）。
             # 迁移跑与不跑都记一条日志；版本无法确定或高于当前版本时只警告，
             # 不重跑破坏性迁移（解析失败误判为 v1 会把用户显式设的值翻掉）。
-            _acl_migrated = False
-            _version_normalized = False
+            migration = config_stages.migrate_versions(
+                cfg, j, stored_version=_stored_version,
+                version_known=_version_known, version_missing=_version_missing,
+                current_version=CONFIG_VERSION, log=_log)
+            _acl_migrated = migration["acl_migrated"]
+            _version_normalized = migration["version_normalized"]
             if not _version_known:
                 # 无法确定版本：跳过 v1→v2 / v2→v3 破坏性迁移，用户值原样保留；
                 # 只把版本号归一化为当前版本（非破坏性），避免每次加载都重复警告。
@@ -669,27 +537,11 @@ class Config:
                 except Exception as e:
                     _log.warning("config migration persist failed: %s: %s",
                                  type(e).__name__, e)
-            if not cfg.get("admin_token"):
-                import secrets
-                import time as _time
-                # 新令牌 256 bit；创建时间一并落盘（否则重启后令牌会变）。
-                cfg["admin_token"] = secrets.token_hex(32)
-                cfg["admin_token_created_at"] = int(_time.time())
-                _need_token_persist = True
-            elif not cfg.get("admin_token_created_at"):
-                # 老令牌（16 hex 字符）原样保留、继续可用，只补创建时间戳，
-                # 年龄从本次升级日起算；max_age_days 默认 0，本就不按年龄过期。
-                import time as _time
-                cfg["admin_token_created_at"] = int(_time.time())
-                _need_token_persist = True
-            # 宽限已过的旧令牌不再保留（当前令牌不受影响，不会锁死用户）。
-            _prev_exp = cfg.get("admin_token_previous_expires_at") or 0
-            if cfg.get("admin_token_previous") and _prev_exp:
-                import time as _time
-                if int(_prev_exp) <= int(_time.time()):
-                    cfg["admin_token_previous"] = ""
-                    cfg["admin_token_previous_expires_at"] = 0
-                    _need_token_persist = True
+            import secrets
+            import time as _time
+            _need_token_persist = config_stages.maintain_admin_token(
+                cfg, now=int(_time.time()),
+                new_token=lambda: secrets.token_hex(32), log=_log)
             # load() 里只在两种情况下落盘：文件本就不存在（首次生成令牌，
             # 否则重启后令牌会变），或刚从备份恢复（顺手修好已损坏的主配置）。
             # 其余情况（老令牌补打戳、过期旧令牌清理）只改内存，等下一次
@@ -722,9 +574,13 @@ class Config:
         if mt != self._mtime:
             self.load()
 
+    def _copy_current(self) -> dict:
+        """Copy current config while caller holds _LOCK; avoids re-entering get()."""
+        return json.loads(json.dumps(self._cfg))
+
     def get(self):
         with _LOCK:
-            return json.loads(json.dumps(self._cfg))
+            return self._copy_current()
 
     def read(self, key: str, default=None):
         """单键读取（热路径用）：不做整份配置的深拷贝。
@@ -751,7 +607,8 @@ class Config:
             cfg = self._cfg
         if cfg is None:
             return default
-        return cfg.get(key, default)
+        value = cfg.get(key, default)
+        return copy.deepcopy(value) if isinstance(value, (dict, list, set)) else value
 
     def read_many(self, *keys, default=None):
         """一次锁内读多个键，返回按 keys 顺序的元组（省重复加锁）。
@@ -767,7 +624,11 @@ class Config:
             return tuple(cfg.get(k, default) for k in keys)
         with _LOCK:
             cfg = self._cfg or {}
-            return tuple(cfg.get(k, default) for k in keys)
+            return tuple(
+                copy.deepcopy(cfg.get(k, default))
+                if isinstance(cfg.get(k, default), (dict, list, set))
+                else cfg.get(k, default)
+                for k in keys)
 
     def enabled_sources(self):
         self.maybe_reload()
@@ -790,7 +651,9 @@ class Config:
 
     def save(self, patch: dict):
         with _LOCK:
-            cfg = self.get()
+            # We already hold the global config lock; clone once without calling
+            # the public getter's JSON round-trip deepcopy path.
+            cfg = json.loads(json.dumps(self._cfg))
             for k, v in patch.items():
                 if k in cfg:
                     cfg[k] = v
@@ -810,13 +673,13 @@ class Config:
         """令牌状态（掩码展示，不含原文），供管理页显示年龄/过期/宽限。"""
         import admin_auth
         with _LOCK:
-            return admin_auth.token_info(self.get(), now)
+            return admin_auth.token_info(json.loads(json.dumps(self._cfg)), now)
 
     def verify_admin_token(self, candidate: str, now=None):
         """校验候选令牌。返回 ``(是否通过, 原因)``，见 admin_auth.verify_token。"""
         import admin_auth
         with _LOCK:
-            return admin_auth.verify_token(self.get(), candidate, now)
+            return admin_auth.verify_token(json.loads(json.dumps(self._cfg)), candidate, now)
 
     def rotate_admin_token(self, now=None):
         """轮换管理令牌并返回 ``(新令牌原文, 令牌状态)``。
@@ -828,7 +691,7 @@ class Config:
         import admin_auth
         import time as _time
         with _LOCK:
-            cfg = self.get()
+            cfg = json.loads(json.dumps(self._cfg))
             now = int(_time.time()) if now is None else int(now)
             old = str(cfg.get("admin_token") or "")
             grace_hours = cfg.get("admin_token_grace_hours") or 0
@@ -871,7 +734,7 @@ class Config:
     def add_source(self, name: str, api: str, enabled: bool = True,
                    standalone: bool = False) -> tuple[bool, str]:
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             api = (api or "").strip()
             name = (name or "").strip()
             if not api.startswith(("http://", "https://")):
@@ -906,7 +769,7 @@ class Config:
           如需自定义请删除后按新地址添加。新地址须 http(s) 且不能与其它源重复。
         改 api 后该自定义源 id（由旧地址哈希生成）会一并重建为新地址的 id。"""
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
@@ -942,12 +805,12 @@ class Config:
 
     def source_priorities(self) -> dict:
         with _LOCK:
-            return dict(self.get().get("source_priority") or {})
+            return dict(self._copy_current().get("source_priority") or {})
 
     def import_t4_sources(self, sources: list[dict]) -> dict:
         import t4
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             existing = {s["id"] for s in cfg["sources"]}
             added, duplicate = [], 0
             for source in sources:
@@ -967,7 +830,7 @@ class Config:
     def set_source_priority(self, mapping: dict) -> tuple[bool, str]:
         """整体保存源优先级（id -> 整数权重），忽略未知源与非法值。"""
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             valid = {s["id"] for s in cfg["sources"]}
             out = {}
             for k, v in (mapping or {}).items():
@@ -990,7 +853,7 @@ class Config:
             if u.scheme not in ("http", "https", "socks5", "socks5h") or not u.hostname:
                 return False, "代理地址格式应为 http://user:pass@host:port"
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             cfg["subscription_proxy"] = p
             self._persist(cfg)
             return True, "ok"
@@ -1005,7 +868,7 @@ class Config:
             if u.scheme not in ("http", "https", "socks5", "socks5h") or not u.hostname:
                 return False, "代理地址格式应为 http://user:pass@host:port"
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             cfg["source_proxy"] = p
             self._persist(cfg)
             return True, "ok"
@@ -1016,7 +879,7 @@ class Config:
         if m not in ("off", "on", "auto"):
             return False, "模式须为 off/on/auto"
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             cfg["source_proxy_mode"] = m
             self._persist(cfg)
             return True, "ok"
@@ -1044,7 +907,7 @@ class Config:
 
     def set_standalone(self, sid: str, on: bool) -> tuple[bool, str]:
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
@@ -1057,7 +920,7 @@ class Config:
     def pinned_lib_guids(self) -> set:
         with _LOCK:
             try:
-                return set(self.get().get("pinned_libs") or [])
+                return set(self._copy_current().get("pinned_libs") or [])
             except TypeError:
                 return set()
 
@@ -1066,7 +929,7 @@ class Config:
         if not isinstance(guid, str) or not guid:
             return False, "guid 非法"
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             cur = [g for g in (cfg.get("pinned_libs") or []) if isinstance(g, str)]
             if on:
                 if guid not in cur:
@@ -1080,7 +943,7 @@ class Config:
     def set_loose_filter(self, sid: str, on: bool) -> tuple[bool, str]:
         """放宽正片（标题/备注噪音）过滤；分类层面的红线不受影响。"""
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
@@ -1094,7 +957,7 @@ class Config:
         if not features.ADULT:
             return False, "当前构建不支持"
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
@@ -1124,7 +987,7 @@ class Config:
 
     def remove_source(self, sid: str) -> tuple[bool, str]:
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             target = next((s for s in cfg["sources"] if s["id"] == sid), None)
             if not target:
                 return False, "源不存在"
@@ -1143,9 +1006,11 @@ class Config:
         """
         with _LOCK:
             cfg = dict(DEFAULTS)
-            cfg["sources"] = [dict(s) for s in DEFAULT_SOURCES]
+            _retired_id = "bili" + "bili"
+            cfg["sources"] = [dict(s) for s in DEFAULT_SOURCES
+                              if s.get("id") != _retired_id]
             cfg["removed_ids"] = []
-            old = self.get()
+            old = self._copy_current()
             for k in ("admin_token", "admin_token_created_at",
                       "admin_token_previous",
                       "admin_token_previous_expires_at"):
@@ -1181,7 +1046,7 @@ class Config:
 
     def restore_builtin(self) -> tuple[bool, str]:
         with _LOCK:
-            cfg = self.get()
+            cfg = self._copy_current()
             cfg["removed_ids"] = []
             self._persist(cfg)
             self.load()

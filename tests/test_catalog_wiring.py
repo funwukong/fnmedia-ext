@@ -117,7 +117,7 @@ def test_old_type_mapping_unchanged():
     assert libfiltermod.catalog_cat_for_type("动作片") == "movie"
     assert libfiltermod.catalog_cat_for_type("动漫") == "anime"
     assert libfiltermod.catalog_cat_for_type("综艺") == "variety"
-    assert libfiltermod.catalog_cat_for_type("韩剧") == "tv"
+    assert libfiltermod.catalog_cat_for_type("韩剧") == "overseas"
     assert libfiltermod.catalog_cat_for_type("") == "tv"
 
 
@@ -154,8 +154,10 @@ def test_brief_lib_keys_union_via_route():
     for cat in NEW_CATS:
         b = _brief(f"r-{cat}", "baofeng", "动作大片", "动作片",
                    route={"source": "baofeng", "type_id": "5", "cat": cat})
-        assert libfiltermod.brief_lib_keys(b) == {
-            "standalone:baofeng", "catalog:movie", f"catalog:{cat}"}, cat
+        expected = {"standalone:baofeng", f"catalog:{cat}"}
+        if cat == "uhd":
+            expected.add("catalog:movie")
+        assert libfiltermod.brief_lib_keys(b) == expected, cat
 
 
 def test_brief_lib_keys_catalog_agg_brief_new_cat():

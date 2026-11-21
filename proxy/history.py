@@ -553,8 +553,16 @@ class History:
                 "resolution": body.get("resolution", prev.get("resolution", "")),
                 "ts": max(ts, int(prev.get("ts", 0))),
                 "duration": duration or int(prev.get("duration", 0)),
+                "finished": bool(body.get("finished") or body.get("completed")
+                                 or body.get("ended")) or bool(prev.get("finished")),
                 "updated_at": time.time(),
             }
+            # Some TV clients send an explicit completion marker while the final
+            # progress packet has no duration. Preserve it for next-episode resume.
+            if body.get("reset") or (ts < int(prev.get("ts", 0)) and not body.get("finished")):
+                rec["finished"] = False
+            if rec["duration"] and rec["ts"] >= rec["duration"] * 0.95:
+                rec["finished"] = True
             # 沿用已有的快照（重复高频上报不必每次重算）；新快照有效才覆盖。
             if prev.get("snapshot"):
                 rec["snapshot"] = prev["snapshot"]
@@ -796,6 +804,8 @@ class History:
 
     @staticmethod
     def _finished(r: dict) -> bool:
+        if bool(r.get("finished") or r.get("completed") or r.get("ended")):
+            return True
         ts = int(r.get("ts", 0) or 0)
         dur = int(r.get("duration", 0) or 0)
         return bool(dur) and ts >= dur * 0.95

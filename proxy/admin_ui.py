@@ -11,69 +11,189 @@ ADMIN_HTML = r"""<!doctype html>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
 <title>fnmedia-ext 管理台</title>
+<script>
+/* Apply saved appearance before the page is painted. */
+const adminTheme = (() => {
+  const key = 'fnmedia-ext.admin.theme.v1';
+  const presets = {
+    indigo: '#4f46e5', blue: '#2563eb', teal: '#0f766e',
+    rose: '#be185d', amber: '#b45309', slate: '#475569'
+  };
+  const defaults = {mode: 'system', palette: 'indigo', custom: '#4f46e5'};
+  const system = window.matchMedia('(prefers-color-scheme: dark)');
+  const root = document.documentElement;
+  const validHex = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
+  const normalize = value => {
+    const {mode, palette, custom} = value || {};
+    return {
+      mode: ['system', 'light', 'dark'].includes(mode) ? mode : defaults.mode,
+      palette: typeof palette === 'string' && (palette === 'custom' ||
+        Object.prototype.hasOwnProperty.call(presets, palette)) ? palette : defaults.palette,
+      custom: validHex(custom) ? custom.toLowerCase() : defaults.custom
+    };
+  };
+  const decode = text => {
+    try { return normalize(JSON.parse(text)); }
+    catch { return {...defaults}; }
+  };
+  let state = {...defaults};
+  try { state = decode(window.localStorage.getItem(key)); } catch {}
+
+  const rgb = hex => hex.slice(1).match(/../g).map(channel => parseInt(channel, 16));
+  const mix = (from, to, weight) => from.map((channel, i) => Math.round(channel + (to[i] - channel) * weight));
+  const luminance = color => color.map(channel => {
+    const v = channel / 255;
+    return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+  }).reduce((total, channel, i) => total + channel * [.2126, .7152, .0722][i], 0);
+  const contrast = (a, b) => {
+    const [x, y] = [luminance(a), luminance(b)];
+    return (Math.max(x, y) + .05) / (Math.min(x, y) + .05);
+  };
+
+  function apply() {
+    const dark = state.mode === 'dark' || (state.mode === 'system' && system.matches);
+    const accent = state.palette === 'custom' ? state.custom : presets[state.palette];
+    const base = rgb(accent);
+    const white = [255, 255, 255], black = [0, 0, 0];
+    const surface = rgb(dark ? '#171c28' : '#ffffff');
+    const canvas = rgb(dark ? '#10131c' : '#f4f6fb');
+    const inset = rgb(dark ? '#1e2433' : '#f7f8fc');
+    const soft = mix(surface, base, dark ? .20 : .09);
+    // Keep the user’s chosen fill and derive a legible link, border and focus color.
+    let ink = base;
+    for (let step = 1; [surface, canvas, inset, soft].some(bg => contrast(ink, bg) < 4.5); step++) {
+      ink = mix(base, dark ? white : black, Math.min(step / 20, 1));
+    }
+    const style = root.style;
+    root.dataset.theme = dark ? 'dark' : 'light';
+    style.setProperty('--accent-fill', accent);
+    style.setProperty('--accent-on', contrast(base, white) >= contrast(base, black) ? '#fff' : '#000');
+    style.setProperty('--accent', `rgb(${ink.join(',')})`);
+    style.setProperty('--accent-soft', `rgb(${soft.join(',')})`);
+  }
+
+  let onChange = () => {};
+  function commit(next, reset = false) {
+    state = normalize(next);
+    apply();
+    let saved = true;
+    try {
+      if (reset) window.localStorage.removeItem(key);
+      else window.localStorage.setItem(key, JSON.stringify(state));
+    } catch { saved = false; }
+    onChange(saved);
+  }
+  const onSystemChange = () => { if (state.mode === 'system') apply(); };
+  if (system.addEventListener) system.addEventListener('change', onSystemChange);
+  else if (system.addListener) system.addListener(onSystemChange);
+  window.addEventListener('storage', event => {
+    if (event.key !== key && event.key !== null) return;
+    // Re-read current storage so a queued event cannot overwrite a newer local choice.
+    try { state = decode(window.localStorage.getItem(key)); } catch { return; }
+    apply();
+    onChange(true);
+  });
+  apply();
+  return {
+    presets: {...presets}, validHex,
+    get: () => ({...state}),
+    set: changes => commit({...state, ...changes}),
+    reset: () => commit(defaults, true),
+    subscribe: listener => { onChange = listener; }
+  };
+})();
+</script>
 <style>
+/* Dashboard shell */
 :root{
-  --bg:#f4f6f8;--card:#fff;--line:#e3e8ee;--text:#1c2733;--muted:#68788a;
-  --accent:#2f6fed;--accent-soft:#e8f0fe;--ok:#1a9e5c;--warn:#d97706;
-  --err:#d64545;--radius:12px;--shadow:0 1px 3px rgba(16,30,54,.08);
+  color-scheme:light;
+  --bg:#f4f6fb;--card:#fff;--inset:#f7f8fc;--line:#dde3ee;--control-line:#7d889d;
+  --text:#172033;--muted:#526077;
+  --accent:#4f46e5;--accent-fill:#4f46e5;--accent-on:#fff;--accent-soft:#efeeff;
+  --ok:#16643f;--ok-soft:#e8f5ee;--warn:#90440b;--warn-soft:#fff1df;
+  --err:#a62a3a;--err-soft:#fbecef;--info:#225ab2;--violet:#6940b4;
+  --radius:16px;--shadow:0 1px 2px #14244208,0 4px 14px #14244205;
+  --overlay:#13192980;
+}
+:root[data-theme=dark]{
+  color-scheme:dark;
+  --bg:#10131c;--card:#171c28;--inset:#1e2433;--line:#343e51;--control-line:#7785a0;
+  --text:#edf1f9;--muted:#aab6cb;
+  --ok:#8bdbad;--ok-soft:#1c372e;--warn:#fac984;--warn-soft:#3d2d21;
+  --err:#ffacb3;--err-soft:#412731;--info:#a5c5ff;--violet:#c8b3ff;
+  --shadow:0 2px 5px #0003;--overlay:#04060ab8;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
-body{font:15px/1.6 -apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
-  background:var(--bg);color:var(--text)}
-.layout{display:flex;min-height:100vh;min-height:100dvh}
-
-/* ---------- 侧栏 ---------- */
-.sidebar{width:220px;flex:none;padding:20px 14px;background:var(--card);
-  border-right:1px solid var(--line);display:flex;flex-direction:column;gap:16px;
-  position:sticky;top:0;height:100vh;height:100dvh}
-.brand{display:flex;align-items:center;gap:10px;padding:0 8px}
-.brand-mark{width:38px;height:38px;border-radius:10px;flex:none;display:flex;
-  align-items:center;justify-content:center;font-size:20px;background:var(--accent-soft)}
-.brand-name{font-weight:700}
+body{font:15px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
+  background:var(--bg);color:var(--text);overflow-wrap:anywhere}
+a{color:var(--accent);text-underline-offset:.18em}
+button,input,select,textarea{font:inherit}
+button,summary{cursor:pointer}
+:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.layout{display:grid;grid-template-columns:244px minmax(0,1fr);min-height:100vh;min-height:100dvh}
+.sidebar{padding:24px 16px;background:var(--card);border-right:1px solid var(--line);
+  position:sticky;top:0;height:100vh;height:100dvh;overflow:auto;z-index:46;
+  display:flex;flex-direction:column;gap:22px}
+.brand{display:flex;align-items:center;gap:11px;padding:0 5px;min-width:0}
+.brand-mark{width:40px;height:40px;border-radius:12px;flex:none;display:grid;place-items:center;
+  background:var(--accent-fill);color:var(--accent-on)}
+.brand-mark::before{content:"";margin-left:2px;border-block:6px solid transparent;border-left:10px solid currentColor}
+.brand-name{font-weight:750;letter-spacing:-.025em;line-height:1.25}
 .brand-sub{font-size:12px;color:var(--muted)}
-.nav{display:flex;flex-direction:column;gap:4px}
-.nav-item{position:relative;text-align:left;padding:10px 12px;border:0;border-radius:8px;
-  background:transparent;color:var(--text);font-size:15px;cursor:pointer}
-.nav-item:hover{background:var(--accent-soft)}
-.nav-item.active{background:var(--accent);color:#fff}
-.sidebar-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:0 8px}
-
-/* ---------- 主区 ---------- */
-.main{flex:1;min-width:0;width:100%;padding:24px 28px 96px;max-width:900px}
+.nav{display:grid;gap:4px}
+.nav-item,.theme-trigger,.menu-trigger{display:flex;align-items:center;gap:10px;text-align:left;
+  border:1px solid transparent;border-radius:9px;background:transparent;color:var(--muted);font-weight:570}
+.nav-item{min-height:42px;padding:7px 11px}
+.nav-item:hover,.theme-trigger:hover,.menu-trigger:hover{background:var(--inset);color:var(--text)}
+.nav-item.active{background:var(--accent-soft);color:var(--accent);font-weight:700}
+.nav-icon{display:inline-grid;place-items:center;font-size:17px;line-height:1;width:20px;flex:none}
+.sidebar-tools{display:grid;gap:12px;margin-top:auto}
+.theme-trigger,.menu-trigger{min-height:44px;padding:7px 10px;border-color:var(--line);color:var(--text)}
+.theme-trigger::before{content:"";width:16px;height:16px;flex:none;border-radius:50%;
+  border:1px solid var(--accent);background:linear-gradient(135deg,var(--accent-fill) 50%,var(--card) 50%)}
+.menu-trigger{display:none}
+.sidebar-foot{border-top:1px solid var(--line);padding:10px 4px 0;color:var(--muted)}
+.sidebar-foot .dot{font-size:12px}
+.main{min-width:0;width:100%;max-width:1224px;margin-inline:auto;padding:32px clamp(20px,3.2vw,48px) 48px}
 .page{display:none}.page.active{display:block}
-h2.page-title{margin:4px 0 4px;font-size:20px}
-.page-desc{color:var(--muted);font-size:13px;margin:0 0 16px}
-.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:16px 18px;margin-bottom:14px;box-shadow:var(--shadow)}
-.card-title{font-weight:600;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.page-head{padding:21px clamp(16px,2.5vw,28px);margin-bottom:18px;border:1px solid var(--line);
+  border-radius:var(--radius);background:linear-gradient(112deg,var(--accent-soft),var(--card) 68%);box-shadow:var(--shadow)}
+h2.page-title{margin:0;font-size:clamp(24px,3vw,34px);line-height:1.25;letter-spacing:-.025em}
+.page-desc{color:var(--muted);font-size:14px;margin:7px 0 0}
+.card{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+  padding:clamp(14px,2.2vw,22px);margin-bottom:14px;box-shadow:var(--shadow)}
+.card-title{font-weight:700;font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .card-sub{color:var(--muted);font-size:13px;margin:0 0 12px}
 .hint{color:var(--muted);font-size:13px;margin:6px 0}
 .muted{color:var(--muted)}.sm{font-size:12px}
 .stack{display:flex;flex-direction:column;gap:8px}
 .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
 .mt{margin-top:10px}
+.skip-link{position:fixed;top:8px;left:8px;z-index:91;transform:translateY(-200%);
+  background:var(--card);padding:9px 14px;border-radius:8px}
+.skip-link:focus{transform:none}
 
 /* ---------- 控件 ---------- */
 input[type=text],input[type=number],input[type=password],textarea,select{
-  background:#fff;border:1px solid var(--line);border-radius:8px;color:var(--text);
-  padding:8px 10px;width:100%;font:inherit}
+  background:var(--card);border:1px solid var(--control-line);border-radius:8px;color:var(--text);
+  padding:8px 10px;width:100%;max-width:100%;font:inherit}
 input[type=number]{width:auto}
 textarea{resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px}
-input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
+input:is(:focus),textarea:is(:focus),select:is(:focus){border-color:var(--accent)}
 label.field{display:block;margin:10px 0}
 label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}
 .switch-row{display:flex;align-items:flex-start;gap:10px;padding:10px 0;cursor:pointer}
 .switch-row input{width:17px;height:17px;margin-top:2px;accent-color:var(--accent);flex:none}
 .switch-row .sub{display:block;font-size:13px;color:var(--muted)}
-.btn{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
-  background:#fff;color:var(--text);border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
-.btn:hover{border-color:var(--accent);color:var(--accent)}
-.btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
-.btn.primary:hover{opacity:.92;color:#fff}
-.btn.small{padding:5px 12px;font-size:13px;min-height:0}
-.btn:disabled{opacity:.5;cursor:default}
-.btn.danger{color:var(--err)}.btn.danger:hover{background:var(--err);color:#fff;border-color:var(--err)}
+:is(.btn,button.small,.seg button){display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);
+  background:var(--card);color:var(--text);border-radius:8px;padding:8px 14px;cursor:pointer;font-size:14px}
+:is(.btn,button.small,.seg button):hover{border-color:var(--accent);color:var(--accent)}
+:is(.btn,button.small).primary{background:var(--accent-fill);border-color:var(--accent);color:var(--accent-on)}
+:is(.btn,button.small).primary:hover:not(:disabled){box-shadow:inset 0 0 0 2px var(--accent-on)}
+:is(.btn.small,button.small){padding:5px 12px;font-size:13px;min-height:0}
+:is(.btn,button.small):disabled{opacity:.5;cursor:default}
+:is(.btn,button.small).danger{color:var(--err)}:is(.btn,button.small).danger:hover{background:var(--err-soft);border-color:var(--err)}
 .btn-row{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
 
 /* ---------- 徽标/状态点 ---------- */
@@ -82,37 +202,37 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 .dot::before{content:"";width:9px;height:9px;border-radius:50%;background:var(--muted)}
 .dot.ok::before{background:var(--ok)}.dot.bad::before{background:var(--err)}.dot.wait::before{background:var(--warn)}
 .pill{font-size:11px;padding:2px 9px;border-radius:99px;white-space:nowrap;border:1px solid transparent}
-.pill.on{color:var(--ok);background:#e7f6ee;border-color:#bfe6d0}
-.pill.off{color:var(--muted);background:#eef1f5;border-color:var(--line)}
-.pill.warn{color:#b45309;background:#fef3e2;border-color:#f3d9b0}
-.chip{display:inline-flex;align-items:center;gap:5px;background:#eef1f5;border:1px solid var(--line);
+.pill.on{color:var(--ok);background:var(--ok-soft);border-color:var(--line)}
+.pill.off{color:var(--muted);background:var(--inset);border-color:var(--line)}
+.pill.warn{color:var(--warn);background:var(--warn-soft);border-color:var(--line)}
+.chip{display:inline-flex;align-items:center;gap:5px;background:var(--inset);border:1px solid var(--line);
   color:var(--text);border-radius:99px;padding:2px 6px 2px 11px;font-size:12px;margin:2px}
 .chip b{cursor:pointer;font-weight:700;color:var(--muted);padding:0 3px;border-radius:99px}
 .chip b:hover{color:var(--err)}
 .tag{display:inline-block;font-size:10px;color:var(--accent);background:var(--accent-soft);
   border-radius:5px;padding:0 5px;margin-left:6px}
-.tag.amber{color:#b45309;background:#fef3e2}
-.tag.warn{color:#b45309;background:#fef3e2}
+.tag.amber{color:var(--warn);background:var(--warn-soft)}
+.tag.warn{color:var(--warn);background:var(--warn-soft)}
 /* 统一订阅导入结果 */
-.subgrp{border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:10px 0;background:#fbfcfe}
+.subgrp{border:1px solid var(--line);border-radius:9px;padding:8px 10px;margin:10px 0;background:var(--inset)}
 .subgrp-t{font-size:13px;font-weight:600;margin-bottom:6px}
 .subrow{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:13px;padding:3px 0}
 .subrow.ok span:first-child{color:var(--ok,#1a8d3a)}
 .subrow.muted{color:var(--muted)}
 
 /* ---------- 实时播放诊断 ---------- */
-.live-dev{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:#fbfcfe}
+.live-dev{border:1px solid var(--line);border-radius:10px;padding:10px 12px;margin:8px 0;background:var(--inset)}
 .live-rows{margin-top:6px;display:flex;flex-direction:column;gap:3px}
 .live-row{display:flex;align-items:center;gap:6px;font-size:12px;flex-wrap:wrap}
 .live-row .muted{font-size:11px}
 .live-dev details{margin-top:6px}
-.diag{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px}
+.diag{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:6px 0;font-size:13px}
 
 /* ---------- 资源站列表：不分页，自适应列宽 + 可滚动 ---------- */
 .src-wrap{max-height:min(62vh,620px);overflow:auto;border:1px solid var(--line);
   border-radius:10px}
-.src-wrap.expanded{max-height:none;overflow:visible}
-.src-wrap table{width:100%;table-layout:fixed}
+.src-wrap.expanded{max-height:none;overflow:auto}
+.src-wrap table{width:100%;min-width:580px;table-layout:fixed}
 .src-wrap td,.src-wrap th{font-size:13px;padding:7px 9px;overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}
 .src-wrap td.src-name{white-space:normal;line-height:1.45}
@@ -122,7 +242,7 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 
 /* ---------- 已缓存条目：容器内滚动 + 自适应缩放 ---------- */
 .cache-wrap{max-height:340px;overflow:auto;border:1px solid var(--line);
-  border-radius:10px;background:#fff}
+  border-radius:10px;background:var(--card)}
 .cache-wrap table{width:100%;table-layout:fixed}
 .cache-wrap td,.cache-wrap th{font-size:13px;padding:7px 9px;
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -133,7 +253,12 @@ label.field>span{display:block;color:var(--muted);font-size:12px;margin-bottom:4
 .cache-more button{font-size:13px}
 
 /* ---------- 表格 ---------- */
+.table-scroll{overflow:auto}
+.table-scroll table{min-width:420px}
+#page-sources .table-scroll table{min-width:540px}
 table{width:100%;border-collapse:collapse;font-size:13px}
+thead{background:var(--inset)}
+tbody tr:hover{background:var(--inset)}
 th,td{text-align:left;padding:9px 8px;border-bottom:1px solid var(--line);vertical-align:middle}
 th{color:var(--muted);font-weight:500;font-size:12px}
 tr:last-child td{border-bottom:0}
@@ -143,33 +268,37 @@ tr:last-child td{border-bottom:0}
 
 /* ---------- 管理页开关/缓存卡片（移植上游 v0.2.54/69：导入按钮、缓存网格、代理模式段） ---------- */
 label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
-  border:1px solid var(--accent);background:#fff;color:var(--accent);border-radius:9px;
+  border:1px solid var(--accent);background:var(--card);color:var(--accent);border-radius:9px;
   padding:8px 15px;font-size:13.5px;cursor:pointer;white-space:nowrap;font-family:inherit}
 label.btn-sm{padding:5px 12px;font-size:12.5px;border-radius:7px}
+label.btn:focus-within,label.btn-sm:focus-within{outline:2px solid var(--accent);outline-offset:3px}
+label.btn,label.btn-sm{position:relative}
+.file-input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
 label.btn:hover,label.btn-sm:hover{background:var(--accent-soft)}
-.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#f1f3f6;flex-wrap:wrap}
-.seg button{border:none!important;background:transparent!important;padding:7px 14px;font-size:13px;color:var(--muted)!important;border-radius:0!important;box-shadow:none!important}
-.seg button.active{background:var(--accent)!important;color:#fff!important;font-weight:600}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;padding:2px;gap:2px;background:var(--inset);flex-wrap:wrap}
+.seg button{border-color:transparent;background:transparent;padding:7px 14px;font-size:13px;color:var(--muted)}
+.seg button.active{background:var(--accent-soft);color:var(--accent);font-weight:700}
+.seg button:focus-visible{outline-offset:-3px}
 
 /* ---------- 概览统计 ---------- */
-.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
-.stat{background:#fafbfc;border:1px solid var(--line);border-radius:10px;padding:12px 14px}
-.stat .n{font-size:22px;font-weight:700}
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,128px),1fr));gap:10px}
+.stat{background:var(--inset);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.stat .n{font-size:clamp(23px,3vw,30px);font-weight:750;letter-spacing:-.035em;font-variant-numeric:tabular-nums}
 .stat .l{font-size:12px;color:var(--muted)}
-.lib-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px}
-.lib{display:flex;align-items:center;gap:10px;background:#fafbfc;border:1px solid var(--line);
+.lib-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,200px),1fr));gap:10px}
+.lib{display:flex;align-items:center;gap:10px;background:var(--inset);border:1px solid var(--line);
   border-radius:10px;padding:10px 12px}
 .lib .ic{font-size:20px}
 .lib .t{font-weight:600;font-size:14px}
 .lib .c{font-size:12px;color:var(--muted)}
 .lib .pin{display:inline-flex;align-items:center;gap:4px;font-size:12px;color:var(--muted);
-  cursor:pointer;white-space:nowrap;padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:#fff}
+  cursor:pointer;white-space:nowrap;padding:2px 8px;border-radius:99px;border:1px solid var(--line);background:var(--card)}
 .lib .pin input{margin:0;accent-color:var(--accent)}
 .lib:has(.pin input:checked){border-color:var(--accent);background:var(--accent-soft)}
 
 /* ---------- 优先级 ---------- */
 .prio-input{width:74px}
-.prio-bar{height:5px;border-radius:3px;background:linear-gradient(90deg,#cfe0fb,#2f6fed);margin-top:3px}
+.prio-bar{height:5px;border-radius:3px;background:linear-gradient(90deg,var(--accent),var(--accent-fill));margin-top:3px}
 
 /* ---------- 弹窗/日志/toast ---------- */
 pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-radius:8px;
@@ -178,61 +307,106 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   background:#222;color:#fff;padding:9px 18px;border-radius:99px;font-size:13px;opacity:0;
   transition:.22s;pointer-events:none;z-index:80;max-width:90vw}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-#toast.ok{background:var(--ok)}#toast.fail{background:var(--err)}
+#toast.ok{background:var(--ok-soft);color:var(--ok);border:1px solid var(--ok)}
+#toast.fail{background:var(--err-soft);color:var(--err);border:1px solid var(--err)}
 
-/* ---------- 移动端 ---------- */
+/* Appearance dialog */
+.theme-dialog{width:min(480px,calc(100% - 24px));max-height:calc(100dvh - 24px);overflow:auto;
+  padding:clamp(14px,4vw,24px);border:1px solid var(--line);border-radius:var(--radius);
+  background:var(--card);color:var(--text);box-shadow:0 18px 60px #0004}
+.theme-dialog::backdrop{background:var(--overlay)}
+.theme-head,.theme-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.theme-head h2{margin:0;font-size:22px}
+.theme-dialog fieldset{min-width:0;border:0;padding:0;margin:16px 0}
+.theme-dialog legend{font-weight:700;margin-bottom:6px;padding:0}
+.theme-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px}
+.theme-options label{display:flex;min-height:44px;align-items:center;justify-content:center;gap:6px;
+  padding:5px;border:1px solid var(--line);border-radius:9px;cursor:pointer;font-size:13px}
+.theme-options input{margin:0;accent-color:var(--accent)}
+.theme-options label:has(input:checked){border-color:var(--accent);background:var(--accent-soft);color:var(--accent)}
+.theme-swatches{display:grid;grid-template-columns:repeat(auto-fit,minmax(50px,1fr));gap:6px;margin-bottom:12px}
+.theme-swatch{display:grid;justify-items:center;gap:4px;padding:6px 2px;min-height:48px;
+  border:1px solid var(--line);border-radius:9px;background:var(--card);color:var(--text);font-size:12px}
+.theme-swatch::before{content:"";width:18px;height:18px;border-radius:50%;background:var(--swatch);border:1px solid var(--control-line)}
+.theme-swatch[aria-pressed=true]{border-color:var(--accent);background:var(--accent-soft);font-weight:750}
+.theme-custom{display:flex;flex-wrap:wrap;align-items:end;gap:8px}
+.theme-custom label{flex:1 1 100px;min-width:0;font-size:13px}
+.theme-custom input{display:block;min-height:42px;margin-top:4px}
+.theme-custom input[type=color]{width:56px;padding:4px;border:1px solid var(--control-line);
+  border-radius:8px;background:var(--card);cursor:pointer}
+.theme-custom input[aria-invalid=true]{border-color:var(--err)}
+.theme-status{min-height:1.6em;margin:8px 0 0;color:var(--muted);font-size:13px}
+.theme-error{color:var(--err)}
+
+.source-add{display:grid;grid-template-columns:minmax(0,150px) minmax(0,1fr) auto auto;gap:10px;align-items:center}
 .bottom-nav{display:none}
 @media(max-width:760px){
-  .sidebar{display:none}
-  .main{padding:max(16px,env(safe-area-inset-top,0px)) 14px
-    calc(64px + env(safe-area-inset-bottom,8px));max-width:100%}
-  h2.page-title{font-size:18px}
-  input[type=text],input[type=password],textarea,select{font-size:16px}
-  .btn{min-height:42px}
-  .bottom-nav{display:flex;position:fixed;left:0;right:0;bottom:0;z-index:45;
-    height:calc(58px + env(safe-area-inset-bottom,0px));box-sizing:border-box;align-items:center;
-    background:rgba(255,255,255,.97);border-top:1px solid var(--line);backdrop-filter:blur(6px);
-    padding-bottom:env(safe-area-inset-bottom,0px)}
-  .bottom-nav .nav-item{flex:1;display:flex;align-items:center;justify-content:center;
-    height:58px;text-align:center;padding:0 2px;font-size:12px;border-radius:0;white-space:nowrap}
-  .bottom-nav .nav-item.active{background:transparent;color:var(--accent);font-weight:700}
+  .source-add{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .source-add input[type=text]{grid-column:1/-1}
+  .layout{display:block}
+  .sidebar{height:auto;overflow:visible;flex-direction:row;align-items:center;justify-content:space-between;
+    gap:6px;padding: max(8px,env(safe-area-inset-top)) max(10px,env(safe-area-inset-right)) 8px max(10px,env(safe-area-inset-left));
+    border-right:0;border-bottom:1px solid var(--line)}
+  .brand{gap:7px;padding:0}.brand-mark{width:32px;height:32px;border-radius:9px}.brand-name{font-size:14px}
+  .sidebar-tools{display:flex;flex:none;gap:5px;margin:0}
+  .theme-trigger,.menu-trigger{display:flex;padding:5px 7px;gap:5px;font-size:13px}
+  .sidebar-foot{display:none}
+  .nav{display:none;position:absolute;top:100%;inset-inline:8px;padding:8px;max-height:calc(100dvh - 132px);
+    overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:12px;box-shadow:var(--shadow)}
+  .nav.open{display:grid}
+  .main{padding:14px max(12px,env(safe-area-inset-right)) calc(76px + env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+  .page-head{padding:16px;margin-bottom:12px}
+  input[type=text],input[type=number],input[type=password],textarea,select{font-size:16px}
+  button:not(.nav-item),label.btn,label.btn-sm{min-height:42px}
+  .bottom-nav{display:flex;position:fixed;inset:auto 0 0;z-index:45;
+    background:var(--card);border-top:1px solid var(--line);
+    padding:3px max(4px,env(safe-area-inset-right)) calc(3px + env(safe-area-inset-bottom)) max(4px,env(safe-area-inset-left))}
+  .bottom-nav .nav-item{flex:1;min-width:0;flex-direction:column;justify-content:center;min-height:48px;
+    text-align:center;gap:3px;padding:3px 0;font-size:11px;white-space:nowrap}
+  .bottom-nav .nav-icon{font-size:15px}
+  #toast{bottom:calc(65px + env(safe-area-inset-bottom))}
 }
+@media(prefers-reduced-motion:reduce){#toast{transition:none}}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.13/dist/hls.min.js" async></script>
 </head>
 <body>
+<a class="skip-link" href="#mainContent">跳到主内容</a>
 <div class="layout">
   <aside class="sidebar">
     <div class="brand">
-      <div class="brand-mark">🎬</div>
+      <div class="brand-mark" aria-hidden="true"></div>
       <div><div class="brand-name">fnmedia-ext</div><div class="brand-sub">管理台</div></div>
     </div>
-    <nav class="nav" id="nav">
-      <button class="nav-item active" data-page="overview">概览</button>
-      <button class="nav-item" data-page="library">虚拟媒体库</button>
-      <button class="nav-item" data-page="quality">片源质量</button>
-      <button class="nav-item" data-page="sources">资源站</button>
-      <button class="nav-item" data-page="importsub">导入订阅</button>
+    <nav class="nav" id="nav" aria-label="管理台页面">
+      <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span>概览</button>
+      <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true">▤</span>虚拟媒体库</button>
+      <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true">≋</span>片源质量</button>
+      <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true">◎</span>资源站</button>
+      <button type="button" class="nav-item" data-page="importsub" aria-controls="page-importsub"><span class="nav-icon" aria-hidden="true">⇩</span>导入订阅</button>
       <!-- >>> PRIVATE:SCANLOGIN -->
-      <button class="nav-item" data-page="scanlogin">网盘登录</button>
+      <button type="button" class="nav-item" data-page="scanlogin" aria-controls="page-scanlogin"><span class="nav-icon" aria-hidden="true">◈</span>网盘登录</button>
       <!-- <<< PRIVATE:SCANLOGIN -->
       <!-- >>> PRIVATE:CATVOD -->
-      <button class="nav-item" data-page="xiaoya">小雅 / JS</button>
+      <button type="button" class="nav-item" data-page="xiaoya" aria-controls="page-xiaoya"><span class="nav-icon" aria-hidden="true">⌘</span>小雅 / JS</button>
       <!-- <<< PRIVATE:CATVOD -->
-      <button class="nav-item" data-page="search">搜索</button>
-      <button class="nav-item" data-page="about">关于</button>
+      <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true">⌕</span>搜索</button>
+      <button type="button" class="nav-item" data-page="about" aria-controls="page-about"><span class="nav-icon" aria-hidden="true">ⓘ</span>关于</button>
     </nav>
-    <div class="sidebar-foot">
-      <span id="globalState" class="dot wait">检测中…</span>
+    <div class="sidebar-tools">
+      <button type="button" class="theme-trigger" id="themeTrigger" aria-haspopup="dialog" aria-controls="themeDialog">外观</button>
+      <button type="button" class="menu-trigger" id="menuTrigger" aria-controls="nav" aria-expanded="false">菜单</button>
+      <div class="sidebar-foot"><span id="globalState" class="dot wait">检测中…</span></div>
     </div>
   </aside>
 
-  <main class="main">
+  <main class="main" id="mainContent" tabindex="-1">
 
     <!-- ============ 概览 ============ -->
-    <section class="page active" id="page-overview">
-      <h2 class="page-title">概览</h2>
-      <p class="page-desc">在飞牛原生搜索与媒体库中注入在线影视，点击直接调用飞牛原生播放器。</p>
+    <section class="page active" id="page-overview" aria-labelledby="title-overview">
+      <header class="page-head">
+  <h2 class="page-title" id="title-overview" tabindex="-1">概览</h2>
+        <p class="page-desc">在飞牛原生搜索与媒体库中注入在线影视，点击直接调用飞牛原生播放器。</p>
+      </header>
 
       <div class="card">
         <div class="card-title">虚拟媒体库</div>
@@ -258,11 +432,18 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="liveDiagnosis" style="margin:6px 0"></div>
         <div style="display:flex;gap:12px;flex-wrap:wrap;margin:6px 0 10px" class="sm muted">
           <span>来源：<b style="color:var(--ok)">local</b> 插件构造</span>
-          <span><b style="color:#2563eb">mixed</b> 合并官方</span>
-          <span><b style="color:#b45309">upstream</b> 透传官方</span>
+          <span><b style="color:var(--info)">mixed</b> 合并官方</span>
+          <span><b style="color:var(--warn)">upstream</b> 透传官方</span>
           <span><b style="color:var(--err)">4xx/5xx</b> 出错</span>
         </div>
         <div id="liveDevices"><div class="muted sm">暂无播放活动（在电视或手机上播一部片即可看到）</div></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">运行诊断</div>
+        <div class="hint">仅展示脱敏统计，不记录搜索词、影片标题或播放地址。</div>
+        <div id="runtimeDiagnostics"><div class="muted sm">读取中…</div></div>
+        <button class="small" style="margin-top:8px" onclick="loadRuntimeDiagnostics()">刷新诊断</button>
       </div>
 
       <div class="card">
@@ -279,9 +460,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     </section>
 
     <!-- ============ 虚拟媒体库 ============ -->
-    <section class="page" id="page-library">
-      <h2 class="page-title">虚拟媒体库</h2>
-      <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」「隐藏」，虚拟库的显示顺序与相对本地库的位置可调；子账号能看哪些库在下方「子账号可见权限」里按人勾选。</p>
+    <section class="page" id="page-library" aria-labelledby="title-library">
+      <header class="page-head">
+  <h2 class="page-title" id="title-library" tabindex="-1">虚拟媒体库</h2>
+        <p class="page-desc">插件在飞牛影视媒体库中虚拟出的内容。热门榜单与海量片库各自独立开关；每张库卡可单独「置顶」「隐藏」，虚拟库的显示顺序与相对本地库的位置可调；子账号能看哪些库在下方「子账号可见权限」里按人勾选。</p>
+      </header>
 
       <div class="card">
         <div class="card-title">① 热门资源（各类目真实榜单）</div>
@@ -365,7 +548,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="acctList" style="margin-top:10px"></div>
       </div>
 
-      <div class="card">
+      <div class="card" id="welfareCard" style="display:none">
         <div class="card-title">🔞 福利（独立开关）</div>
         <p class="card-sub">仅在已勾选「福利分类」的资源站里浏览成人向片库。默认关闭：完全不建路由、不抓取、不显示。</p>
         <label class="switch-row">
@@ -390,9 +573,11 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
     <!-- ============ 片源质量 ============ -->
 
-    <section class="page" id="page-quality">
-      <h2 class="page-title">片源质量优先级</h2>
-      <p class="page-desc">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
+    <section class="page" id="page-quality" aria-labelledby="title-quality">
+      <header class="page-head">
+  <h2 class="page-title" id="title-quality" tabindex="-1">片源质量优先级</h2>
+        <p class="page-desc">热门资源点击搜源时，按「源质量权重 → 可播直链数」排序，优先选择高质量源。</p>
+      </header>
       <div class="card">
         <label class="switch-row">
           <input type="checkbox" id="preferQ" checked/>
@@ -408,18 +593,22 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small" style="margin-left:auto" onclick="resetPriority()">恢复默认权重</button>
         </div>
         <p class="card-sub">数值越大越优先（-100–100，留空/0 用内省默认）。修改后点底部「保存权重」。</p>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="片源质量优先级列表">
         <table>
           <thead><tr><th>资源站</th><th style="width:120px">质量权重</th><th>相对优先级</th></tr></thead>
           <tbody id="prioRows"><tr><td colspan="3" class="muted">加载中…</td></tr></tbody>
         </table>
+        </div>
         <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
       </div>
     </section>
 
     <!-- ============ 资源站 ============ -->
-    <section class="page" id="page-sources">
-      <h2 class="page-title">资源站</h2>
-      <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
+    <section class="page" id="page-sources" aria-labelledby="title-sources">
+      <header class="page-head">
+  <h2 class="page-title" id="title-sources" tabindex="-1">资源站</h2>
+        <p class="page-desc">标准苹果 CMS 源与扩展源；启用后进入聚合搜索与海量片库。</p>
+      </header>
       <div class="card">
         <div class="card-title">资源站列表 <span class="badge" id="srcCount"></span>
           <button class="small primary" id="srcRefreshBtn" onclick="refreshSources()" title="重建分类路由、清空搜索缓存，把列表与运行时状态对齐到当前配置（不重启插件）">⟳ 刷新</button>
@@ -429,8 +618,8 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small" onclick="cmsHealthCheck()" title="用热门词批量检测纯 CMS 源是否有效，失效写入健康画像触发熔断">CMS 批量体检</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
           <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
-          <label class="btn-sm" style="border-color:var(--ok);background:var(--ok);color:#fff" title="从 JSON 文件导入 CMS 源，自动去重">
-            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" style="display:none" onchange="importCmsFile(this)"/>
+          <label class="btn-sm" style="border-color:var(--ok);background:var(--ok-soft);color:var(--ok)" title="从 JSON 文件导入 CMS 源，自动去重">
+            ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" class="file-input" onchange="importCmsFile(this)"/>
           </label>
         </div>
         <div class="row" style="margin:8px 0;gap:8px;flex-wrap:wrap;align-items:center">
@@ -443,14 +632,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span class="muted sm" id="srcPageInfo"></span>
           <button class="small" id="srcExpandBtn" onclick="toggleSrcExpand()">展开全部</button>
         </div>
-        <div class="src-wrap" id="srcWrap">
+        <div class="src-wrap" id="srcWrap" tabindex="0" role="region" aria-label="资源站列表">
         <table>
           <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
             <th style="width:130px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
           <tbody id="srcRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
         </table>
         </div>
-        <div class="row mt" style="display:grid;grid-template-columns:150px 1fr 90px auto;gap:10px" id="addGrid">
+        <div class="source-add mt" id="addGrid">
           <input type="text" id="addName" placeholder="名称（可选）"/>
           <input type="text" id="addApi" placeholder="苹果CMS JSON 接口，如 https://xxx.com/api.php/provide/vod/at/json"/>
           <label style="display:flex;align-items:center;gap:4px;font-size:12px;cursor:pointer">
@@ -499,24 +688,28 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <span class="hint" style="font-weight:400">按真实播放探测统计成功率/延迟，死源自动降权 3 分钟</span>
           <button class="small" style="margin-left:auto" onclick="loadHealth()">刷新</button>
         </div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="资源站连通性列表">
         <table>
           <thead><tr><th>源</th><th style="width:80px">样本</th>
             <th style="width:110px">成功率</th><th style="width:100px">平均延迟</th>
             <th style="width:90px">状态</th><th style="width:70px">操作</th></tr></thead>
           <tbody id="healthRows"><tr><td colspan="6" class="muted">播放几次后自动生成。</td></tr></tbody>
         </table>
+        </div>
       </div>
     </section>
 
     <!-- ============ 导入 TVBox 订阅（独立页） ============ -->
-    <section class="page" id="page-importsub">
-      <h2 class="page-title">导入订阅</h2>
-      <p class="page-desc">粘贴一个 TVBox / 影视仓 / OK影视 订阅 URL 或整段配置，自动识别并分类导入，<strong>导入即可在搜索与播放源中使用</strong>。支持 base64 与多订阅聚合。</p>
+    <section class="page" id="page-importsub" aria-labelledby="title-importsub">
+      <header class="page-head">
+  <h2 class="page-title" id="title-importsub" tabindex="-1">导入订阅</h2>
+        <p class="page-desc">粘贴一个 TVBox / 影视仓 / OK影视 订阅 URL 或整段配置，自动识别并分类导入，<strong>导入即可在搜索与播放源中使用</strong>。支持 base64 与多订阅聚合。</p>
+      </header>
       <div class="card">
         <div class="card-title">订阅抓取代理（可选）
           <label style="float:right;display:flex;align-items:center;gap:6px;font-size:12px;font-weight:400;cursor:pointer">
             <input type="checkbox" id="subProxyEnable" style="width:14px;height:14px;accent-color:var(--accent)" onchange="onSubProxyToggle()"/> 启用代理</label></div>
-        <p class="card-sub">仅用于<strong>拉取订阅配置、爬虫 jar、DRPY 脚本</strong>（GitHub 等被墙/解析失败时可走 Clash）。<strong>播放、搜索、CMS 探测一律不走此代理</strong>。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
+        <p class="card-sub">仅用于<strong>拉取订阅配置、DRPY 脚本</strong>（GitHub 等被墙/解析失败时可走 Clash）。<strong>播放、搜索、CMS 探测一律不走此代理</strong>。形如 <code>http://用户:密码@主机:端口</code>，清空=直连。</p>
         <div class="row">
           <input type="text" id="subProxyUrl" placeholder="http://Clash:密码@192.168.x.x:7890" style="flex:2" disabled/>
           <button class="small" id="subProxySaveBtn" onclick="saveSubProxy(true)" disabled>保存并测试</button>
@@ -547,13 +740,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <!-- >>> PRIVATE:DRPY -->
           与 <strong>远程 JS 爬虫源（DRPY）</strong>
           <!-- <<< PRIVATE:DRPY -->
-          能直接播放的<strong>自动启用</strong>；P2P/磁力/云盘等慢源与 jar/脚本暂未就绪的源导入后默认关闭，可在结果里开启或补传；
+          能直接播放的<strong>自动启用</strong>；P2P/磁力/云盘等慢源与脚本暂未就绪的源导入后默认关闭，可在结果里开启或补传；
           网盘/直播/无法识别的源跳过并说明原因。</p>
         <div class="row"><input type="text" id="subUrl" placeholder="配置订阅 URL（支持 T4 / base64 / 多订阅聚合）" style="flex:2"/>
           <button class="primary small" onclick="importSubscription('url')">按 URL 导入</button>
-          <!-- >>> PRIVATE:SPIDER -->
-          <button class="small" style="border-color:var(--accent);color:var(--accent)" onclick="importFantaiying()" title="官方维护、在线影视+网盘聚合；自动解密、智能跳过 x86 会崩溃的源">⚡ 一键饭太硬</button>
-          <!-- <<< PRIVATE:SPIDER -->
         </div>
         <label class="field"><textarea id="subText" rows="7" placeholder="或直接粘贴配置 JSON（含 sites 数组）…"></textarea></label>
         <div class="btn-row">
@@ -565,23 +755,6 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div id="subResult"></div>
       </div>
 
-      <!-- >>> PRIVATE:SPIDER -->
-      <div class="card" style="margin-top:14px">
-        <div class="card-title">已导入的爬虫源 <button class="small" style="float:right" onclick="loadSpiderMgmt()">刷新</button></div>
-        <p class="card-sub">普通 csp_ 爬虫按各自订阅的 jar 在本地安卓运行时执行。jar 自动下载失败时可在此手动补传，补传后非风险源自动启用。点「测试」可验证该源能否搜索、取详情，勾选试播还会尝试解析首集播放地址。</p>
-        <div class="row" style="margin:4px 0 8px;gap:8px;align-items:center;flex-wrap:wrap">
-          <input type="text" id="spProbeKw" value="庆余年" placeholder="测试关键词" style="max-width:150px"/>
-          <label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">
-            <input type="checkbox" id="spProbePlay" style="width:14px;height:14px;accent-color:var(--accent)"/>同时试播(首集)</label>
-          <button class="small" id="spScanBtn" onclick="spScanStart()">一键全部体检</button>
-          <button class="small" id="spDelBtn" onclick="spDeleteChecked()" style="display:none;border-color:var(--danger);color:var(--danger)">删除勾选失效源</button>
-          <span class="muted sm">体检较慢（逐源真机调用）；默认仅勾选确认失效/报错的源，可手动调整。</span>
-        </div>
-        <div id="spScanBar" class="muted sm" style="display:none;margin:2px 0 8px"></div>
-        <div id="spScanResult" style="margin-bottom:10px"></div>
-        <div id="spiderMgmt"><div class="muted sm">点击「刷新」加载。</div></div>
-      </div>
-      <!-- <<< PRIVATE:SPIDER -->
 
       <!-- >>> PRIVATE:DRPY -->
       <div class="card" style="margin-top:14px">
@@ -594,20 +767,22 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     </section>
 
     <!-- >>> PRIVATE:SCANLOGIN -->
-    <!-- ============ 扫码登录（第三方网盘 + B 站） ============ -->
-    <section class="page" id="page-scanlogin">
-      <h2 class="page-title">网盘登录</h2>
-      <p class="page-desc">选择网盘进行登录授权。第三方网盘登录后网盘高清线路才能自动转存并出原画。</p>
+    <!-- ============ 网盘登录（第三方网盘） ============ -->
+    <section class="page" id="page-scanlogin" aria-labelledby="title-scanlogin">
+      <header class="page-head">
+  <h2 class="page-title" id="title-scanlogin" tabindex="-1">网盘登录</h2>
+        <p class="page-desc">选择网盘进行登录授权。第三方网盘登录后网盘高清线路才能自动转存并出原画。</p>
+      </header>
 
       <div class="card">
         <div class="card-title">第三方网盘 <span class="pill off" id="panScanPill">未登录</span></div>
         <p class="card-sub">夸克 / UC / 阿里云盘。登录后「网盘高清」兜底线路才能自动转存并出原画。</p>
         <div class="btn-row">
-          <button class="btn primary small" onclick="openPanScan()">打开网盘扫码登录</button>
+          <button class="btn primary small" onclick="openPanScan()">打开网盘登录</button>
           <button class="btn small" onclick="refreshPanScan()">刷新登录状态</button>
         </div>
         <div class="hint" id="panScanMsg">未加载</div>
-        <iframe id="panScanFrame" title="第三方网盘扫码登录" data-src="/v/api/ext/pan/page"
+        <iframe id="panScanFrame" title="第三方网盘登录" data-src="/v/api/ext/pan/page"
           style="display:none;width:100%;height:640px;border:1px solid var(--line);border-radius:12px;margin-top:10px"></iframe>
       </div>
 
@@ -663,30 +838,32 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
 
 
     <!-- >>> PRIVATE:CATVOD -->
-    <!-- ============ 小雅 / JS（CATVOD） ============ -->
-    <section class="page" id="page-xiaoya">
-      <h2 class="page-title">私有爬虫运行时</h2>
-      <p class="page-desc">小雅网盘（catvod JVM 爬虫）与 drpyS JS 爬虫（Node 运行时）。仅完整版本地运行。</p>
+    <!-- ============ 小雅网盘与 DRPY ============ -->
+    <section class="page" id="page-xiaoya" aria-labelledby="title-xiaoya">
+      <header class="page-head">
+  <h2 class="page-title" id="title-xiaoya" tabindex="-1">小雅网盘与 DRPY</h2>
+        <p class="page-desc">小雅网盘（AList HTTP 接入）与 drpyS JS 爬虫（Node 运行时）。仅完整版本地运行。</p>
+      </header>
       <div class="card">
         <div class="card-title">运行时
-          <span class="pill off" id="jvmPill">JVM</span>
-          <span class="pill off" id="nodePill">Node(JS)</span></div>
+                  <span class="pill off" id="nodePill">Node(JS)</span></div>
         <h3 style="font-size:14px;margin:6px 0">小雅网盘（Alist 网盘聚合）</h3>
         <div class="row">
           <input type="text" id="xyServer" placeholder="小雅服务器，如 http://192.168.x.x:5678" style="flex:2"/>
           <input type="text" id="xyUser" placeholder="账号" style="max-width:130px"/>
           <input type="password" id="xyPass" placeholder="密码（留空不改）" style="max-width:170px" autocomplete="new-password"/>
           <button class="primary small" onclick="saveXiaoya()">保存</button>
-          <button class="small" onclick="browseXiaoya()">连通并载入目录</button>
         </div>
         <div class="hint" id="xyMsg"></div>
         <div class="row"><h3 style="font-size:14px;margin:6px 0">目录浏览</h3>
           <button class="small" onclick="xyCrumbUp()">上级</button>
           <span id="xyCrumb" class="muted sm"></span></div>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="网盘文件夹列表">
         <table>
           <thead><tr><th>分类 / 文件夹</th><th style="width:80px">操作</th></tr></thead>
           <tbody id="xyRows"><tr><td colspan="2" class="muted">保存并连接后显示分类</td></tr></tbody>
         </table>
+        </div>
       </div>
       <div class="card">
         <div class="card-title">小雅分类媒体库</div>
@@ -699,8 +876,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     <!-- <<< PRIVATE:CATVOD -->
 
     <!-- ============ 搜索 ============ -->
-    <section class="page" id="page-search">
-      <h2 class="page-title">搜索设置</h2>
+    <section class="page" id="page-search" aria-labelledby="title-search">
+      <header class="page-head">
+  <h2 class="page-title" id="title-search" tabindex="-1">搜索设置</h2>
+      </header>
       <div class="card">
         <label class="switch-row"><input type="checkbox" id="onlineFirst"/>
           <span>在线资源结果前排展示<span class="sub">在线片库更齐全；关闭则本地优先</span></span></label>
@@ -792,8 +971,10 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     </section>
 
     <!-- ============ 关于 ============ -->
-    <section class="page" id="page-about">
-      <h2 class="page-title">关于</h2>
+    <section class="page" id="page-about" aria-labelledby="title-about">
+      <header class="page-head">
+  <h2 class="page-title" id="title-about" tabindex="-1">关于</h2>
+      </header>
       <div class="card">
         <div class="card-title">🎬 fnmedia-ext · 飞牛影视在线扩展</div>
         <p class="card-sub">在原生搜索 / 媒体库注入在线影视并直接调用飞牛原生播放器播放。</p>
@@ -805,6 +986,17 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <div>· 海量片库：苹果 CMS 分类深翻，跨源聚合成海量四库与单源独立库。</div>
         </div>
         <div class="hint" id="aboutEdition"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">🗄️ 配置备份与恢复</div>
+        <p class="card-sub">导出内容会自动脱敏。恢复前先预览差异，敏感字段保留当前设备值。</p>
+        <div class="btn-row">
+          <button class="small primary" onclick="exportConfigBackup()">导出脱敏配置</button>
+          <label class="btn small">选择备份文件<input type="file" id="configRestoreFile" accept=".json" class="file-input" onchange="previewConfigRestore(this)"></label>
+        </div>
+        <div id="configRestorePreview" class="hint" style="white-space:pre-wrap;margin-top:8px"></div>
+        <button id="configRestoreApply" class="small danger" style="display:none;margin-top:8px" onclick="applyConfigRestore()">确认恢复预览中的配置</button>
       </div>
 
       <div class="card" id="updCard">
@@ -822,7 +1014,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
             <summary class="muted sm" style="cursor:pointer">下载慢 / 直连失败？点此设置更新代理（可选）</summary>
             <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
               <input id="updProxy" type="text" class="input" placeholder="http://用户:密码@代理IP:端口（仅用于下载更新，留空直连）"
-                     style="flex:1;min-width:240px">
+                     style="flex:1 1 240px;min-width:0">
               <button class="btn" id="updProxySave">保存代理</button>
             </div>
             <div class="hint">仅本机保存、不随安装包分发；保存后点“重新检查/立即更新”生效。</div>
@@ -840,7 +1032,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <div id="tokGrace" class="muted"></div>
           <div id="tokLimit" class="muted"></div>
           <div id="tokNewWrap" style="display:none">
-            <div style="color:var(--warn,#b45309);font-weight:600">新令牌（只显示一次，请立即复制保存）：</div>
+            <div style="color:var(--warn);font-weight:600">新令牌（只显示一次，请立即复制保存）：</div>
             <div class="row"><input type="text" id="tokNew" readonly style="flex:1" onclick="this.select()"/>
               <button class="small" onclick="copyNewToken()">复制</button></div>
           </div>
@@ -866,15 +1058,55 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   </main>
 </div>
 
-<nav class="bottom-nav" id="bottomNav">
-  <button class="nav-item active" data-page="overview">概览</button>
-  <button class="nav-item" data-page="library">媒体库</button>
-  <button class="nav-item" data-page="quality">质量</button>
-  <button class="nav-item" data-page="sources">资源站</button>
-  <button class="nav-item" data-page="search">搜索</button>
+<nav class="bottom-nav" id="bottomNav" aria-label="快捷导航">
+  <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span>概览</button>
+  <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true">▤</span>媒体库</button>
+  <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true">≋</span>质量</button>
+  <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true">◎</span>资源站</button>
+  <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true">⌕</span>搜索</button>
 </nav>
 
-<div id="toast"></div>
+<dialog id="themeDialog" class="theme-dialog" aria-labelledby="themeTitle" aria-describedby="themeHelp">
+  <div class="theme-head">
+    <h2 id="themeTitle">外观设置</h2>
+    <button type="button" class="btn small" id="themeClose" autofocus>关闭</button>
+  </div>
+  <p class="hint" id="themeHelp">外观即时生效，偏好仅保存在当前浏览器。</p>
+  <fieldset>
+    <legend>显示模式</legend>
+    <div class="theme-options">
+      <label><input type="radio" name="themeMode" value="system" checked>跟随系统</label>
+      <label><input type="radio" name="themeMode" value="light">浅色</label>
+      <label><input type="radio" name="themeMode" value="dark">深色</label>
+    </div>
+  </fieldset>
+  <fieldset>
+    <legend>强调色</legend>
+    <div class="theme-swatches" id="themeSwatches">
+      <button type="button" class="theme-swatch" data-palette="indigo" aria-pressed="true">靛青</button>
+      <button type="button" class="theme-swatch" data-palette="blue" aria-pressed="false">海蓝</button>
+      <button type="button" class="theme-swatch" data-palette="teal" aria-pressed="false">青绿</button>
+      <button type="button" class="theme-swatch" data-palette="rose" aria-pressed="false">玫红</button>
+      <button type="button" class="theme-swatch" data-palette="amber" aria-pressed="false">琥珀</button>
+      <button type="button" class="theme-swatch" data-palette="slate" aria-pressed="false">岩灰</button>
+    </div>
+    <form class="theme-custom" id="themeCustom" novalidate>
+      <div><label for="themeColor">选色</label><input type="color" id="themeColor" value="#4f46e5"></div>
+      <label for="themeHex">自定义色值
+        <input type="text" id="themeHex" value="#4f46e5" placeholder="#4f46e5" maxlength="7" spellcheck="false" autocomplete="off" aria-describedby="themeError">
+      </label>
+      <button type="submit" class="btn primary">应用颜色</button>
+    </form>
+    <p class="hint theme-error" id="themeError" role="alert"></p>
+  </fieldset>
+  <div class="theme-actions">
+    <button type="button" class="btn small" id="themeReset">恢复默认外观</button>
+    <span id="themeSelection" class="badge"></span>
+  </div>
+  <p id="themeStatus" class="theme-status" role="status"></p>
+</dialog>
+
+<div id="toast" role="status"></div>
 
 <script>
 const $=(id)=>document.getElementById(id);
@@ -894,23 +1126,109 @@ async function jget(p,timeoutMs){const ctrl=new AbortController();
 async function jpost(p,b){const r=await fetch(p,{method:"POST",headers:{"Content-Type":"application/json"},
   body:JSON.stringify(b||{})});return r.json();}
 
+/* ---------- 外观与导航 ---------- */
+const themeDialog = $("themeDialog");
+const themeTrigger = $("themeTrigger");
+const themeHex = $("themeHex");
+const themeColor = $("themeColor");
+const themeModes = $$('[name="themeMode"]');
+const themeSwatches = $$("#themeSwatches [data-palette]");
+const menuTrigger = $("menuTrigger");
+const mainNav = $("nav");
+
+function clearThemeError(){
+  themeHex.removeAttribute("aria-invalid");
+  $("themeError").textContent = "";
+}
+function syncTheme(){
+  const {mode, palette, custom} = adminTheme.get();
+  themeModes.forEach(input => {input.checked = input.value === mode;});
+  themeSwatches.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.palette === palette)));
+  themeColor.value = themeHex.value = custom;
+  $("themeSelection").textContent = palette === "custom" ? "当前：自定义 " + custom : "当前：" +
+    themeSwatches.find(button => button.dataset.palette === palette).textContent;
+  clearThemeError();
+}
+adminTheme.subscribe(saved => {
+  syncTheme();
+  $("themeStatus").textContent = saved ? "外观已更新。" : "外观已应用，但当前浏览器无法保存偏好。";
+});
+themeModes.forEach(input => input.addEventListener("change", () => adminTheme.set({mode: input.value})));
+themeSwatches.forEach(button => {
+  const palette = button.dataset.palette;
+  button.style.setProperty("--swatch", adminTheme.presets[palette]);
+  button.addEventListener("click", () => adminTheme.set({palette}));
+});
+themeColor.addEventListener("change", () => adminTheme.set({palette: "custom", custom: themeColor.value}));
+themeHex.addEventListener("input", clearThemeError);
+$("themeCustom").addEventListener("submit", event => {
+  event.preventDefault();
+  const custom = themeHex.value.trim();
+  if(!adminTheme.validHex(custom)){
+    themeHex.setAttribute("aria-invalid", "true");
+    $("themeError").textContent = "请输入六位十六进制色值，例如 #4f46e5。";
+    themeHex.focus();
+    return;
+  }
+  adminTheme.set({palette: "custom", custom});
+});
+$("themeReset").addEventListener("click", () => adminTheme.reset());
+themeTrigger.addEventListener("click", () => {
+  setMenuOpen(false);
+  syncTheme();
+  $("themeStatus").textContent = "";
+  themeDialog.showModal();
+});
+$("themeClose").addEventListener("click", () => themeDialog.close());
+themeDialog.addEventListener("close", () => themeTrigger.focus());
+syncTheme();
+
+function setMenuOpen(open){
+  mainNav.classList.toggle("open", open);
+  menuTrigger.setAttribute("aria-expanded", String(open));
+}
+menuTrigger.addEventListener("click", () => {
+  const open = menuTrigger.getAttribute("aria-expanded") !== "true";
+  setMenuOpen(open);
+  if(open) mainNav.querySelector('[aria-current="page"], .nav-item').focus();
+});
+document.addEventListener("keydown", event => {
+  if(event.key === "Escape" && menuTrigger.getAttribute("aria-expanded") === "true"){
+    setMenuOpen(false);
+    menuTrigger.focus();
+  }
+});
+document.addEventListener("click", event => {
+  if(!mainNav.contains(event.target) && !menuTrigger.contains(event.target)) setMenuOpen(false);
+});
+
 /* ---------- 页面切换 ---------- */
 async function switchPage(page){
   $$(".page").forEach(el=>el.classList.toggle("active",el.id==="page-"+page));
-  $$("[data-page]").forEach(el=>el.classList.toggle("active",el.dataset.page===page));
+  $$("[data-page]").forEach(el=>{
+    const current=el.dataset.page===page;
+    el.classList.toggle("active",current);
+    if(current)el.setAttribute("aria-current","page");
+    else el.removeAttribute("aria-current");
+  });
   window.scrollTo(0,0);
   if(page==="overview"){renderOverview();startLivePoll();}
   else{stopLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadSpiderMgmt==="function")loadSpiderMgmt();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
+  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
   // >>> PRIVATE:SCANLOGIN
   if(page==="scanlogin"){try{await refreshPanScan();}catch(e){}try{await loadPansouCfg();}catch(e){}}
   // <<< PRIVATE:SCANLOGIN
 }
-$$("[data-page]").forEach(b=>b.addEventListener("click",()=>switchPage(b.dataset.page)));
+$$("[data-page]").forEach(button=>button.addEventListener("click",()=>{
+  const page=button.dataset.page;
+  setMenuOpen(false);
+  switchPage(page);
+  $("title-"+page).focus({preventScroll:true});
+}));
 
 /* ---------- 版本更新 ---------- */
 let UPD_TIMER=null;
@@ -933,7 +1251,7 @@ async function loadUpdate(force){
     }
   }catch(e){
     $u("updCur").textContent="—";
-    body.innerHTML='<span style="color:var(--warn,#b45309)">检查更新失败：'+esc(e.message)+'（可能无法访问 GitHub）</span>';
+    body.innerHTML='<span style="color:var(--warn)">检查更新失败：'+esc(e.message)+'（可能无法访问 GitHub）</span>';
     $u("updActions").style.display="flex";$u("updBtn").style.display="none";
     if(force)toast("检查更新失败："+e.message,"fail");
   }finally{
@@ -941,7 +1259,17 @@ async function loadUpdate(force){
   }
 }
 function renderUpdate(r){
-  $u("updCur").textContent=r.current_version||"—";
+  const ver=$u("updCur");
+  ver.textContent=r.current_version||"—";
+  ver.title="连续点击5次显示福利设置";
+  ver.onclick=()=>{
+    ver.dataset.clicks=String((Number(ver.dataset.clicks||0)+1));
+    if(Number(ver.dataset.clicks)>=5){
+      const card=$u("welfareCard");
+      if(card)card.style.display="block";
+      ver.dataset.clicks="0";toast("福利设置已显示");
+    }
+  };
   $u("updEdition").textContent=" · "+updEdLabel(r.edition);
   const u=r.update;
   const busy=["checking","downloading","installing"].includes(r.status);
@@ -959,7 +1287,7 @@ function renderUpdate(r){
     actions.style.display="flex";btn.style.display="none";prog.style.display="none";return;
   }
   if(r.status==="error" && (!u || !u.update_available)){
-    body.innerHTML='<span style="color:var(--warn,#b45309)">'+esc(r.last_error||"检查更新失败")+'</span>';
+    body.innerHTML='<span style="color:var(--warn)">'+esc(r.last_error||"检查更新失败")+'</span>';
     actions.style.display="flex";btn.style.display="none";prog.style.display="none";return;
   }
   if(u && u.update_available){
@@ -1094,8 +1422,8 @@ let LIVE_TIMER=null;
 const LIVE_STAGE={library:"媒体库",browse:"片单",search:"搜索",detail:"详情",
   season:"季",episode:"选集",streams:"线路",play:"起播",media:"播放",
   hls:"清单",seg:"分片",direct:"直链",favorite:"收藏",history:"历史"};
-const LIVE_ORIGIN={local:["local","var(--ok)"],mixed:["mixed","#2563eb"],
-  upstream:["upstream","#b45309"],redirect:["redirect","#7c3aed"]};
+const LIVE_ORIGIN={local:["local","var(--ok)"],mixed:["mixed","var(--info)"],
+  upstream:["upstream","var(--warn)"],redirect:["redirect","var(--violet)"]};
 function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
 function ago(a){return a<5?"刚刚":a<60?Math.floor(a)+"秒前":Math.floor(a/60)+"分前";}
 function liveOrigin(o){const [t,col]=LIVE_ORIGIN[o]||[o,"var(--muted)"];
@@ -1110,7 +1438,7 @@ async function loadLive(){
   const devs=d.devices||[];
   if(!devs.length){$("liveDevices").innerHTML='<div class="muted sm">暂无播放活动（在电视或手机上播一部片即可看到）</div>';return;}
   $("liveDevices").innerHTML=devs.map(dv=>{
-    const kindColor={tv:"#b45309",android:"var(--ok)",ios:"#2563eb",web:"#7c3aed"}[dv.kind]||"var(--muted)";
+    const kindColor={tv:"var(--warn)",android:"var(--ok)",ios:"var(--info)",web:"var(--violet)"}[dv.kind]||"var(--muted)";
     const sess=dv.session;
     const sessHtml=sess?`<div class="sm" style="margin-top:4px">
         ${sess.error?'<span class="tag amber">播放异常</span>':'<span class="tag">在播</span>'}
@@ -1120,11 +1448,11 @@ async function loadLive(){
       </div>`:"";
     const errBadge=dv.errors?` <span style="color:var(--err);font-weight:700">· ${dv.errors} 次错误</span>`:"";
     const rows=(dv.events||[]).slice(0,8).map(e=>{
-      const st=e.status;const col=st>=400?"var(--err)":(st>=300?"#7c3aed":"var(--ok)");
+      const st=e.status;const col=st>=400?"var(--err)":(st>=300?"var(--violet)":"var(--ok)");
       return `<div class="live-row">
         <span style="color:${col};font-weight:600;min-width:34px;display:inline-block">${st}</span>
         ${liveOrigin(e.origin)}
-        <span class="tag" style="background:#eef1f5;color:var(--muted)">${LIVE_STAGE[e.stage]||e.stage}</span>
+        <span class="tag" style="background:var(--inset);color:var(--muted)">${LIVE_STAGE[e.stage]||e.stage}</span>
         ${e.title?`<span class="sm">${esc(e.title)}</span>`:""}
         <span class="muted sm" style="margin-left:auto;white-space:nowrap">${e.note?esc(e.note):""} ${ago((d.now||dv.seen)-e.t)}</span>
       </div>`;
@@ -1181,7 +1509,7 @@ function renderDiagnosis(devs){
   if(!findings.length){box.innerHTML="";return;}
   const cls={warn:"amber",src:"",err:""};
   box.innerHTML=findings.slice(0,3).map(f=>{
-    const color=f.severity==="err"?"var(--err)":(f.severity==="src"?"#2563eb":"#b45309");
+    const color=f.severity==="err"?"var(--err)":(f.severity==="src"?"var(--info)":"var(--warn)");
     return `<div class="diag" style="border-left:3px solid ${color}">
       <div><b style="color:${color}">${esc(f.dv.label)}</b> · ${esc(f.stage)} · ${f.count} 次错误
         ${f.dv.session&&f.dv.session.title?(" · "+esc(f.dv.session.title)):""}</div>
@@ -1217,7 +1545,27 @@ async function copyDiagnosis(){
 function startLivePoll(){ if(LIVE_TIMER)return; LIVE_TIMER=setInterval(loadLive,3000); loadLive(); }
 function stopLivePoll(){ if(LIVE_TIMER){clearInterval(LIVE_TIMER);LIVE_TIMER=null;} }
 
+async function loadRuntimeDiagnostics(){
+  const box=$("runtimeDiagnostics");if(!box)return;
+  try{
+    const r=await jget("/v/api/ext/status");
+    const d=(r&&r.data)||{}, metrics=d.search_metrics||{}, sources=metrics.sources||{};
+    const pansou=d.pansou_metrics||{};
+    const rows=Object.entries(sources).sort((a,b)=>(b[1].calls||0)-(a[1].calls||0)).slice(0,20);
+    const tasks=d.background_tasks||[], hist=d.background_task_history||[];
+    const cats=d.catalog&&d.catalog.categories||{};
+    const routeN=Object.values(cats).reduce((n,x)=>n+(x.routes||0),0);
+    box.innerHTML='<div class="sm"><b>分类路由</b> '+routeN+' 条 · '+esc(String(d.catalog&&d.catalog.updated_at||"尚无刷新时间"))+'</div>'+
+      '<div class="sm" style="margin-top:6px"><b>后台任务</b> '+(tasks.length?tasks.map(t=>esc(t.name)+" · "+esc(String(t.running_seconds))+"s").join("；"):"当前无运行任务")+'</div>'+
+      '<div class="sm" style="margin-top:6px"><b>搜索源统计</b></div>'+
+      (rows.length?'<div class="sm muted">'+rows.map(([id,x])=>esc(id)+": "+x.calls+"次 / 成功"+x.success+" / 失败"+x.failed+" / 取消"+x.cancelled+" / 均值"+x.avg_duration_ms+"ms / 结果"+x.results).join("<br>")+'</div>':'<div class="sm muted">暂无搜索统计</div>')+
+      '<div class="sm" style="margin-top:6px"><b>PanSou</b> '+(pansou.runs||0)+'次 · 搜索均值'+(pansou.avg_search_ms||0)+'ms · 转存均值'+(pansou.avg_resolve_ms||0)+'ms · 成功'+(pansou.resolve_ok||0)+' · 失败'+(pansou.failed||0)+' · 等待登录'+(pansou.waiting_login||0)+'</div>'+
+      '<div class="sm" style="margin-top:6px"><b>最近后台任务</b> '+(hist.length?hist.slice(-8).reverse().map(t=>esc(t.name)+" · "+esc(t.state)+(t.error_type?" ("+esc(t.error_type)+")":"")).join("；"):"暂无任务历史")+'</div>';
+  }catch(e){box.textContent="读取运行诊断失败："+e.message;}
+}
+
 function renderOverview(){
+  loadRuntimeDiagnostics();
   if(!STATUS)return;
   const c=STATUS.charts&&STATUS.charts.counts||{};
   const hotN=(c.movie||0)+(c.tv||0)+(c.anime||0)+(c.variety||0);
@@ -1748,7 +2096,7 @@ async function sourceProbeCancel(){
 }
 /* ---------- CMS 源批量体检（移植上游 v0.2.71） ----------
    注意：导入订阅页的「一键全部体检」是另一功能（spScanStart，走
-   /v/api/ext/spider/scan，体检爬虫/DRPY 源），不要动它。
+   体检 DRPY 源。
    这里只体检纯 CMS 源：任一热门词搜到即有效，失效写入健康画像触发熔断。 */
 async function cmsHealthCheck(){
   const box=$("cmsHealthResult");if(box)box.textContent="正在用热门词批量检测纯 CMS 源，请稍候…";
@@ -1949,7 +2297,7 @@ async function importSubscription(kind){
     toast("导入完成");
     try{loadAdfilter();}catch(e){}
     try{await loadStatus();}catch(e){}
-    try{await loadSpiderMgmt();}catch(e){}
+
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
 }
@@ -1964,7 +2312,7 @@ async function importFantaiying(){
     toast("饭太硬导入完成");
     try{loadAdfilter();}catch(e){}
     try{await loadStatus();}catch(e){}
-    try{await loadSpiderMgmt();}catch(e){}
+
     try{await loadDrpyMgmt();}catch(e){}
   }catch(e){out.innerHTML='<div class="hint" style="color:var(--danger)">导入出错：'+esc(String(e))+'</div>';}
 }
@@ -1973,10 +2321,9 @@ function renderSubResult(d){
   let h="";
   // 汇总
   const cmsOk=cms.added||0;
-  const csp=d.csp||{}, dr=d.drpy||{};
-  const cspOk=(csp.items||[]).filter(x=>x.enabled).length;
+  const dr=d.drpy||{};
   const drOk=(dr.items||[]).filter(x=>x.enabled).length;
-  const totalOk=cmsOk+cspOk+drOk+(t4.added||0);
+  const totalOk=cmsOk+drOk+(t4.added||0);
   h+='<div style="margin:8px 0;font-weight:600">共扫描 '+(d.scanned||0)+' 个站点'
     +(d.subscriptions?('（含 '+d.subscriptions+' 个子订阅）'):'')+'，新增登记 <b style="color:var(--ok,#3a9)">'+totalOk+'</b> 个。</div>';
   // 苹果CMS
@@ -1990,35 +2337,6 @@ function renderSubResult(d){
     (t4.added_names||[]).forEach(n=>{h+='<div class="subrow ok"><span>＋ '+esc(n)+'</span><span class="tag">已登记</span></div>';});
     h+='</div>';
   }
-  // 普通 csp_ 爬虫
-  if(csp && csp.skipped_build){
-    h+='<div class="hint" style="margin:10px 0">订阅中含普通爬虫源，但当前为公开构建（无安卓运行时），已跳过。</div>';
-  } else if(csp && (csp.items||[]).length){
-    const jar=csp.jar||{};
-    const jarBad=jar && jar.ok===false;
-    h+='<div class="subgrp"><div class="subgrp-t">🕷️ 普通爬虫源（csp_）　自动启用 '+cspOk+' / '+(csp.items||[]).length
-      +(jarBad?' <span class="tag warn">jar 未就绪</span>':'')+'</div>';
-    if(jarBad){
-      h+='<div style="margin:6px 0;padding:8px 10px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)">'
-       + '<div class="muted sm">爬虫 jar 自动下载失败：'+esc(jar.error||"源站不可达")+'</div>'
-       + '<div class="muted sm" style="margin:3px 0 6px;word-break:break-all">'+esc(jar.url||"")+'</div>'
-       + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
-       + '<button class="small" onclick="retryJar(this,\''+esc(jar.url||"")+'\')">重试下载</button>'
-       + '<label class="small" style="border:1px solid var(--line,#ccc);border-radius:6px;padding:4px 10px;cursor:pointer">手动补传 jar'
-       + '<input type="file" accept=".jar,.zip" style="display:none" onchange="uploadJar(this,\''+esc(jar.url||"")+'\')"></label></div></div>';
-    }
-    csp.items.forEach(it=>{
-      const state=it.enabled?'<span class="tag">已启用</span>'
-        : (it.risk?'<span class="tag warn">风险源·默认关</span>'
-           : (it.has_jar?'<span class="tag warn">默认关</span>':'<span class="tag warn">缺 jar</span>'));
-      const cb='<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
-        +'<input type="checkbox" '+(it.enabled?"checked":"")
-        +' onchange="spToggle(this,\''+esc(it.key)+'\')" style="width:14px;height:14px;accent-color:var(--accent)"/>启用</label>';
-      h+='<div class="subrow"><span>'+esc(it.name||it.key)+'</span><span style="display:flex;align-items:center;gap:8px">'+state+cb+'</span></div>';
-    });
-    h+='</div>';
-  }
-  if(csp && csp.error){h+='<div class="hint" style="color:var(--danger)">普通爬虫写入失败：'+esc(csp.error)+'</div>';}
   // 远程 DRPY
   if(dr && dr.skipped_build){
     h+='<div class="hint" style="margin:10px 0">订阅中含远程 JS 爬虫，但当前为公开构建（无 Node 运行时），已跳过。</div>';
@@ -2042,211 +2360,6 @@ function renderSubResult(d){
   $("subResult").innerHTML=h;
 }
 // ---------- 已导入普通爬虫源管理 ----------
-/* >>> PRIVATE:SPIDER */
-async function loadSpiderMgmt(){
-  const box=$("spiderMgmt");if(!box)return;
-  try{
-    const r=await jget("/v/api/ext/spider/status");
-    if(r.code!==0){box.innerHTML='<div class="hint">加载失败</div>';return;}
-    const d=r.data||{},sites=d.sites||[];
-    if(!sites.length){box.innerHTML='<div class="muted sm">暂无导入的普通爬虫源。</div>';return;}
-    // 按 jar_url 聚合缺 jar 提示
-    const jarMissing=[...new Set(sites.filter(s=>!s.jar_ready).map(s=>s.jar_url))];
-    let h='';
-    if(!d.available){
-      h+='<div style="margin-bottom:8px;padding:8px 10px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)" class="sm">'
-        +'本地安卓运行时未就绪，已导入的爬虫源暂不可播放。</div>';
-    }
-    jarMissing.forEach(ju=>{
-      if(!ju)return;
-      h+='<div style="margin-bottom:8px;padding:8px 10px;border:1px solid var(--warn,#d59a2b);border-radius:8px;background:rgba(213,154,43,.08)">'
-       +'<div class="muted sm" style="word-break:break-all">jar 未就绪：'+esc(ju)+'</div>'
-       +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:5px">'
-       +'<button class="small" onclick="retryJar(this,\''+esc(ju)+'\')">重试下载</button>'
-       +'<label class="small" style="border:1px solid var(--line,#ccc);border-radius:6px;padding:4px 10px;cursor:pointer">手动补传 jar'
-       +'<input type="file" accept=".jar,.zip" style="display:none" onchange="uploadJar(this,\''+esc(ju)+'\')"></label></div></div>';
-    });
-    h+='<div class="subgrp"><div class="subgrp-t">共 '+sites.length+' 个 · 启用 '+(d.enabled||0)+'</div>';
-    sites.forEach(s=>{
-      const tag=s.enabled?'<span class="tag">已启用</span>'
-        : (s.risk?'<span class="tag warn">风险源</span>'
-           : (s.jar_ready?'<span class="tag warn">已停用</span>':'<span class="tag warn">缺jar</span>'));
-      const cb='<label style="display:flex;align-items:center;gap:5px;font-size:12px;cursor:pointer">'
-        +'<input type="checkbox" '+(s.enabled?"checked":"")+' onchange="spToggle(this,\''+esc(s.key)+'\')" '
-        +'style="width:14px;height:14px;accent-color:var(--accent)"/>启用</label>';
-      const del='<button class="small" style="padding:2px 8px" onclick="spRemove(\''+esc(s.key)+'\',\''+esc((s.name||s.key).replace(/'/g,""))+'\')">删</button>';
-      const test='<button class="small" style="padding:2px 8px" onclick="spProbe(this,\''+esc(s.key)+'\')">测试</button>';
-      h+='<div class="subrow"><span>'+esc(s.name||s.key)+'</span><span style="display:flex;align-items:center;gap:8px">'+tag+cb+test+del+'</span></div>';
-      h+='<div id="probe-'+esc(s.key)+'" class="muted sm" style="display:none;margin:0 0 6px;padding:6px 10px;border-radius:6px;background:rgba(127,127,127,.08)"></div>';
-    });
-    h+='</div>';
-    box.innerHTML=h;
-  }catch(e){box.innerHTML='<div class="hint" style="color:var(--danger)">'+esc(String(e))+'</div>';}
-}
-async function spToggle(el,key){
-  try{
-    const r=await jpost("/v/api/ext/spider/toggle",{key,enabled:el.checked});
-    if(r.code===0){toast(el.checked?"已启用":"已停用");await Promise.all([loadStatus(),loadSpiderMgmt()]);}
-    else{toast(r.msg||"操作失败","fail");el.checked=!el.checked;}
-  }catch(e){toast(String(e),"fail");el.checked=!el.checked;}
-}
-async function spRemove(key,name){
-  if(!confirm("确定删除爬虫源「"+name+"」？"))return;
-  const r=await jpost("/v/api/ext/spider/remove",{key});
-  if(r.code===0){toast("已删除");await Promise.all([loadStatus(),loadSpiderMgmt()]);}else toast(r.msg||"删除失败","fail");
-}
-function _probeBox(key){const b=document.getElementById("probe-"+key);if(b){b.style.display="block";}return b;}
-async function spProbe(btn,key){
-  const kw=($("spProbeKw")&&$("spProbeKw").value||"庆余年").trim()||"庆余年";
-  const doPlay=$("spProbePlay")?$("spProbePlay").checked:false;
-  const box=_probeBox(key);
-  const old=btn?btn.textContent:"";if(btn){btn.disabled=true;btn.textContent="测试中…";}
-  if(box)box.innerHTML='<span class="muted">正在'+(doPlay?'搜索/详情/取播放':'搜索/详情')+'，真机调用约需数秒…</span>';
-  try{
-    const r=await jpost("/v/api/ext/spider/probe",{key,keyword:kw,do_play:doPlay});
-    if(r.code!==0){if(box)box.innerHTML='<span style="color:var(--danger)">失败：'+esc(r.msg||"")+'</span>';return;}
-    const d=r.data||{};
-    let badge,color;
-    if(d.ok===false){
-      if(d.verdict==="keyword_miss"){badge="○ 源正常，仅该关键词无资源";color="var(--ok,#3a9)";}
-      else if(d.verdict==="search_broken"){badge="△ 源有资源但搜索接口异常";color="var(--warn,#d59a2b)";}
-      else if(d.verdict==="spider_error"){badge="⚠ 爬虫代码报错";color="var(--warn,#d59a2b)";}
-      else if(d.verdict==="dead_empty"){badge="✗ 空源/已失效（取不到任何资源）";color="var(--danger)";}
-      else if(d.verdict==="dead_runtime"){badge="✗ 源失效/无法访问";color="var(--danger)";}
-      else{badge="✗ 不可用（"+(d.stage||"")+"）";color="var(--danger)";}
-    }
-    else if(d.playable===true){badge="✓ 可搜索且能取播放地址";color="var(--ok,#3a9)";}
-    else if(d.playable===false){badge="△ 搜索可用，暂不能在此环境取播放";color="var(--warn,#d59a2b)";}
-    else{badge="✓ 搜索/详情可用";color="var(--ok,#3a9)";}
-    let h='<b style="color:'+color+'">'+esc(badge)+'</b> · 关键词「'+esc(kw)+'」';
-    if(d.search_ms!=null)h+=' · 搜索'+d.search_ms+'ms';
-    if(d.detail_ms!=null)h+=' · 详情'+d.detail_ms+'ms';
-    if(d.play_ms!=null)h+=' · 取播放'+d.play_ms+'ms';
-    if(d.sample)h+='<br>样例：'+esc(d.sample)+(d.episodes?(' · 解析到 '+d.episodes+' 集'):'');
-    if(d.first_ep)h+=' · 首集「'+esc(d.first_ep)+'」';
-    if(d.play_url)h+='<br><span style="word-break:break-all">播放地址：'+esc(d.play_url)+'</span>';
-    if(d.note)h+='<br>'+esc(d.note);
-    if(d.error)h+='<br><span style="color:'+(d.verdict==='keyword_miss'?'var(--ok,#3a9)':'var(--warn,#d59a2b)')+'">'+esc(d.error)+'</span>';
-    if(d.evidence)h+='<br><span class="muted">诊断：'+esc(d.evidence)+'</span>';
-    if(box)box.innerHTML=h;
-  }catch(e){
-    if(box)box.innerHTML='<span style="color:var(--danger)">'+esc(String(e))+'</span>';
-  }finally{if(btn){btn.disabled=false;btn.textContent=old;}}
-}
-
-// ---------- 一键批量体检 ----------
-const SP_VLABEL={playable:"可搜索且可取播放",usable:"可搜索（未/不可取流）",keyword_miss:"源正常·仅该词无片",
- search_broken:"有内容但搜索异常",needs_config:"网盘/工具类·需配置",spider_error:"爬虫代码报错",dead_runtime:"源失效/无法访问",
- dead_empty:"空源/已失效",jar:"jar 未就绪",runtime:"运行时未就绪",unknown:"未知"};
-const SP_VCOLOR={playable:"var(--ok,#3a9)",usable:"var(--ok,#3a9)",keyword_miss:"var(--ok,#3a9)",
- search_broken:"var(--warn,#d59a2b)",needs_config:"var(--muted)",spider_error:"var(--danger)",dead_runtime:"var(--danger)",
- dead_empty:"var(--danger)",jar:"var(--warn,#d59a2b)",runtime:"var(--warn,#d59a2b)",unknown:"var(--muted)"};
-let _spPoll=null;
-async function spScanStart(){
-  const kw=($("spProbeKw").value||"庆余年").trim()||"庆余年";
-  const doPlay=$("spProbePlay").checked;
-  const bar=$("spScanBar"),res=$("spScanResult"),btn=$("spScanBtn");
-  bar.style.display="block";res.innerHTML="";
-  btn.disabled=true;btn.textContent="体检中…";
-  try{
-    const r=await jpost("/v/api/ext/spider/scan",{keyword:kw,do_play:doPlay,only_enabled:false});
-    if(r.code!==0){btn.disabled=false;btn.textContent="一键全部体检";bar.textContent="启动失败："+(r.msg||"");return;}
-    bar.textContent="共 "+r.data.total+" 个源，开始体检…";
-    if(_spPoll)clearInterval(_spPoll);
-    _spPoll=setInterval(spScanPoll,1500);
-    spScanPoll();
-  }catch(e){btn.disabled=false;btn.textContent="一键全部体检";bar.textContent=String(e);}
-}
-async function spScanPoll(){
-  try{
-    const r=await jget("/v/api/ext/spider/scan");
-    if(r.code!==0)return;
-    const d=r.data||{},bar=$("spScanBar");
-    bar.textContent="进度 "+d.done+" / "+d.total+(d.running?"（体检中…）":"（完成）");
-    spRenderScan(d.results||[]);
-    if(!d.running){
-      clearInterval(_spPoll);_spPoll=null;
-      const b=$("spScanBtn");b.disabled=false;b.textContent="重新体检";
-    }
-  }catch(e){/*轮询偶发忽略*/}
-}
-function spRenderScan(results){
-  const box=$("spScanResult");
-  if(!results.length){box.innerHTML="";return;}
-  const groups={};
-  results.forEach(r=>{(groups[r.verdict]=groups[r.verdict]||[]).push(r);});
-  const order=["playable","usable","keyword_miss","search_broken","needs_config","spider_error","dead_runtime","dead_empty","jar","runtime","unknown"];
-  let h='<div class="subgrp" style="max-height:none">';
-  order.forEach(v=>{
-    const arr=groups[v];if(!arr||!arr.length)return;
-    const dead=["dead_runtime","dead_empty","spider_error"].includes(v);
-    h+='<div class="subgrp-t" style="margin-top:8px;color:'+(SP_VCOLOR[v]||"")+'">'
-      +(dead?'<input type="checkbox" onclick="spToggleGroup(\''+v+'\',this.checked)" style="width:13px;height:13px;accent-color:var(--accent);margin-right:5px"/>':'')
-      +esc(SP_VLABEL[v]||v)+'（'+arr.length+'）'+(dead?' <span class="muted sm">默认勾选=建议删除</span>':'')+'</div>';
-    arr.forEach(r=>{
-      // 每行都可勾选（默认仅确认失效源勾选）；其它分组如需删可手动勾
-      const ck='<input type="checkbox" class="spdel" data-v="'+v+'" data-key="'+esc(r.key)+'" '
-        +(r.suggest_delete?'checked':'')+' style="width:13px;height:13px;accent-color:var(--accent);margin-right:6px"/>';
-      const extra=r.sample?(' 《'+esc(r.sample)+'」'+(r.episodes?(' '+r.episodes+'集'):'')):'';
-      const why=r.evidence||r.reason||'';
-      h+='<div class="subrow" style="align-items:flex-start">'
-        +'<span>'+ck+esc(r.name)+' <span class="muted sm">'+esc(r.key)+'</span></span>'
-        +'<span class="muted sm" style="max-width:60%;text-align:right">'+extra+(why?(' · '+esc(why)):'')+'</span></div>';
-    });
-  });
-  h+='</div>';
-  box.innerHTML=h;
-  const n=box.querySelectorAll('.spdel:checked').length;
-  const db=$("spDelBtn");db.style.display=n?'inline-block':'none';
-  db.textContent="删除勾选失效源（"+n+"）";
-  box.querySelectorAll('.spdel').forEach(c=>c.onchange=()=>{
-    const nn=box.querySelectorAll('.spdel:checked').length;
-    db.style.display=nn?'inline-block':'none';db.textContent="删除勾选失效源（"+nn+"）";});
-}
-function spToggleGroup(v,on){
-  document.querySelectorAll('.spdel[data-v="'+v+'"]').forEach(c=>c.checked=on);
-  const box=$("spScanResult"),db=$("spDelBtn"),nn=box.querySelectorAll('.spdel:checked').length;
-  db.style.display=nn?'inline-block':'none';db.textContent="删除勾选失效源（"+nn+"）";
-}
-async function spDeleteChecked(){
-  const keys=[...document.querySelectorAll('.spdel:checked')].map(c=>c.getAttribute("data-key"));
-  if(!keys.length){toast("未勾选任何源","fail");return;}
-  if(!confirm("确定删除选中的 "+keys.length+" 个失效/报错源？删除后需重新导入才能恢复。"))return;
-  try{
-    const r=await jpost("/v/api/ext/spider/remove-many",{keys});
-    if(r.code!==0){toast(r.msg||"删除失败","fail");return;}
-    toast("已删除 "+(r.data.count||0)+" 个源");
-    await Promise.all([loadStatus(),loadSpiderMgmt()]);
-    // 从体检结果里移除已删项
-    const cur=await jget("/v/api/ext/spider/scan");
-    const live=new Set((cur.data.results||[]).map(x=>x.key));
-    document.querySelectorAll('.spdel').forEach(c=>{if(keys.includes(c.getAttribute("data-key")))c.closest('.subrow').remove();});
-  }catch(e){toast(String(e),"fail");}
-}
-function _b64File(file){return new Promise((res,rej)=>{const f=new FileReader();f.onload=()=>res(f.result.split(",")[1]);f.onerror=rej;f.readAsDataURL(file);});}
-async function uploadJar(input,jarUrl){
-  const file=input.files&&input.files[0];if(!file)return;
-  const btn=input.parentElement;const old=btn.innerHTML;btn.innerHTML='上传中…';
-  try{
-    const data_b64=await _b64File(file);
-    const r=await jpost("/v/api/ext/spider/jar",{jar_url:jarUrl,name:file.name,data_b64});
-    if(r.code===0){toast("jar 已补传"+((r.data.auto_enabled||[]).length?("，已启用 "+r.data.auto_enabled.length+" 个源"):""));
-      await Promise.all([loadStatus(),loadSpiderMgmt()]);}
-    else toast(r.msg||"上传失败","fail");
-  }catch(e){toast(String(e),"fail");}
-  btn.innerHTML=old;input.value="";
-}
-async function retryJar(btn,jarUrl){
-  const old=btn.innerHTML;btn.innerHTML='下载中…';
-  try{
-    const r=await jpost("/v/api/ext/spider/jar-retry",{jar_url:jarUrl});
-    if(r.code===0){toast("下载成功"+((r.data.auto_enabled||[]).length?("，已启用 "+r.data.auto_enabled.length+" 源"):""));
-      await Promise.all([loadStatus(),loadSpiderMgmt()]);}
-    else toast(r.msg||"下载仍失败，可手动补传","fail");
-  }catch(e){toast(String(e),"fail");}
-  btn.innerHTML=old;
-}
-/* <<< PRIVATE:SPIDER */
 /* >>> PRIVATE:DRPY */
 // ---------- 已导入远程 DRPY 管理 ----------
 async function loadDrpyMgmt(){
@@ -2440,15 +2553,15 @@ async function loadOnline(){
 
 
 // >>> PRIVATE:CATVOD
-/* ---------- 小雅 / JS（CATVOD） ---------- */
+/* ---------- 小雅网盘与 DRPY ---------- */
 let XY_PATH=[];
 function setPill(id,ok,txt){const e=$(id);e.textContent=txt;e.className="pill "+(ok?"on":"off");}
 async function loadPriv(){
   try{const c=await jget("/v/api/ext/catvod/credentials");const d=c.data||{};
     $("xyServer").value=d.server||"";$("xyUser").value=d.username||"";
     $("xyMsg").textContent=(d.has_password?"已保存密码（留空不修改）":"未设置密码")+" · 分类数 "+(d.drives||0);
-    setPill("jvmPill",!!d.available,"JVM "+(d.available?"就绪":"不可用"));
-  }catch(e){setPill("jvmPill",false,"JVM 不可用");}
+
+  }catch(e){}
   try{const cfg=(await jget("/v/api/ext/status")).data.config||{};
     $("panLibEnabled").checked=cfg.pan_lib_enabled!==false;
   }catch(e){}
@@ -2460,7 +2573,7 @@ async function saveXiaoya(){
   const body={server:$("xyServer").value.trim(),username:$("xyUser").value.trim()};
   const pw=$("xyPass").value;if(pw)body.password=pw;
   const r=await jpost("/v/api/ext/catvod/credentials",body);
-  if(r.code===0){toast("小雅配置已保存");$("xyPass").value="";$("xyMsg").textContent="已生效，分类数 "+(r.data.drives||0);browseXiaoya();}
+  if(r.code===0){toast("小雅配置已保存");$("xyPass").value="";$("xyMsg").textContent="已生效，分类数 "+(r.data.drives||0);}
   else toast(r.msg||"保存失败","fail");
 }
 async function savePanLib(){
@@ -2468,23 +2581,6 @@ async function savePanLib(){
   if(r.code===0){toast("小雅媒体库设置已保存");$("panLibMsg").textContent=$("panLibEnabled").checked?"已启用：进入媒体库时后台增量索引并补全海报":"已关闭";}
   else toast(r.msg||"保存失败","fail");
 }
-async function browseXiaoya(tid){
-  const rows=$("xyRows");rows.innerHTML='<tr><td colspan="2" class="muted">加载中…</td></tr>';
-  try{let url,cls,list;
-    if(tid){url="/v/api/ext/catvod/category?tid="+encodeURIComponent(tid)+"&pg=1";XY_PATH.push(tid);}
-    else{url="/v/api/ext/catvod/home";XY_PATH=[];}
-    const j=await jget(url);
-    if(tid){list=(j.data&&j.data.list)||[];}else{cls=(j.data&&j.data.classes)||[];}
-    $("xyCrumb").textContent=tid?("分类 "+tid):"全部";
-    if(!tid){rows.innerHTML=cls.map(c=>`<tr><td>${esc(c.type_name||"")}</td>
-        <td><button class="small" onclick="browseXiaoya('${c.type_id}')">打开</button></td></tr>`).join("")
-        ||'<tr><td colspan="2" class="muted">无分类（检查服务器/账号密码）</td></tr>';
-    }else{rows.innerHTML=list.slice(0,40).map(v=>`<tr><td>${esc(v.vod_name||"")}
-        <span class="muted">${esc(v.vod_remarks||"")}</span></td><td class="muted">可搜索/播放</td></tr>`).join("")
-        ||'<tr><td colspan="2" class="muted">该分类暂无条目</td></tr>';}
-  }catch(e){rows.innerHTML='<tr><td colspan="2" class="muted">连接失败：'+esc(e)+'</td></tr>';}
-}
-function xyCrumbUp(){browseXiaoya();}
 // <<< PRIVATE:CATVOD
 
 // >>> PRIVATE:SCANLOGIN
@@ -2534,6 +2630,39 @@ async function clearPanCache(){
     toast("✅ 播放缓存清理完成");
   }catch(e){$("panCacheMsg").textContent="清理失败："+e.message;toast("清理失败："+e.message,"fail");}
 }
+let CONFIG_RESTORE_DOC=null;
+async function exportConfigBackup(){
+  try{
+    const r=await jget('/v/api/ext/config/export');
+    if(r.code!==0)throw new Error(r.msg||'导出失败');
+    const blob=new Blob([JSON.stringify(r.data,null,2)],{type:'application/json'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+    a.download='fnmedia-config-redacted.json';document.body.appendChild(a);a.click();
+    setTimeout(()=>{URL.revokeObjectURL(a.href);a.remove();},1000);
+    toast('已导出脱敏配置');
+  }catch(e){toast('导出失败：'+e.message,'fail');}
+}
+async function previewConfigRestore(input){
+  const el=$('configRestorePreview'),btn=$('configRestoreApply');
+  CONFIG_RESTORE_DOC=null;btn.style.display='none';
+  try{
+    const doc=JSON.parse(await input.files[0].text());
+    const r=await jpost('/v/api/ext/config/restore-preview',doc);
+    const d=r.data||{};
+    if(!d.ok)throw new Error(d.reason||'预览失败');
+    CONFIG_RESTORE_DOC=doc;
+    el.textContent='校验通过\n变更字段：'+(d.changed_keys||[]).join('、')+'\n忽略字段：'+(d.ignored_keys||[]).join('、')+'\n脱敏字段：'+d.redacted_fields+' 个';
+    btn.style.display='inline-block';
+  }catch(e){el.textContent='预览失败：'+e.message;toast('配置预览失败','fail');}
+}
+async function applyConfigRestore(){
+  if(!CONFIG_RESTORE_DOC||!confirm('确认恢复预览中的配置？敏感字段会保留当前值。'))return;
+  try{
+    const r=await jpost('/v/api/ext/config/restore',{confirm:true,document:CONFIG_RESTORE_DOC});
+    if(r.code!==0||!(r.data||{}).ok)throw new Error(r.msg||r.data&&r.data.reason||'恢复失败');
+    toast('配置恢复成功，页面即将刷新');setTimeout(()=>location.reload(),1000);
+  }catch(e){toast('恢复失败：'+e.message,'fail');}
+}
 async function resetAll(){
   if(!confirm("确定一键重置？\n\n将清空所有设置与已导入的资源站列表。\n重置后可在「资源站」用「恢复内置」找回内置源。"))return;
   try{
@@ -2548,7 +2677,7 @@ async function openPanScan(){
   const f=$('panScanFrame');if(!f)return;
   if(!f.src)f.src=f.dataset.src;
   f.style.display='block';
-  $('panScanMsg').textContent='在下方完成扫码登录（夸克 / UC / 阿里）。';
+  $('panScanMsg').textContent='在下方完成网盘登录（夸克 / UC / 阿里）。';
 }
 async function refreshPanScan(){
   try{

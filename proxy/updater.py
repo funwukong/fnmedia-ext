@@ -450,14 +450,11 @@ tar xzf "$EXTRACT/app.tgz" -C "$EXTRACT" || fail "解开 app.tgz 失败"
 [ -f "$EXTRACT/repo/VERSION" ] || fail "包内缺少 VERSION"
 NEWVER="$(cat "$EXTRACT/repo/VERSION" 2>/dev/null | tr -d '[:space:]')"
 echo "[upd] new version=$NEWVER"
-# 备份运行态：state + 用户自行导入/产生的本地资产（spider jar、
-# 本地配置等）。这些不随安装包分发，但热替换必须原样保留。
+# 备份运行态：state 和 DRPY 本地配置；已移除的 Jar 资产不再保留。
 BK=/tmp/fnmedia-update/state-backup.tar.gz
 rm -f "$BK" /tmp/fnmedia-update/localjson-backup.tar.gz
 TARARGS=()
 [ -d "$ROOT/state" ] && TARARGS+=(state)
-[ -d "$ROOT/proxy/assets/spiders" ] && TARARGS+=(proxy/assets/spiders)
-[ -d "$ROOT/proxy/assets/catvod" ] && TARARGS+=(proxy/assets/catvod)
 [ -d "$ROOT/proxy/assets/drpy" ] && TARARGS+=(proxy/assets/drpy)
 if [ "${{#TARARGS[@]}}" -gt 0 ]; then
   tar --ignore-failed-read -czf "$BK" -C "$ROOT" "${{TARARGS[@]}}" || true

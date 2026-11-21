@@ -3,7 +3,7 @@
 
 本仓库维护一份源码，产出两种构建：
 
-* **完整构建**：含全部能力（DDUO / ADULT / CATVOD 等可选特性开启）。
+* **完整构建**：含全部能力（DDUO / ADULT / DRPY 等可选特性开启）。
 * **公开构建**：由 `tools/public_strip.py` 在打包时删除标记块与相关专有
   文件，并把下面的开关区块改写为关闭态；产物中不含这些特性的任何代码
   或第三方资产。
@@ -30,8 +30,6 @@ from __future__ import annotations
 # >>> PRIVATE:FEATURE_FLAGS
 DDUO = True
 ADULT = True
-# catvod JVM 爬虫运行时（TVBox type=3 纯 dex jar，如小雅 AListSh）
-CATVOD = True
 # drpyS JS 爬虫运行时（Node 跑 TVBox type=3 的 drpy2 .js 站点）
 DRPY = True
 # <<< PRIVATE:FEATURE_FLAGS
@@ -41,4 +39,4 @@ REDLINE = True
 
 
 def names() -> tuple[str, ...]:
-    return ("DDUO", "ADULT", "CATVOD", "DRPY")
+    return ("DDUO", "ADULT", "DRPY")

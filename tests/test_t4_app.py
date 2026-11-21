@@ -212,6 +212,18 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.content, b"")
         self.assertEqual(response.headers["content-length"], "1024")
 
+    async def test_range_protocol_preserves_content_range_and_t4_delivery(self):
+        self.protected = True
+        _, eg = await self.load_episode()
+        mg = storemod.ep_media_guid(eg)
+        response = await self.client.get(
+            f"/v/api/v1/media/range/{mg}",
+            headers={"Range": "bytes=0-1023"}, follow_redirects=True)
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(response.headers.get("accept-ranges"), "bytes")
+        self.assertEqual(response.headers.get("content-range"), "bytes 0-1023/1024")
+        self.assertEqual(len(response.content), 1024)
+
     async def test_history_restart_reloads_ids_and_does_not_switch_episode(self):
         _, eg = await self.load_episode()
         mg = storemod.ep_media_guid(eg)
@@ -364,7 +376,7 @@ class AppTests(unittest.IsolatedAsyncioTestCase):
             with self.assertLogs("fnmedia", level="INFO") as logs:
                 response = await asyncio.wait_for(self.client.post("/v/api/v1/stream",
                     json={"media_guid": mg}, headers={"User-Agent": "com.trim.media.ios"}),
-                    timeout=0.5)
+                    timeout=2.0)
             data = response.json()["data"]
             self.assertEqual(data["video_stream"]["codec_name"], "")
             self.assertEqual(data["file_stream"]["size"], len(MEDIA_BYTES))

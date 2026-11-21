@@ -361,8 +361,7 @@ class HotCache:
         self._refreshing = True
         self._task = loop.create_future()
         try:
-            cfg = config.get()
-            if not cfg.get("hot_library_enabled", True):
+            if not config.read("hot_library_enabled", True):
                 with self._lock:
                     self._meta["last_error"] = "热门媒体库已关闭"
                     result = self.get()

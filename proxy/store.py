@@ -703,6 +703,18 @@ class Store:
     def resolve_media_guid(self, mg: str) -> Optional[dict]:
         """media/video guid -> 可播放目标（含 url/line/index）。"""
         ref = self._media_index.get(mg)
+        # Cold-start recovery for T4 episode media GUIDs: rebuild the deterministic
+        # mapping from the episode index instead of returning an opaque 404.
+        if not ref:
+            for ep_g, ep in self._ep_index.items():
+                for line in ep.get("_per", {}):
+                    if mg in (ep_media_guid(ep_g, line), ep_video_guid(ep_g, line)):
+                        target = self._ep_resolve(ep_g, line)
+                        if target:
+                            self._media_index[mg] = "e:" + json.dumps(
+                                {"ep": ep_g, "line": line})
+                            return target
+            return None
         if not ref:
             return None
         kind, payload = ref[:1], ref[2:]

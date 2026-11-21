@@ -10,6 +10,7 @@ VERSION="$(head -n1 "${REPO_ROOT}/VERSION" | tr -d '[:space:]')"
 [ -n "${VERSION}" ] || { echo "ERROR: 无法读取 VERSION" >&2; exit 1; }
 
 FNPACK_BIN="${FNPACK:-}"; STAGE=""; STAGE_ONLY=0; OUT_DIR="${REPO_ROOT}/dist"; PUBLIC=0
+PY_FPKPACK="${PY_FPKPACK:-${REPO_ROOT}/packaging/fpk/fpkpack.py}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --stage-only) STAGE_ONLY=1; STAGE="$2"; shift 2 ;;
@@ -34,6 +35,13 @@ else
   TESTS_EXCLUDE=(--exclude='tests/')
 fi
 
+# 默认使用仓库内纯 Python 打包器，避免外部 fnpack 下载端点失效；
+# 传入 --fnpack 或 FNPACK 时仍保留原生 fnpack 流程。
+USE_PY_FPK=0
+if [ -z "${FNPACK:-}" ] && [ -z "${FNPACK_BIN}" ] && [ -f "${PY_FPKPACK}" ]; then
+  USE_PY_FPK=1
+fi
+
 rsync -a --delete \
   --exclude='.venv/' --exclude='__pycache__/' --exclude='*.pyc' \
   --exclude='.git/' --exclude='dist/' --exclude='logs/' \
@@ -43,9 +51,6 @@ rsync -a --delete \
   --exclude='.mypy_cache/' --exclude='.ruff_cache/' \
   --exclude='state/' --exclude='packaging/fpk/.build/' \
   --exclude='.release/' --exclude='*.fpk' --exclude='.DS_Store' \
-  --exclude='/proxy/assets/spiders/jars/' \
-  --exclude='/proxy/assets/spiders/jars.json' \
-  --exclude='/proxy/assets/spiders/spider_sites.json' \
   --exclude='/FORUM_POST.md' \
   --exclude='/FORUM_POST_CHANGELOG.md' \
   --exclude='/FORUM_RELEASE_*.md' \
@@ -53,11 +58,18 @@ rsync -a --delete \
   --exclude='*.apk' \
   "${REPO_ROOT}/" "${STAGE}/app/repo/"
 
+# FPK no longer ships the removed CSP/JVM or Android runner. Keep the
+# spider-runner Node service and shared client/error modules intact.
+RUNNER="${STAGE}/app/repo/spider-runner"
+if [ -d "${RUNNER}" ]; then
+  rm -rf "${RUNNER}/android"
+  rm -f "${RUNNER}/Dockerfile" "${RUNNER}/docker-compose.yml"
+  rm -f "${RUNNER}/app/android_bridge.py" "${RUNNER}/app/android_pool.py"
+  rm -f "${RUNNER}/app/pool.py" "${RUNNER}/app/server.py"
+fi
+rm -rf "${STAGE}/app/repo/proxy/assets/catvod" \
+       "${STAGE}/app/repo/proxy/assets/guard"
 
-# 用户从自己订阅下载的普通 csp spider jar 缓存与来源清单属于个人添加源，
-# 不分发；运行时缺目录会自动重建并按需下载。
-mkdir -p "${STAGE}/app/repo/proxy/assets/spiders/jars"
-: > "${STAGE}/app/repo/proxy/assets/spiders/jars/.gitkeep"
 # 维护者个人本地配置（含网盘账号）不进任何分发包。
 LOCAL_CFG="local.json"
 rm -f "${STAGE}/app/repo/proxy/"*"${LOCAL_CFG}"
@@ -84,8 +96,9 @@ fi
 # 否则用户无法区分新旧包，也就无法确认一次升级到底生没生效）。
 BUILD_SHA="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
 BUILD_TIME="$(date '+%Y-%m-%d %H:%M')"
-printf '"""构建期生成：管理页自报构建身份用（勿手改）。"""\nBUILD_TIME = %s\nBUILD_SHA = %s\nBUILD_LABEL = f"v%s {BUILD_TIME} {BUILD_SHA}"\n' \
-  "'${BUILD_TIME}'" "'${BUILD_SHA}'" "${VERSION}" \
+BUILD_DIRTY="$(cd "${REPO_ROOT}" && git status --porcelain 2>/dev/null | head -1 | grep -q . && echo True || echo False)"
+printf '"""构建期生成：管理页自报构建身份用（勿手改）。"""\nBUILD_TIME = %s\nBUILD_SHA = %s\nBUILD_DIRTY = %s\nBUILD_LABEL = f"v%s {BUILD_TIME} {BUILD_SHA}"\n' \
+  "'${BUILD_TIME}'" "'${BUILD_SHA}'" "${BUILD_DIRTY}" "${VERSION}" \
   > "${STAGE}/app/repo/proxy/build_info.py"
 echo "[fpk] 构建戳: ${VERSION} ${BUILD_TIME} ${BUILD_SHA}"
 
@@ -104,6 +117,15 @@ chmod +x "${STAGE}"/cmd/*
 
 echo "[fpk] 组装完成: ${STAGE} (version=${VERSION})"
 [ "${STAGE_ONLY}" -eq 1 ] && exit 0
+
+if [ "${USE_PY_FPK}" -eq 1 ]; then
+  mkdir -p "${OUT_DIR}"
+  FINAL="${OUT_DIR}/fnmedia-ext-${VERSION}$([ "${PUBLIC}" -eq 1 ] && echo '-public' || true).fpk"
+  "${PYTHON:-python3}" "${PY_FPKPACK}" --stage "${STAGE}" --out "${FINAL}" --verify
+  ( cd "$(dirname "${FINAL}")" && sha256sum "$(basename "${FINAL}")" > "$(basename "${FINAL}").sha256" )
+  echo "[fpk] Python fallback 打包完成: ${FINAL}"
+  exit 0
+fi
 
 if [ -z "${FNPACK_BIN}" ]; then
   if command -v fnpack >/dev/null 2>&1; then FNPACK_BIN="$(command -v fnpack)"; else

@@ -57,31 +57,46 @@ HOSTS_MIRROR = [
 
 _lock = threading.RLock()
 
-# ---- 内置启发式 ----------------------------------------------------------
+# ---- 内置透明规则与启发式 -----------------------------------------------
+BUILTIN_AD_RULES = {
+    "url_hints": (
+        "/ad/", "/ads/", "/advert/", "/advertisement/", "/adservice/",
+        "/preroll/", "/pre-roll/", "/sponsor/", "/promotion/", "/promo/",
+        "adsegment", "adservice", "advertising", "sponsorsegment",
+    ),
+    "host_suffixes": (
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "adnxs.com", "adsrvr.org", "pubmatic.com", "criteo.com",
+        "moatads.com", "amazon-adsystem.com", "gdt.qq.com", "tanx.com",
+    ),
+}
 # 广告分片 URL 关键字（小写子串）。命中 EXTINF 后的 URL 即删该分片。
-_AD_URL_HINTS = (
-    "/ad/", "/ads/", "/adjump", "/advert", "/advertisement", "/advideo",
-    "sponsor", "redtraffic", "guanggao", "/gg/", "preroll", "/promo/",
-    "adsegment", "/adevent", "/vast", "openx", "/insertad", "adservice",
-)
+_AD_URL_HINTS = tuple(dict.fromkeys(
+    BUILTIN_AD_RULES["url_hints"] + (
+        "/adjump", "/advideo", "redtraffic", "guanggao", "/gg/",
+        "/adevent", "/vast", "openx", "/insertad",
+    )))
 # 广告投放域名后缀（仅 host 后缀匹配，不扫整个 URL）。这些是纯广告投放
 # 域（Google Ad Manager/AdSense、AppNexus、The Trade Desk、PubMatic、
 # Criteo、Moat、Amazon Ads、腾讯广点通、阿里 Tanx），正片分片不可能
 # 托管其上；形似域名（如 mydoubleclick.net、doubleclick.net.evil.com）
 # 因要求整段相等或 "." 分隔后缀而不命中。
-_AD_HOST_SUFFIXES = (
-    "doubleclick.net",
-    "googlesyndication.com",
-    "googleadservices.com",
-    "adnxs.com",
-    "adsrvr.org",
-    "pubmatic.com",
-    "criteo.com",
-    "moatads.com",
-    "amazon-adsystem.com",
-    "gdt.qq.com",
-    "tanx.com",
-)
+# 透明内置规则：只包含广告投放域名和明确广告路径，不依赖外部加密规则文件。
+# 订阅规则仍可通过 merge_subscription_rules() 追加。
+BUILTIN_AD_RULES = {
+    "url_hints": (
+        "/ad/", "/ads/", "/advert/", "/advertisement/", "/adservice/",
+        "/preroll/", "/pre-roll/", "/sponsor/", "/promotion/", "/promo/",
+        "adsegment", "adservice", "advertising", "sponsorsegment",
+    ),
+    "host_suffixes": (
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+        "adnxs.com", "adsrvr.org", "pubmatic.com", "criteo.com",
+        "moatads.com", "amazon-adsystem.com", "gdt.qq.com", "tanx.com",
+    ),
+}
+
+_AD_HOST_SUFFIXES = tuple(dict.fromkeys(BUILTIN_AD_RULES["host_suffixes"]))
 
 
 def _is_ad_host(host: str) -> bool:
@@ -115,7 +130,7 @@ _EXTINF_DUR = re.compile(r"#EXTINF:([\d.]+)")
 def enabled() -> bool:
     """总开关，默认开启；可在管理页关闭。"""
     try:
-        return bool(_cfg.config.get().get(_ENABLE_KEY, True))
+        return bool(_cfg.config.read(_ENABLE_KEY, True))
     except Exception:
         _log.debug("enabled failed", exc_info=True)
         return True

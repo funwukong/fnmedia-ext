@@ -42,6 +42,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import re
+import threading
 import time
 import urllib.parse
 
@@ -64,8 +65,9 @@ _DEFAULT_PANSOU_URL = "https://bus.wulii.eu.cc"
 def _pansou_cfg(key: str, default):
     try:
         import config as _cfg
-        v = _cfg.config.get().get(key, default)
+        v = _cfg.config.read(key, default)
     except Exception:
+        _log.debug("pansou config read failed: key=%s", key, exc_info=True)
         v = default
     return v
 
@@ -108,6 +110,10 @@ def _pansou_src() -> str:
 
 _PANSOU_SEARCH_PER_TYPE_MAX = 6  # 每盘最多取几条
 _PANSOU_SEARCH_TOTAL_MAX = 12   # 搜索结果总数上限
+_PANSOU_SEARCH_CACHE_TTL = 180.0
+_PANSOU_SEARCH_EMPTY_TTL = 20.0
+_PANSOU_SEARCH_CACHE_MAX = 256
+_PANSOU_SEARCH_CACHE: dict[tuple, tuple[float, list]] = {}
 # merged_by_type 的遍历顺序：键是服务端类型名，aliyun 不是 ali。
 _PANSOU_SEARCH_ORDER = ("quark", "uc", "aliyun")
 # 服务端类型名 -> fork 驱动 key（aliyun 桶的链接由 panali.py 转存）。
@@ -148,10 +154,33 @@ _PANSOU_REAL_PLAY: dict[str, float] = {}
 _PANSOU_QR: dict[str, dict] = {}
 # mg -> 在途 _pansou_run 任务（单飞）。
 _PANSOU_TASKS: dict[str, "asyncio.Task"] = {}
+_PANSOU_METRICS_LOCK = threading.Lock()
+_PANSOU_METRICS = {"runs": 0, "search_ms": 0.0, "resolve_ms": 0.0,
+                   "search_ok": 0, "resolve_ok": 0, "failed": 0,
+                   "waiting_login": 0}
 
-# ready 快照有效期：网盘直链（夸克/UC/阿里）通常 2~4 小时就换链，快照
-# 留 90 分钟，过期即退 armed 重转存——否则「同一集有时能播有时不能」。
+def _pansou_metrics_snapshot(reset: bool = False) -> dict:
+    with _PANSOU_METRICS_LOCK:
+        out = dict(_PANSOU_METRICS)
+        out["avg_search_ms"] = round(out["search_ms"] / max(1, out["runs"]), 1)
+        out["avg_resolve_ms"] = round(out["resolve_ms"] / max(1, out["resolve_ok"]), 1)
+        if reset:
+            for k in _PANSOU_METRICS:
+                _PANSOU_METRICS[k] = 0
+        return out
+
+
+def _pansou_metric(key: str, value: float = 1.0) -> None:
+    with _PANSOU_METRICS_LOCK:
+        _PANSOU_METRICS[key] = _PANSOU_METRICS.get(key, 0) + value
+
+# ready 快照分层时效：旧格式/无法确认文件身份的快照仍只保留 90 分钟。
+# provider 的 resolve_share() 会返回稳定的个人盘 fid，播放 URL 只是本地
+# /v/api/ext/pan/*/play 代理；因此带 fid 的快照无需按外部签名 URL 的短时效
+# 处理。但个人盘清理任务默认 6 小时，身份快照保守留 5 小时，避免跨清理
+# 窗口复用已经被删除的转存文件。
 _PANSOU_SNAP_TTL = 90 * 60.0
+_PANSOU_IDENTITY_SNAP_TTL = 5 * 3600.0
 # 手切网盘线意图的有效期：只覆盖「播放中切清晰度」这一次操作。播放器把
 # 上次的 bitrate 带到下一部片时，间隔通常已远超此值，自然失效。
 _PANSOU_PICK_TTL = 10 * 60.0
@@ -462,6 +491,48 @@ def _pansou_dedupe_key(url: str) -> str:
     return base.rstrip("/")
 
 
+def _pansou_share_identity(url: str) -> str:
+    """Canonical share identity: ignore tracking params but retain access codes."""
+    try:
+        parsed = urllib.parse.urlsplit(str(url or "").strip())
+        host = (parsed.hostname or "").lower()
+        path = re.sub(r"/+", "/", parsed.path).rstrip("/")
+        qs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+        access = sorted((k.lower(), v) for k, v in qs
+                        if k.lower() in ("pwd", "passcode", "code", "password"))
+        return urllib.parse.urlunsplit((parsed.scheme.lower(), host, path,
+            urllib.parse.urlencode(access), ""))
+    except (ValueError, TypeError):
+        return _pansou_dedupe_key(str(url or ""))
+
+
+def _pansou_search_cache_key(title: str) -> tuple:
+    return (_pansou_clean_title(title).casefold(), _pansou_base_url(),
+            tuple(_pansou_cloud_types()), _pansou_src())
+
+
+def _pansou_search_cached(title: str, index: int = 0) -> list[str]:
+    key = _pansou_search_cache_key(title)
+    hit = _PANSOU_SEARCH_CACHE.get(key)
+    now = time.time()
+    ttl = _PANSOU_SEARCH_CACHE_TTL if hit and hit[1] else _PANSOU_SEARCH_EMPTY_TTL
+    if hit and now - hit[0] < ttl:
+        return list(hit[1])
+    if hit:
+        _PANSOU_SEARCH_CACHE.pop(key, None)
+    search_fn = _pansou_search
+    if getattr(search_fn, "__module__", __name__) != __name__:
+        return list(search_fn(title, index))
+    rows = search_fn(title, index)
+    # Cache empty results briefly too, so placeholder polling does not flood API.
+    _PANSOU_SEARCH_CACHE[key] = (now, list(rows))
+    if len(_PANSOU_SEARCH_CACHE) > _PANSOU_SEARCH_CACHE_MAX:
+        oldest = sorted(_PANSOU_SEARCH_CACHE.items(), key=lambda item: item[1][0])
+        for old_key, _ in oldest[:len(_PANSOU_SEARCH_CACHE)-_PANSOU_SEARCH_CACHE_MAX]:
+            _PANSOU_SEARCH_CACHE.pop(old_key, None)
+    return list(rows)
+
+
 def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
     """PanSou 自托管搜索适配器（2026-11-12 接通）。
 
@@ -528,7 +599,7 @@ def _pansou_search(title: str, index: int = 0, _transport=None) -> list[str]:
             if pv is None or pv.get("key") not in _PAN_MODULES \
                     or pv.get("key") != fork_key:
                 continue
-            key = _pansou_dedupe_key(url)
+            key = _pansou_share_identity(url)
             if key in seen:
                 continue
             seen.add(key)
@@ -597,7 +668,7 @@ def _pansou_search_rows(title: str, _transport=None) -> list[tuple[str, str, str
             if pv is None or pv.get("key") not in _PAN_MODULES \
                     or pv.get("key") != fork_key:
                 continue
-            key = _pansou_dedupe_key(url)
+            key = _pansou_share_identity(url)
             if key in seen:
                 continue
             seen.add(key)
@@ -634,7 +705,7 @@ def _pansou_set_manual_share(mg: str, url: str, index: int = 0) -> dict:
                "manual_shares": [], "updated": time.time()}
         _PANSOU_STATE[mg] = rec
     shares = rec.setdefault("manual_shares", [])
-    if url not in shares:
+    if _pansou_share_identity(url) not in {_pansou_share_identity(x) for x in shares}:
         shares.append(url)
         del shares[:max(0, len(shares) - _MANUAL_SHARE_MAX)]
     rec["index"] = idx
@@ -726,17 +797,34 @@ def _pansou_pick_item(items: list, index: int, want_ep: int):
     return items[idx]
 
 
+def _pansou_snap_ttl(snap: dict) -> float:
+    """Return the cache TTL justified by the snapshot's identity fields.
+
+    A provider ``fid`` is the reusable identity used by the existing local
+    playback adapters.  Without it, an old/direct URL-shaped snapshot cannot
+    be safely distinguished from a signed URL, so it keeps the short legacy
+    TTL.  This deliberately does not infer expiry or refresh unsupported by a
+    provider.
+    """
+    provider = str(snap.get("provider") or "").strip()
+    fid = str(snap.get("fid") or "").strip()
+    if provider in _PAN_MODULES and fid:
+        return _PANSOU_IDENTITY_SNAP_TTL
+    return _PANSOU_SNAP_TTL
+
+
 def _pansou_snap_fresh(snap: dict) -> bool:
     """ready 快照是否还能用。
 
-    网盘直链（夸克/UC/阿里）有效期只有 2~4 小时，原先快照永不过期，
-    隔一段时间点同一集必失败——这是「同一集有时能播有时不能」的主因。
+    Provider 返回的 ``fid`` 允许本地播放适配器按请求重新取得短时效
+    直链；带身份的快照因此可复用更久，但仍早于网盘转存清理窗口。旧格式
+    或缺少身份的快照继续使用短 TTL，避免把未知直链长期缓存。
     """
     try:
         age = time.time() - float(snap.get("ts") or 0)
     except (TypeError, ValueError):
         return False
-    return age < _PANSOU_SNAP_TTL
+    return age < _pansou_snap_ttl(snap)
 
 
 def _pansou_drop_snap(mg: str) -> None:
@@ -880,6 +968,8 @@ async def _pansou_wait_login(mg: str, provider: str) -> bool:
 
 async def _pansou_run(mg: str) -> None:
     """后台搜索 → 选分享 → resolve_share 转存 → 出直链快照。"""
+    run_started = time.monotonic()
+    _pansou_metric("runs")
     rec = _PANSOU_STATE.get(mg or "")
     if not rec:
         return
@@ -898,6 +988,7 @@ async def _pansou_run(mg: str) -> None:
         except (TypeError, ValueError):
             index = 0
         candidates: list[str] = []
+        search_started = time.monotonic()
         want_ep = _pansou_parse_ep(title)
         for url in list(rec.get("manual_shares") or []):
             if isinstance(url, str) and url and url not in candidates:
@@ -908,12 +999,16 @@ async def _pansou_run(mg: str) -> None:
                 #（同函数内 resolve_share 也是 to_thread）。
                 # 搜索用去后缀的干净片名（「凡人修仙传 第05集」搜不到分享）
                 for url in await asyncio.to_thread(
-                        _pansou_search, _pansou_clean_title(title),
+                        _pansou_search_cached, _pansou_clean_title(title),
                         index) or []:
                     if isinstance(url, str) and url and url not in candidates:
                         candidates.append(url)
             except Exception:
+                _pansou_metric("failed")
                 _log.debug("_pansou_run search failed: mg=%s", mg, exc_info=True)
+            _pansou_metric("search_ms", (time.monotonic() - search_started) * 1000)
+            if candidates:
+                _pansou_metric("search_ok")
         if not candidates:
             # 关键：转存失败不能直接 dead。dead 会被 manual_state 视为
             # 终态——之后这一集永远不再尝试，「有时能播有时不能」里
@@ -938,17 +1033,26 @@ async def _pansou_run(mg: str) -> None:
             if mod is None:
                 continue
             if not _pan_logged_in(key):
+                _pansou_metric("waiting_login")
                 rec["state"] = "need_login"
                 rec["provider"] = key
                 rec["error"] = f"{_PAN_MODULES[key][1]}未登录，播放画面扫码登录后自动继续"
                 return
+            resolve_started = time.monotonic()
             try:
                 res = await asyncio.to_thread(mod.resolve_share, url)
             except Exception as exc:
+                _pansou_metric("resolve_ms", (time.monotonic() - resolve_started) * 1000)
+                _pansou_metric("failed")
                 last_err = str(exc)[:200]
                 _log.debug("_pansou_run resolve failed: mg=%s key=%s",
                            mg, key, exc_info=True)
                 continue
+            _pansou_metric("resolve_ms", (time.monotonic() - resolve_started) * 1000)
+            if (res or {}).get("items"):
+                _pansou_metric("resolve_ok")
+            else:
+                _pansou_metric("failed")
             items = (res or {}).get("items") or []
             if not items:
                 last_err = "分享内没有可播放的视频文件"

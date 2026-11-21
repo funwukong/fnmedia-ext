@@ -98,7 +98,8 @@ def test_marked_source_fallback_unchanged(monkeypatch):
     _welfare_on(monkeypatch)
     # 兜底轨：改前改后一致进福利。
     assert classify_source_class("台湾剧", adult_allowed=True) == "adult"
-    assert classify_source_class("未分类", adult_allowed=True) == "adult"
+    # 新需求：黑名单分类直接丢弃，即使源开启福利分类也不进入兜底福利库。
+    assert classify_source_class("未分类", adult_allowed=True) is None
     assert classify_source_class("台湾剧", adult_allowed=False) is None
     # 中性噪音：即使源已标记也不进。
     assert classify_source_class("影视解说", adult_allowed=True) is None
@@ -159,7 +160,7 @@ def test_welfare_guid_unchanged():
 
 
 def test_welfare_switch_default_off():
-    """开关默认值仍关：不改默认，不新增配置项。"""
+    """福利媒体库默认关闭，需在管理台手动开启。"""
     import config as configmod
 
     assert configmod.DEFAULTS["welfare_library_enabled"] is False

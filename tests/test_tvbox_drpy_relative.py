@@ -111,7 +111,7 @@ class ClassifyRelativeDrpyTests(unittest.TestCase):
         r = self._classified(sites)
         self.assertEqual(r["drpy"], [])
         # .py 不被支持，进入跳过而非伪装成可运行的 JS 源
-        self.assertTrue(any("无法识别" in s.get("reason", "")
+        self.assertTrue(any(s.get("name") == "豆瓣[py]"
                             for s in r["skipped"]))
 
     def test_csp_classified_guard_site_skipped(self):
@@ -121,7 +121,7 @@ class ClassifyRelativeDrpyTests(unittest.TestCase):
              "ext": ""},
         ]
         r = self._classified(sites)
-        self.assertEqual(len(r["csp"]), 1)
+        self.assertNotIn("csp", r)
         self.assertEqual(r["drpy"], [])
         self.assertNotIn("guard", r)
         self.assertTrue(any(s.get("name") == "加固" for s in r["skipped"]))
@@ -184,11 +184,7 @@ class LoadSubscriptionRelativeTests(unittest.IsolatedAsyncioTestCase):
             t4["api"],
             "https://raw.githubusercontent.com/owner/repo/master/api.php/provide/vod")
         csp = next(s for s in sites if s["key"] == "c")
-        # 注意 fork 既有 jar 补全把订阅 URL 当目录拼（js.json/ 后缀），
-        # 本移植不改该行为，只锁定它不被回归。
-        self.assertEqual(
-            csp["_site_jar"],
-            "https://raw.githubusercontent.com/owner/repo/master/js.json/jar/site.jar")
+        self.assertNotIn("_site_jar", csp)
         self.assertEqual(csp["api"], "csp_XBPQ")
 
     async def test_walk_leaves_non_drpy_sites_untouched(self):

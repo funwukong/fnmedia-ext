@@ -259,6 +259,25 @@ def test_standalone_window_cached_within_merged_range():
     assert [b["guid"] for b in rows3] == [b["guid"] for b in rows1]
 
 
+def test_standalone_window_bounds_retained_merged_prefix(monkeypatch):
+    import catalog as catalogmod
+    cat, scope, calls = _standalone_cat()
+    monkeypatch.setattr(catalogmod, "_STANDALONE_MERGED_MAX", 10)
+
+    rows, _ = asyncio.run(cat.standalone_window(scope, 20, 22))
+    assert len(rows) == 22
+    assert len(cat._standalone_cache[scope]["merged"]) == 10
+    first_calls = calls["n"]
+
+    # The deep window remains correct, while a later request outside the
+    # retained prefix rebuilds instead of retaining an oversized list.
+    rows2, _ = asyncio.run(cat.standalone_window(scope, 20, 22))
+    assert len(rows2) == 22
+    assert [b["guid"] for b in rows2] == [b["guid"] for b in rows]
+    assert calls["n"] > first_calls
+    assert len(cat._standalone_cache[scope]["merged"]) == 10
+
+
 def test_standalone_window_cache_invalidated_by_reset_and_route_refresh():
     import catalog as catalogmod
     cat, scope, calls = _standalone_cat()

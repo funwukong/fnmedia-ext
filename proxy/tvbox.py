@@ -386,18 +386,6 @@ _PAN_API = re.compile(r"(quark|uc\.cn|aliyun|alipan|aliyundrive|115|baidu|"
                       r"weiyun|xunlei|cloud189|pan\.)", re.I)
 
 
-def _spider_jar_url(spider: str, base: str = "") -> str:
-    """解析 TVBox 全局 spider 声明里的 jar 地址。
-
-    形如 "./jar/top98_1.jar;md5;xxxx" 或纯 URL，取分号前的 URL 并用订阅基址
-    补全相对地址。
-    """
-    s = str(spider or "").strip().split(";", 1)[0].strip()
-    if not s:
-        return ""
-    return urljoin(base, s)
-
-
 def is_drpy_site(site: dict) -> bool:
     """type=3 且 api 指向远程 drpyS 引擎（http 的 drpy2.min.js）。
 
@@ -475,8 +463,6 @@ def classify_subscription(sites: list[dict], spider: str = "",
 
     返回：
       cms    : 苹果CMS 归一化结果（name/api/transport...）
-      csp    : 普通 csp_ 爬虫（纯 dex），{key,name,cls,ext,jar,...}，
-               由安卓运行时按各自 jar 加载
       drpy   : 远程 drpyS（type=3、api 为 http 的 drpy2 js），{name,api,ext}，
                由 Node sidecar 直接跑远程脚本
       t4     : 远程 T4 源（type=4），{name,api,kind,site_key,ext,enabled,
@@ -484,19 +470,15 @@ def classify_subscription(sites: list[dict], spider: str = "",
       skipped: [{name,reason}]
     """
     cms: list[dict] = []
-    csp: list[dict] = []
     drpy: list[dict] = []
     # T4 远程源（type=4）：由 T4 服务端解析，可搜可播；地址不是 http(s) 也收录
     # （标 invalid），别静默丢进 skipped 让人找不到。
     t4: list[dict] = []
     skipped: list[dict] = []
     seen_cms: set[str] = set()
-    seen_csp: set[str] = set()
     seen_drpy: set[str] = set()
     seen_t4: set[str] = set()
-    count: dict[str, int] = {}
     skip_seen: set[str] = set()
-    jar_url = _spider_jar_url(spider, base)
 
     def _skip(name: str, reason: str):
         name = (name or "未命名")[:24]
@@ -541,46 +523,8 @@ def classify_subscription(sites: list[dict], spider: str = "",
                 t4.append(normalized)
             continue
 
-        # 3) type=3 其它爬虫细分
-        if t == "3" or api.startswith(_SPIDER_PREFIX) or "csp_" in api.lower():
-            low = api.lower()
-            if api.startswith("csp_") and not api.endswith("Guard"):
-                base_key = api[4:]                    # 去 csp_ 前缀
-                # 饭太硬加密族（Yoursmile/libstub 与伪装 PNG jar 的 *Amns）在 x86_64
-                # redroid + ndk_translation 下一调用即 SIGABRT 杀进程，导入前直接屏蔽，
-                # 避免打崩 bridge 连累其它源。网盘类基本都落在这里。
-                if base_key.endswith("Amns") or _is_fongmi_native_class(base_key):
-                    _skip(name, "加密原生源（x86 模拟器会崩溃，已屏蔽）")
-                    continue
-                # 普通纯 dex 爬虫：类名即 csp_Xxx，由订阅全局 spider jar 或站点自带 jar
-                # 承载。同一个 Spider 类可被多个站点以不同 ext 复用（如 csp_XBPQ），
-                # 唯一性按 (类, ext, jar) 判定；同类多配置追加序号。
-                ext = s.get("ext")
-                ext_str = ext if isinstance(ext, str) else (
-                    "" if ext is None else json.dumps(ext, ensure_ascii=False))
-                site_jar = str(s.get("_site_jar") or s.get("_spider_jar") or "").strip() \
-                    or jar_url
-                sig = (api.lower(), ext_str.strip().lower(), site_jar)
-                if sig in seen_csp:
-                    continue
-                seen_csp.add(sig)
-                count[base_key] = count.get(base_key, 0) + 1
-                uniq = base_key if count[base_key] == 1 else f"{base_key}{count[base_key]}"
-                csp.append({
-                    "key": uniq,
-                    "spider": api,
-                    "name": name or api,
-                    "cls": "com.github.catvod.spider." + base_key,
-                    "ext": ext_str,
-                    "jar": site_jar,
-                    "searchable": s.get("searchable", 1),
-                    "quickSearch": s.get("quickSearch", 0),
-                })
-                continue
-            if api.startswith(("py_", "java_", "sp_")):
-                _skip(name, "Python/Java 内置脚本源（不支持）")
-                continue
-            _skip(name, "其它爬虫源（无法识别运行时）")
+        if api.startswith(_SPIDER_PREFIX) or "csp_" in api.lower():
+            _skip(name, "CSP Jar 爬虫源（已移除）")
             continue
         if _PAN_HINT.search(api) or _PAN_API.search(api) or _PAN_HINT.search(name):
             _skip(name, "网盘/云盘源")
@@ -607,8 +551,8 @@ def classify_subscription(sites: list[dict], spider: str = "",
         norm["transport"] = "json" if status == "add_json" else "xml"
         cms.append(norm)
 
-    return {"cms": cms, "csp": csp, "drpy": drpy, "t4": t4,
-            "skipped": skipped, "jar_url": jar_url}
+    return {"cms": cms, "drpy": drpy, "t4": t4,
+            "skipped": skipped}
 
 
 async def load_subscription_full(url: str | None = None,
@@ -649,7 +593,6 @@ async def load_subscription_full(url: str | None = None,
             # 子订阅也允许携带去广告规则；合并时由 adfilter 按 hosts+regex 去重。
             rules.extend(cfg["rules"])
         sub_base = u or ""
-        sub_jar = _spider_jar_url(sub_spider, sub_base)
         for st in extract_sites(cfg):
             if isinstance(st, dict):
                 if str(st.get("type")) == "4" and sub_base and st.get("api"):
@@ -658,17 +601,6 @@ async def load_subscription_full(url: str | None = None,
                 # 否则下游 is_drpy_site 只认 http 会把它误归为“无法识别运行时”。
                 if sub_base:
                     absolutize_drpy_site(st, sub_base)
-                if sub_jar and not st.get("_spider_jar"):
-                    st["_spider_jar"] = sub_jar
-                # 站点自带 jar（饭太硬部分源用伪装成 PNG 的独立 jar），优先级高于全局。
-                # 形如 "https://h/p.png;md5;xxxx"，去掉 ;md5; 后缀并补全相对地址。
-                sj = st.get("jar")
-                if isinstance(sj, str) and sj.strip():
-                    sj_url = sj.strip().split(";", 1)[0].strip()
-                    if sj_url and "://" not in sj_url and sub_base:
-                        sj_url = urljoin(sub_base.rstrip("/") + "/", sj_url.lstrip("/"))
-                    if sj_url:
-                        st["_site_jar"] = sj_url
             all_sites.append(st)
         if depth < MAX_DEPTH:
             base = u or ""

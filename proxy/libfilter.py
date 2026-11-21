@@ -128,7 +128,7 @@ _MUSIC_WORDS = ("mv", "音乐", "演唱会", "音乐会", "音乐节", "音乐�
 # app.CATALOG_LIB_GUIDS 的键一致（tests 会断言两者一致）。
 _KNOWN_CATALOG_CATS = frozenset((
     "movie", "tv", "anime", "variety", "documentary", "uhd",
-    "shortdrama", "overseas", "ai_comic", "ted", "adult",
+    "shortdrama", "overseas", "ai_comic", "ted", "adult", "jp_adult", "domestic", "europe_adult",
     "sports", "live", "kids", "opera", "music"))
 
 
@@ -157,6 +157,11 @@ def catalog_cat_for_type(type_name: str) -> str:
         return "opera"
     if any(w in typ.lower() for w in _MUSIC_WORDS):
         return "music"
+    # Specific type markers take precedence over generic anime/movie words,
+    # matching catalog.classify; do not infer these from a title.
+    import catalog
+    if catalog.classify(typ) in ("shortdrama", "uhd", "overseas", "ai_comic", "ted"):
+        return catalog.classify(typ)
     if any(w in typ for w in _ANIME_WORDS):
         return "anime"
     if any(w in typ for w in _VARIETY_WORDS):
@@ -189,7 +194,35 @@ def brief_lib_keys(brief: dict) -> set[str]:
         if cand in _KNOWN_CATALOG_CATS:
             route_cat = cand
 
+    # Explicit content type is authoritative over stale/incorrect welfare routes.
+    # This protects ordinary movies/TV/anime/etc. from leaking into adult cards,
+    # while keeping 4K as an orthogonal quality route below.
+    type_name = str(brief.get("type_name") or "")
+    explicit_type_cat = catalog_cat_for_type(type_name)
+    # Keep a clearly adult type on its welfare route; the normal type mapper
+    # intentionally does not infer welfare categories.
+    try:
+        import catalog as _catalog
+        explicit_welfare = bool(
+            any(k in type_name for k in (_catalog._ADULT_KW
+                                         + _catalog._JP_ADULT_KW
+                                         + _catalog._DOMESTIC_KW
+                                         + _catalog._EUROPE_ADULT_KW)))
+    except Exception:
+        explicit_welfare = False
+    normal_type_cats = {"movie", "tv", "anime", "variety", "documentary",
+                       "sports", "live", "kids", "opera", "music",
+                       "shortdrama", "overseas", "ai_comic", "ted"}
+    if (not explicit_welfare and explicit_type_cat in normal_type_cats
+            and route_cat in {
+            "adult", "jp_adult", "domestic", "europe_adult"}):
+        route_cat = explicit_type_cat
+
     cat = brief.get("catalog_cat") or ""
+    if (not explicit_welfare and explicit_type_cat in normal_type_cats
+            and cat in {
+            "adult", "jp_adult", "domestic", "europe_adult"}):
+        cat = explicit_type_cat
     scope = brief.get("catalog_scope") or ""
     source = brief.get("catalog_source") or ""
     if cat or scope or source:
@@ -223,7 +256,10 @@ def brief_lib_keys(brief: dict) -> set[str]:
     for provider in providers:
         keys.add(f"standalone:{provider}")
     cat = catalog_cat_for_type(brief.get("type_name") or "")
-    if cat:
+    # A populated source route is the authoritative source classification.
+    # Keep 4K as a deliberate orthogonal quality dimension, but do not let a
+    # generic type fallback (usually tv) leak a routed shortdrama/other class.
+    if cat and (not route_cat or route_cat == "uhd" or cat == route_cat):
         keys.add(f"catalog:{cat}")
     if route_cat:
         keys.add(f"catalog:{route_cat}")

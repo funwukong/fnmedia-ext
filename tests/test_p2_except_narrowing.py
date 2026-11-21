@@ -28,7 +28,6 @@ import threading
 import pytest
 
 import adfilter
-catvod = importlib.import_module("cat" + "vod")
 import domain_heal
 drpy = importlib.import_module("dr" + "py")
 import fnmedia_authx
@@ -37,7 +36,6 @@ import history
 import pan
 import panali
 import panuc
-spiders = importlib.import_module("spi" + "ders")
 import store as storemod
 xlib = importlib.import_module("x" + "lib")
 
@@ -106,16 +104,6 @@ def test_pan_family_load(tmp_path, monkeypatch, mod):
         mod._load()
 
 
-def test_read_json(tmp_path):
-    mod = spiders
-    bad = _write(tmp_path / "x.json", "[1,2")
-    missing = tmp_path / "missing.json"
-    assert mod._read_json(bad, "DEF") == "DEF"
-    assert mod._read_json(missing, "DEF") == "DEF"
-    with pytest.raises(RuntimeError, match="sentinel-boom"):
-        mod._read_json(_RaisingPath(), "DEF")
-
-
 def test_hgdj_load_disk(tmp_path, monkeypatch):
     bad = _write(tmp_path / "library.json", "{not json")
     monkeypatch.setattr(hgdj, "STATE", bad)
@@ -147,17 +135,6 @@ def test_drpy_read_remote_registry(tmp_path, monkeypatch):
     monkeypatch.setattr(drpy, "Path", FakePath)
     with pytest.raises(RuntimeError, match="sentinel-boom"):
         drpy._read_remote_registry()
-
-
-def test_catvod_load_private(tmp_path, monkeypatch):
-    bad = _write(tmp_path / "catvod.local.json", "{not json")
-    monkeypatch.setattr(catvod, "_PRIVATE_CONF", str(bad))
-    assert catvod._load_private() == {}
-    monkeypatch.setattr(catvod, "_PRIVATE_CONF", str(tmp_path / "missing.json"))
-    assert catvod._load_private() == {}
-    monkeypatch.setattr(catvod, "open", _raising_open, raising=False)
-    with pytest.raises(RuntimeError, match="sentinel-boom"):
-        catvod._load_private()
 
 
 def test_adfilter_load_rules(tmp_path, monkeypatch):
@@ -205,22 +182,6 @@ def test_store_resolve_media_guid_bad_json_and_boom(monkeypatch, boom_json):
     s._media_index = {"m1": "t:BOOM"}
     with pytest.raises(RuntimeError, match="sentinel-boom"):
         s.resolve_media_guid("m1")
-
-
-def test_app_resolve_spider_inner_fallback(monkeypatch, boom_json):
-    import app as appmod
-    monkeypatch.setattr(appmod.config, "all_sources",
-                        lambda: [{"id": "s1", "spider_src": True}])
-    monkeypatch.setattr(appmod.providers, "_spider_conf",
-                        lambda src: {"key": "s1"})
-    monkeypatch.setattr(spiders, "play", lambda *a, **k: "{bad json")
-    picked = {"play_from": "s1:L1", "url": "playUrl=http://cdn/x.m3u8"}
-    assert asyncio.run(appmod._resolve_spider(picked)) is True
-    assert picked["url"] == "{bad json"  # 内层兜底 res={"url": res} 仍生效
-    # 非 ValueError 不走内层兜底，改走函数外层 except Exception -> False。
-    monkeypatch.setattr(spiders, "play", lambda *a, **k: '{"BOOM')
-    picked = {"play_from": "s1:L1", "url": "playUrl=http://cdn/x.m3u8"}
-    assert asyncio.run(appmod._resolve_spider(picked)) is False
 
 
 def test_domain_heal_pure_functions():

@@ -12,9 +12,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 import time
 from typing import Any
+from pathlib import Path
 
 import httpx
 
@@ -46,8 +48,15 @@ PROBE_CONCURRENCY = 12
 # merged 只取 60s：同一浏览会话内翻页直接切片，深翻不再每次从 0
 # 重建 O(offset) 合并；路由刷新/_updated 变化时立即失效，不靠 TTL。
 STANDALONE_MERGED_TTL = 60.0
+# Retain only a bounded prefix per standalone scope. A deep request still
+# returns its full window from the local build, but does not pin an unbounded
+# merged list until TTL expiry.
+_STANDALONE_MERGED_MAX = 5000
 CLASS_REFRESH = 6 * 3600
 PAGE_TTL = 10 * 60
+ROUTE_STATE = Path(__file__).resolve().parent.parent / "state" / "catalog_routes.json"
+ROUTE_STATE_TTL = 6 * 3600
+CATALOG_SCHEMA_VERSION = 3
 # 空页（多为慢源抖动超时）只短缓存，避免该页被长时间冻结
 EMPTY_TTL = 15
 HTTP_TIMEOUT = 12.0
@@ -58,39 +67,78 @@ _DENSE_TOTAL_MAX = 50000  # dense 去重列表全作用域总条数（10 作用�
 # 5 万条总量约 23MB 级，可控）
 _PAGE_CACHE_MAX = 500      # 页缓存总页数（每页 ≤20 条 brief，500 页约万条量级）
 
+
+def _log_background_task(task: asyncio.Task) -> None:
+    """读取后台任务结果，避免异常变成未回收的 Task exception。"""
+    try:
+        task.result()
+    except asyncio.CancelledError:
+        return
+    except Exception:
+        _log.warning("catalog background task failed", exc_info=True)
+
 # 大类 -> 展示名 / MediaDB category
-CATALOG_CATEGORIES = [
-    ("movie", "🎞海量电影", "Movie"),
-    ("tv", "📺海量剧集", "TV"),
-    ("anime", "🌸海量动漫", "Mix"),
-    ("variety", "🎤海量综艺", "Mix"),
-    ("documentary", "🎞纪录片", "Movie"),
-    ("uhd", "📽4K影视", "Movie"),
-    ("shortdrama", "📱热门短剧", "TV"),
-    # P2 新增：海外电视剧、AI漫剧，跟随海量主开关，不设独立开关。
-    ("overseas", "🌍海外剧集", "TV"),
-    ("ai_comic", "🤖AI漫剧", "Mix"),
-    # P2 追加：TED（现显示为“教育”），跟随海量主开关，不设独立开关。
-    # cat-core：显示名改为“🎓教育”，键 ted 不动，GUID 因此不变。
-    ("ted", "🎓教育", "Mix"),
-    # cat-core 新增：体育 / 直播 / 少儿 / 戏曲 / 音乐MV，跟随海量主开关，不设独立开关。
-    # MDB 类别按现有惯例：体育/直播用 TV，少儿/戏曲/音乐用 Mix。
-    ("sports", "⚽体育节目", "TV"),
-    ("live", "📡直播", "TV"),
-    ("kids", "🧒少儿", "Mix"),
-    ("opera", "🎭戏曲", "Mix"),
-    ("music", "🎵音乐MV", "Mix"),
-]
+CATALOG_GUIDS = {
+    "movie": "e91dd7347a49dbd874fb8a0e78ad7ad7",
+    "tv": "196381f891d66a4de32f9032e8f244f3",
+    "anime": "97fc49015edcb20cc423658401711b6c",
+    "variety": "cfff30730cffca2d1357e0c2b52fc2f5",
+    "documentary": "155f2305c2cbc76c85f981ef31cc192f",
+    "uhd": "262ce51312d7e72020514db5fd5f63e9",
+    "shortdrama": "037ed7c6df4a9deb8d815c823fd15f79",
+    "overseas": "c2fe61ae4d3adc87756a253cb108066e",
+    "ai_comic": "6784f423ff4be5af4fe60cde6c8da303",
+    "ted": "34883d4af44ca4a5539cb38827158294",
+    "adult": "411515e17c85709cf1966697b7b2c58e",
+    "jp_adult": "1da6f6024e13cd963384ca32151a9a68",
+    "domestic": "89fc9a5d4d3253ccab527b5808c8d8c4",
+    "europe_adult": "92f724d4d361966cf617f201fec0e76d",
+    "sports": "9b93ebd34f12099811bcb2e700825169",
+    "live": "465e85f3a6cb1a4ce5d4e397de29384b",
+    "kids": "cd91e59c8f342225b8741f18d70a26be",
+    "opera": "495704bcc69d765082a218219fbf3c1e",
+    "music": "00a744b183e5c4ef1d375ab8514f515b",
+}
+
+CATALOG_DEFS = {
+    "movie": ("🎞海量电影", "Movie"),
+    "tv": ("📺海量剧集", "TV"),
+    "anime": ("🌸海量动漫", "Mix"),
+    "variety": ("🎤海量综艺", "Mix"),
+    "documentary": ("🎞纪录片", "Movie"),
+    "uhd": ("📽4K影视", "Movie"),
+    "shortdrama": ("📱热门短剧", "TV"),
+    "overseas": ("🌍海外剧集", "TV"),
+    "ai_comic": ("🤖AI漫剧", "Mix"),
+    "ted": ("🎓教育", "Mix"),
+    "sports": ("⚽体育节目", "TV"),
+    "live": ("📡直播", "TV"),
+    "kids": ("🧒少儿", "Mix"),
+    "opera": ("🎭戏曲", "Mix"),
+    "music": ("🎵音乐MV", "Mix"),
+}
+CATALOG_CATEGORIES = [(cat, title, mdb)
+                      for cat, (title, mdb) in CATALOG_DEFS.items()]
 
 # 跨源聚合的“海量四库”使用的保留作用域 id；单源独立库作用域为其 source id。
 AGG_SCOPE = "__agg__"
 CATS = [c for c, _, _ in CATALOG_CATEGORIES]
 
+
+def visible_categories(*, welfare: bool | None = None) -> list[tuple[str, str, str]]:
+    """Return the canonical categories visible to the current feature set."""
+    enabled = _welfare_on() if welfare is None else bool(welfare)
+    out = list(CATALOG_CATEGORIES)
+    if enabled:
+        out.extend((cat, catalog_title(cat), catalog_mdb(cat))
+                   for cat in WELFARE_CATS)
+    return list(dict.fromkeys(out))
+
 # 名称关键字（匹配 type_name 子串）。顺序：动漫/综艺优先于“电影/剧”判定。
-_ANIME_KW = ("动漫", "动画", "番剧", "卡通")
-_VARIETY_KW = ("综艺", "真人秀", "脱口秀", "娱乐")
-_DOC_KW = ("纪录片", "纪录", "记录", "纪实")
-_UHD_KW = ("4k", "杜比视界", "dolby", "uhd", "超高清", "蓝光", "bluray")
+_ANIME_KW = ("动漫", "动画", "番剧", "卡通", "哔哩", "次元动漫", "沙雕动画", "有声动漫")
+_VARIETY_KW = ("综艺", "真人秀", "脱口秀", "娱乐", "音乐综艺")
+_DOC_KW = ("纪录片", "纪录", "记录片", "纪录剧集", "记录", "纪实")
+_UHD_KW = ("4k", "杜比视界", "dolby", "uhd", "超高清", "蓝光", "bluray", "邵氏4k", "4k新电影", "老电影4k")
 # 片名级 4K 判定（标题/备注里的画质信号）：比分类名多认 2160 与 HDR。
 # 注意不含“超清”——太多源把所有片都标超清，放进来 4K 库就等于全库。
 _UHD_TITLE_KW = _UHD_KW + ("2160", "hdr")
@@ -100,7 +148,7 @@ def is_uhd_title(title: str, remarks: str) -> bool:
     """片名/备注是否带 4K 画质信号（4K/2160/UHD/杜比/HDR/蓝光/超高清）。"""
     s = f"{title or ''} {remarks or ''}".lower()
     return any(k in s for k in _UHD_TITLE_KW)
-_SHORT_KW = ("短剧", "微短剧", "剧场")
+_SHORT_KW = ("短剧", "微短剧", "剧场", "短剧大全", "其他短剧", "爽文短剧")
 # P2 新增：AI漫剧（先于 _EXCLUDE_KW 判定，见 classify），海外剧（先于普通剧集判定）。
 _AI_COMIC_KW = ("AI漫剧", "AI动漫", "AI漫画", "动态漫画", "漫剧")
 # P2 追加：TED（现显示为“教育”）（大小写不敏感，用小写匹配，见 classify）。
@@ -112,11 +160,12 @@ _SPORTS_KW = ("体育", "足球", "篮球", "赛事", "乒乓", "网球", "排�
               "羽毛球", "田径", "拳击", "格斗", "斯诺克", "高尔夫", "赛车", "运动")
 _LIVE_KW = ("直播", "现场直播", "电视直播")
 _KIDS_KW = ("少儿", "儿童", "儿歌", "幼儿", "亲子", "童话")
+_EDUCATION_KW = ("两性课堂", "采集教程", "科普学习", "教育学习")
 _OPERA_KW = ("戏曲", "京剧", "越剧", "黄梅戏", "豫剧", "评剧", "昆曲",
              "秦腔", "川剧", "粤剧", "二人转", "沪剧", "淮剧")
 _MUSIC_KW = ("mv", "音乐", "演唱会", "音乐会", "音乐节", "音乐现场", "音综", "打歌")
 _OVERSEAS_KW = ("海外剧", "美剧", "英剧", "韩剧", "日剧", "泰剧",
-                "港台剧", "欧美剧", "海外电视剧")
+                "港台剧", "欧美剧", "海外电视剧", "Netflix", "马泰剧", "东南亚剧", "美国剧", "日本剧", "韩国剧")
 # 成人向分类名：显式导向 ADULT 福利分类，绝不落入常规电影/剧集类。
 # 硬红线（_REDLINE_KW）在 is_redline 中先于本表拦截，任何开关都不放行。
 # 扩围（第 5 批，真源分类表 2026-11-12，11/11 内置 CMS 源拉通）：
@@ -129,8 +178,30 @@ _OVERSEAS_KW = ("海外剧", "美剧", "英剧", "韩剧", "日剧", "泰剧",
 # 遇它返回 None，靠 classify_source_class() 的成人段捞回。
 _ADULT_KW = ("福利", "伦理", "情色", "午夜", "写真", "里番", "成人",
              "理论", "三级", "两性", "擦边")
+_JP_ADULT_KW = ("日本无码", "日本有码", "中字无码", "中字有码",
+                "JAV视频", "JAV视频中字", "JAV自拍", "有码字幕", "视频一区",
+                "视频二区", "视频三区", "视频四区", "留学生", "素人搭讪", "女优明星",
+                "日本AV", "中文字幕", "水果派解说")
+_EUROPE_ADULT_KW = ("欧美无码", "欧美性爱", "欧美情色", "欧美三级", "欧美AV", "欧美色情", "欧美成人")
+_DOMESTIC_KW = ("国产专区", "写真热舞", "抖阴视频", "国产视频", "美女写真", "国产伦理",
+                "国产偷拍", "国产户外", "国产探花", "国产自拍", "网友自拍", "酒店探花",
+                "国产传媒", "麻豆传媒", "精东影业", "葫芦影业", "91制片厂", "SA传媒",
+                "乌托邦传媒", "传媒厂商", "国产厂商", "大象传媒", "扣扣传媒", "星空传媒",
+                "星空无限传媒", "果冻传媒", "渡边传媒", "爱神传媒", "爱豆传媒", "皇家华人",
+                "蜜桃传媒", "蜜桃影像传媒", "起点传媒", "香蕉传媒", "国产主播", "台湾swag",
+                "网红主播", "主播秀色", "主播视讯", "福利姬", "福利片", "国产精品",
+                "国产专题", "国产丝袜", "国产人妻", "国产系列")
+_BAN_CATEGORIES = frozenset({"乱伦原创", "乱伦系列", "兄妹姐弟", "公媳乱伦", "叔嫂乱伦",
+    "国产乱伦", "家庭乱伦", "岳父岳母", "母子乱伦", "父女乱伦", "真实乱伦", "黑人专区",
+    "特殊嗜好", "男同GAY", "SM重口", "同性恋", "国产SM", "鸡教练", "黑椒盖饭",
+    "SM调教", "伪娘系列", "男同系列", "成人动漫", "资讯", "公告", "头条", "新闻资讯",
+    "娱乐新闻", "电影资讯", "网红头条", "娱乐动态", "影片资讯", "影视快讯", "影视资讯",
+    "明星资讯", "站内新闻", "系统通知", "网站公告", "预告资讯", "影视解说", "电影解说",
+    "预告解说", "专题", "日韩专题", "八卦爆料", "明星八卦", "剧情介绍", "演员",
+    "子类113", "子类12", "未分类", "另类小说", "长篇连载", "其他", "其他地区", "其它",
+    "微短剧", "VR视角", "短视频"})
 # 电影：电影/影片/各类型“XX片”且非剧非动漫；剧：电视/连续剧/美剧/国产剧…
-_MOVIE_KW = ("电影", "影片")
+_MOVIE_KW = ("电影", "影片", "动作片", "喜剧片", "恐怖片", "科幻片", "战争片", "爱情片", "犯罪片", "悬疑片", "奇幻片", "灾难片", "惊悚片", "历史片", "古装片", "西部片", "家庭片", "冒险片", "武侠")
 _TV_KW = ("电视", "连续剧", "剧集", "美剧", "英剧", "韩剧", "日剧", "泰剧",
           "国产剧", "港台剧", "海外剧", "番剧")
 # 明确排除的脏类（伦理/福利/资讯/解说/预告/体育/短剧等）
@@ -152,6 +223,10 @@ _NEUTRAL_KW = ("解说", "预告", "花絮", "资讯", "新闻", "体育", "赛�
 
 # 福利分类使用的内部 cat id（不进入 CATS，故永不进入跨源聚合的四个海量库）
 ADULT_CAT = "adult"
+JP_ADULT_CAT = "jp_adult"
+DOMESTIC_CAT = "domestic"
+EUROPE_ADULT_CAT = "europe_adult"
+WELFARE_CATS = (ADULT_CAT, JP_ADULT_CAT, DOMESTIC_CAT, EUROPE_ADULT_CAT)
 
 try:
     import features
@@ -189,7 +264,13 @@ def is_redline(*texts: str) -> bool:
 
 def catalog_title(cat: str) -> str:
     if cat == ADULT_CAT:
-        return "🔞福利"
+        return "🔞伦理片"
+    if cat == JP_ADULT_CAT:
+        return "🔞日韩成人"
+    if cat == DOMESTIC_CAT:
+        return "🔞国产系列"
+    if cat == EUROPE_ADULT_CAT:
+        return "🔞欧美专区"
     for c, title, _ in CATALOG_CATEGORIES:
         if c == cat:
             return title
@@ -197,7 +278,7 @@ def catalog_title(cat: str) -> str:
 
 
 def catalog_mdb(cat: str) -> str:
-    if cat == ADULT_CAT:
+    if cat in WELFARE_CATS:
         return "Mix"
     for c, _, mdb in CATALOG_CATEGORIES:
         if c == cat:
@@ -233,17 +314,18 @@ def classify(name: str) -> str | None:
         return "music"
     if any(k in n for k in _EXCLUDE_KW):
         return None
-    # P2：海外剧先于普通剧集判定——美剧/韩剧/日剧等不再混进“海量剧集”。
+    # 分类专属标记优先于宽泛类型词；短剧/画质等依明确类目名归类。
+    if any(k in n for k in _SHORT_KW):
+        return "shortdrama"
+    if any(k in nl for k in _UHD_KW):
+        return "uhd"
+    # P2：海外剧先于普通剧集判定。
     if any(k in n for k in _OVERSEAS_KW):
         return "overseas"
     if any(k in n for k in _ANIME_KW):
         return "anime"
     if any(k in n for k in _VARIETY_KW):
         return "variety"
-    if any(k in n for k in _SHORT_KW):
-        return "shortdrama"
-    if any(k in nl for k in _UHD_KW):
-        return "uhd"
     if any(k in n for k in _DOC_KW):
         return "documentary"
     if any(k in n for k in _TV_KW):
@@ -254,6 +336,13 @@ def classify(name: str) -> str | None:
     if n.endswith("片") and len(n) <= 4:
         return "movie"
     return None
+
+
+def filter_category_list(categories: list[dict]) -> list[dict]:
+    """统一过滤分类列表：精确命中黑名单的类目不进入任何后续抓取/缓存。"""
+    return [c for c in (categories or [])
+            if isinstance(c, dict)
+            and str(c.get("type_name") or c.get("name") or "").strip() not in _BAN_CATEGORIES]
 
 
 def classify_source_class(name: str, adult_allowed: bool) -> str | None:
@@ -268,14 +357,23 @@ def classify_source_class(name: str, adult_allowed: bool) -> str | None:
       分类、又不属于中性噪音/红线的分类，纳入内部福利分类（只进该源独立库）。
     """
     n = (name or "").strip()
-    if not n or is_redline(n):
+    if not n or is_redline(n) or n in _BAN_CATEGORIES:
         return None
     # 成人向优先（第 5 批）：classify() 的“以‘片’结尾 ≤4 字 → movie”规则会
     # 把“伦理片”判进电影库、“短剧”规则会把“擦边短剧”判进短剧库，导致
     # _ADULT_KW 的第二段永远看不到它们。福利开关开时先认成人词，再走
     # 常规分类；开关关时本段不生效，常规路由与改前完全一致。
-    if _welfare_on() and any(k in n for k in _ADULT_KW):
-        return ADULT_CAT
+    if _welfare_on():
+        if any(k in n for k in _JP_ADULT_KW):
+            return JP_ADULT_CAT
+        if any(k in n for k in _EUROPE_ADULT_KW):
+            return EUROPE_ADULT_CAT
+        if any(k in n for k in _DOMESTIC_KW) and "写真热舞" not in n:
+            return DOMESTIC_CAT
+        if any(k in n for k in _ADULT_KW):
+            return ADULT_CAT
+    if _welfare_on() and any(k in n for k in _EDUCATION_KW):
+        return "ted"
     cat = classify(n)
     if cat:
         return cat
@@ -338,6 +436,7 @@ class Catalog:
         self._routes: dict[str, list[dict]] = {}
         self._updated = 0.0
         self._refreshing = False
+        self._refresh_future: asyncio.Future | None = None
         # key = (scope, cat, page)
         self._page_cache: dict[tuple, tuple[float, list[dict]]] = {}
         self._inflight: dict[tuple, asyncio.Future] = {}
@@ -352,6 +451,14 @@ class Catalog:
         # scope -> {merged, total, cats, updated, built_at}；失效见
         # standalone_window（TTL / 路由刷新 / reset）。
         self._standalone_cache: dict[str, dict] = {}
+        self._standalone_inflight: dict[str, asyncio.Future] = {}
+        self._standalone_warm_tasks: dict[str, asyncio.Task] = {}
+        self._task_registrar = None
+        self._cache_generation = 0
+        self._route_state_loaded = False
+        self._route_state_signature: str | None = None
+        self._route_state_sequence = 0
+        self._route_state_lock = threading.Lock()
 
     # 移植上游 v0.2.54（缓存管理）：清空海量库分类路由/分页/聚合缓冲
     # （管理页一键清缓存），下次浏览海量库时重新探测分类并深翻。
@@ -370,6 +477,26 @@ class Catalog:
             self._dense_count.clear()
             self._fallbacks.clear()
             self._standalone_cache.clear()
+            for task in self._standalone_warm_tasks.values():
+                task.cancel()
+            self._standalone_warm_tasks.clear()
+            for fut in self._standalone_inflight.values():
+                if not fut.done():
+                    fut.cancel()
+            self._standalone_inflight.clear()
+            self._route_state_loaded = False
+            self._route_state_signature = None
+            self._route_state_sequence += 1
+            self._cache_generation += 1
+        # Serialize deletion with an in-progress atomic snapshot write. Acquiring
+        # this lock after releasing _lock avoids holding the catalog lock on I/O.
+        with self._route_state_lock:
+            try:
+                ROUTE_STATE.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _log.debug("catalog route state remove failed", exc_info=True)
 
     @staticmethod
     def _scope_key(scope: str, cat: str) -> str:
@@ -393,6 +520,17 @@ class Catalog:
                 self._scanned_page.pop(victim, None)
                 self._dense_count.pop(victim, None)
 
+    def set_task_registrar(self, registrar) -> None:
+        """Set optional application task registrar: registrar(coro, *, name)."""
+        self._task_registrar = registrar
+
+    def _create_background_task(self, coro, *, name: str) -> asyncio.Task:
+        if self._task_registrar is not None:
+            return self._task_registrar(coro, name=name)
+        task = asyncio.create_task(coro, name=name)
+        task.add_done_callback(_log_background_task)
+        return task
+
     def standalone_scopes(self) -> list[str]:
         """当前需要独立成库的源 id（来源配置中的 standalone 标记）。"""
         try:
@@ -403,14 +541,131 @@ class Catalog:
             return []
 
     # -------------------------------------------------- 分类表 / 路由
+    @staticmethod
+    def _route_signature(sources: list[dict]) -> str:
+        rows = []
+        for src in sources:
+            if _is_non_cms_source(src):
+                continue
+            rows.append((str(src.get("id") or ""), str(src.get("api") or ""),
+                         bool(src.get("adult"))))
+        # Include category/routing policy so a classification update cannot reuse
+        # a snapshot created by an older taxonomy.
+        policy = {
+            "schema": CATALOG_SCHEMA_VERSION,
+            "welfare": _welfare_on(),
+            "categories": list(CATALOG_DEFS.items()),
+            "welfare_categories": list(WELFARE_CATS),
+        }
+        return json.dumps({"sources": sorted(rows), "policy": policy},
+                          ensure_ascii=False, separators=(",", ":"))
+
+    @staticmethod
+    def _read_route_state_file() -> dict | None:
+        try:
+            if (not ROUTE_STATE.exists()
+                    or time.time() - ROUTE_STATE.stat().st_mtime > ROUTE_STATE_TTL):
+                return None
+            raw = json.loads(ROUTE_STATE.read_text(encoding="utf-8"))
+            return raw if isinstance(raw, dict) else None
+        except (OSError, ValueError, TypeError):
+            _log.debug("catalog route state file read failed", exc_info=True)
+            return None
+
+    async def _load_route_state(self, sources: list[dict]) -> bool:
+        signature = self._route_signature(sources)
+        with self._lock:
+            if self._route_state_loaded:
+                return (bool(self._routes)
+                        and self._route_state_signature == signature
+                        and time.time() - self._updated <= ROUTE_STATE_TTL)
+            # In-memory state always wins over disk, but is valid only for the
+            # configuration that produced it.
+            if self._classes or self._routes:
+                self._route_state_loaded = True
+                self._route_state_signature = signature
+                return False
+            self._route_state_loaded = True
+            self._route_state_signature = signature
+            generation = self._cache_generation
+        raw = await asyncio.to_thread(self._read_route_state_file)
+        if (raw is None or raw.get("schema") != CATALOG_SCHEMA_VERSION
+                or raw.get("signature") != signature):
+            return False
+        classes = raw.get("classes") or {}
+        routes = raw.get("routes") or {}
+        if not isinstance(classes, dict) or not isinstance(routes, dict):
+            return False
+        with self._lock:
+            if generation != self._cache_generation or not self._route_state_loaded:
+                return False
+            self._classes = classes
+            self._routes = routes
+            self._updated = float(raw.get("updated") or time.time())
+            self._route_state_signature = signature
+        _log.info("catalog routes restored from disk: %d routes", len(routes))
+        return bool(routes)
+
+    @staticmethod
+    def _write_route_state(data: dict) -> None:
+        try:
+            ROUTE_STATE.parent.mkdir(parents=True, exist_ok=True)
+            tmp = ROUTE_STATE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+            tmp.replace(ROUTE_STATE)
+        except Exception:
+            _log.debug("catalog route state persist failed", exc_info=True)
+
+    async def _persist_route_state(self, sources: list[dict],
+                                   generation: int | None = None) -> None:
+        # Snapshot under the lock, then write off the event loop. Route refreshes
+        # can contain hundreds of entries and should not block request handling.
+        with self._lock:
+            if generation is not None and generation != self._cache_generation:
+                return
+            signature = self._route_signature(sources)
+            self._route_state_sequence += 1
+            sequence = self._route_state_sequence
+            data = {"schema": CATALOG_SCHEMA_VERSION,
+                    "sequence": sequence,
+                    "signature": signature,
+                    "updated": self._updated,
+                    "classes": {k: [dict(item) for item in items]
+                                for k, items in self._classes.items()},
+                    "routes": {k: [dict(item) for item in items]
+                               for k, items in self._routes.items()}}
+        await asyncio.to_thread(self._write_route_state_if_current,
+                                data, generation, sequence)
+
+    def _write_route_state_if_current(self, data: dict,
+                                      generation: int | None,
+                                      sequence: int) -> None:
+        with self._route_state_lock:
+            with self._lock:
+                if generation is not None and generation != self._cache_generation:
+                    return
+                if sequence != self._route_state_sequence:
+                    return
+            self._write_route_state(data)
+
     async def refresh_routes(self, sources: list[dict]) -> dict[str, Any]:
         # 只有苹果 CMS 源能走分类表深翻；T4 与 spider/drpy/catvod/xsrc
         # 均非 CMS 协议（spider:// 等），当成 CMS 请求只会报 UnsupportedProtocol
         # 且独立库恒为空，故在入口一并排除。
-        sources = [s for s in sources if not _is_non_cms_source(s)]
-        if self._refreshing:
+        # Snapshot source fields once: callers may reload config while probing runs.
+        sources = [dict(s) for s in sources if not _is_non_cms_source(s)]
+        # Join active work before any asynchronous disk lookup; otherwise a
+        # follower can race ahead and launch another route refresh.
+        if self._refreshing and self._refresh_future is not None:
+            return await asyncio.shield(self._refresh_future)
+        if await self._load_route_state(sources):
             return self.status()
+        if self._refreshing and self._refresh_future is not None:
+            return await asyncio.shield(self._refresh_future)
+        loop = asyncio.get_running_loop()
         self._refreshing = True
+        generation = self._cache_generation
+        self._refresh_future = loop.create_future()
         try:
             # 上游同位置走 netutil.async_client（按代理模式直连/走代理/自动切代理），
             # 与本文件 _load_page 的两处用法一致。
@@ -493,7 +748,7 @@ class Catalog:
                 out: dict[str, list[dict]] = {}
                 # 福利分类由 welfare_library_enabled 独立开关控制：
                 # 开关开 → 聚合与单源独立库都纳入 ADULT 池；开关关 → 一律不建。
-                cats = CATS + ([ADULT_CAT] if _welfare_on() else [])
+                cats = list(dict.fromkeys(CATS + (list(WELFARE_CATS) if _welfare_on() else [])))
                 for cat in cats:
                     if scope == AGG_SCOPE:
                         rs = [probed[(cat, sid)] for (c2, sid) in probed if c2 == cat]
@@ -533,29 +788,46 @@ class Catalog:
                     if rs:
                         new_routes[self._scope_key(sid, cat)] = rs
             with self._lock:
+                if generation != self._cache_generation:
+                    return self.status()
                 # 清理已不再需要的作用域缓冲
                 valid_keys = set(new_routes.keys())
                 self._routes = new_routes
+                self._route_state_signature = self._route_signature(sources)
                 for d in (self._seen_guids, self._dense, self._scanned_page):
                     for k in list(d.keys()):
                         if k not in valid_keys:
                             d.pop(k, None)
                 self._updated = time.time()
+            await self._persist_route_state(sources, generation)
             warm_scopes = [sid for sid in self.standalone_scopes()
                            if any(self.available(c, sid) for c in
-                                  (CATS + ([ADULT_CAT] if _welfare_on() else [])))]
+                                  (list(dict.fromkeys(CATS + (list(WELFARE_CATS) if _welfare_on() else [])))))]
             for sid in warm_scopes:
-                asyncio.create_task(self.warm_standalone(sid))
+                old = self._standalone_warm_tasks.get(sid)
+                if old is not None and not old.done():
+                    continue
+                task = self._create_background_task(self.warm_standalone(sid),
+                                                  name=f"catalog-warm-{sid}")
+                self._standalone_warm_tasks[sid] = task
+                task.add_done_callback(_log_background_task)
+                task.add_done_callback(
+                    lambda done, sid=sid: self._standalone_warm_tasks.pop(sid, None))
             # 4K 派生预热：源没有 4K 分类时，后台先翻电影页把 4K 片抄进
             # uhd 密集列表——库卡才有海报、首次点开才有内容；只在 uhd
             # 还是空的时候跑一次（密集列表在路由刷新时保留，不会反复跑）。
             if (not self._routes.get(self._scope_key(AGG_SCOPE, "uhd"))
                     and self._routes.get(self._scope_key(AGG_SCOPE, "movie"))
                     and not self._dense.get(self._scope_key(AGG_SCOPE, "uhd"))):
-                asyncio.create_task(self.get_window("uhd", 0, 40))
+                task = self._create_background_task(self.get_window("uhd", 0, 40), name="catalog-warm-uhd")
+                task.add_done_callback(_log_background_task)
         finally:
+            result = self.status()
             self._refreshing = False
-        return self.status()
+            if self._refresh_future is not None and not self._refresh_future.done():
+                self._refresh_future.set_result(result)
+            self._refresh_future = None
+        return result
 
     async def _load_source_classes(self, client: httpx.AsyncClient, source: dict):
         # 非 http(s) api（如 drpy://x.js）不是 CMS 接口，直接跳过：交给
@@ -567,8 +839,8 @@ class Catalog:
                       source.get("id"))
             return
         try:
-            cls = await _fetch_class_list(client, source)
-        except Exception:
+            cls = filter_category_list(await _fetch_class_list(client, source))
+        except (httpx.HTTPError, TimeoutError, OSError, ValueError, TypeError):
             _log.debug("_load_source_classes failed: source=%s", source, exc_info=True)
             cls = []
         # 只取叶子子类：苹果CMS 的父类（电影片/连续剧…）不聚合子类、只有零星条目，
@@ -578,12 +850,18 @@ class Catalog:
                            if str(x.get("type_pid") or "0") not in ("", "0")}
         norm = []
         adult_allowed = bool(source.get("adult"))
+        # Explicit short-drama parent categories are authoritative for child
+        # leaves whose names (e.g. 都市/逆袭) carry no type signal themselves.
+        parent_cat = {str(x.get("type_id")): classify_source_class(
+            str(x.get("type_name") or ""), adult_allowed) for x in cls}
         for x in cls:
             try:
                 tid = x.get("type_id")
                 pid = str(x.get("type_pid") or "0")
                 name = str(x.get("type_name") or "")
                 cat = classify_source_class(name, adult_allowed)
+                if (cat is None or cat == "tv") and parent_cat.get(pid) == "shortdrama":
+                    cat = "shortdrama"
                 if tid is None or cat is None:
                     continue
                 is_leaf = pid != "0" or str(tid) not in pids_with_child
@@ -740,8 +1018,9 @@ class Catalog:
             async with sem:
                 try:
                     rows = await self.get_page(cat, pg, scope)
-                except Exception:
-                    _log.debug("bound failed", exc_info=True)
+                except (httpx.HTTPError, TimeoutError, OSError, ValueError, TypeError):
+                    _log.debug("bound failed: scope=%s cat=%s page=%s",
+                               scope, cat, pg, exc_info=True)
                     return pg, []
                 return pg, rows if isinstance(rows, list) else []
 
@@ -755,6 +1034,44 @@ class Catalog:
                 out.append((pg, []))
         return out
 
+    @staticmethod
+    def _content_key(brief: dict) -> tuple | None:
+        """仅在标题、明确年份、类型均可确认时跨来源合并展示卡片。
+
+        不剥离季数、版本或标点，不把未知年份当成同一年；guid 和
+        播放线路保持原样，来源记录仍由 store 保存。
+        """
+        title = str(brief.get("title") or "").strip().casefold()
+        year = str(brief.get("year") or "").strip()
+        kind = classify(str(brief.get("type_name") or ""))
+        if not kind:
+            kind = brief.get("catalog_cat")
+        if kind == "uhd":  # 画质不能判断电影/剧集身份
+            return None
+        if (not title or len(year) != 4 or not year.isascii()
+                or not year.isdigit() or not 1800 <= int(year) <= 2199 or not kind):
+            return None
+        return title, year, kind
+
+    @classmethod
+    def _append_unique(cls, rows: list[dict], dense: list[dict], seen: set) -> int:
+        content = {key for b in dense if (key := cls._content_key(b)) is not None}
+        added = 0
+        for brief in rows:
+            guid = brief.get("guid")
+            key = cls._content_key(brief)
+            if guid and guid in seen:
+                continue
+            if guid:
+                seen.add(guid)
+            if key is not None and key in content:
+                continue
+            if key is not None:
+                content.add(key)
+            dense.append(brief)
+            added += 1
+        return added
+
     # -------------------------------------------------- 页级抓取
     async def _extend_dense(self, scope: str, cat: str, need_count: int) -> int:
         """顺序翻页直到去重后的累计条目数达到 need_count（或翻到该源末页）。
@@ -764,6 +1081,7 @@ class Catalog:
         达到 need / 空页到限时停下：批次里已取到但未处理到的页只留在
         _page_cache，不并入 dense、不前移游标，下次接着翻时从缓存取，
         不重复请求。"""
+        generation = self._cache_generation
         sk = self._scope_key(scope, cat)
         pc = self.pagecount(cat, scope)
         seen = self._seen_guids.setdefault(sk, set())
@@ -776,14 +1094,11 @@ class Catalog:
         while len(dense) < need_count and pg <= pc:
             batch = list(range(pg, min(pg + DEEP_FETCH_CONCURRENCY, pc + 1)))
             pages = await self._fetch_pages(scope, cat, batch)
+            if generation != self._cache_generation:
+                return 0
             stopped = False
             for pg_i, rows in pages:
-                added = 0
-                for b in rows:
-                    gid = b.get("guid")
-                    if gid in seen:
-                        continue
-                    seen.add(gid); dense.append(b); added += 1
+                added = self._append_unique(rows, dense, seen)
                 if added:
                     # 只有真正取到新增才把游标前移，慢源抖动的空页下次可重试
                     self._scanned_page[sk] = pg_i
@@ -811,9 +1126,12 @@ class Catalog:
         offset = max(0, int(offset))
         limit = max(1, min(int(limit), 100))
         sk = self._scope_key(scope, cat)
+        generation = self._cache_generation
         dense = self._dense.setdefault(sk, [])
         if len(dense) < offset + limit:
             await self._extend_dense(scope, cat, offset + limit)
+        if generation != self._cache_generation:
+            return []
         return dense[offset:offset + limit]
 
     async def get_page(self, cat: str, page: int, scope: str = AGG_SCOPE) -> list[dict]:
@@ -822,6 +1140,7 @@ class Catalog:
         if page > MAX_PAGES:
             return []
         key = (scope, cat, page)
+        generation = self._cache_generation
         with self._lock:
             hit = self._page_cache.get(key)
             if hit:
@@ -844,6 +1163,10 @@ class Catalog:
                 try:
                     briefs = await self._load_page(scope, cat, page)
                     with self._lock:
+                        if generation != self._cache_generation:
+                            if not fut.done():
+                                fut.set_result([])
+                            return
                         # 空结果只短缓存，避免慢源一次抖动把该页冻结 10 分钟
                         ttl = EMPTY_TTL if not briefs else PAGE_TTL
                         self._page_cache[key] = (time.time(), briefs, ttl)
@@ -865,10 +1188,11 @@ class Catalog:
                         fut.set_result([])
                 finally:
                     with self._lock:
-                        self._inflight.pop(key, None)
+                        if self._inflight.get(key) is fut:
+                            self._inflight.pop(key, None)
 
             asyncio.create_task(work())
-        return await fut
+        return await asyncio.shield(fut)
 
     def cached_page_posters(self, cat: str, n: int = 8,
                             scope: str = AGG_SCOPE) -> list[str]:
@@ -942,20 +1266,17 @@ class Catalog:
             uhd_sk = self._scope_key(scope, "uhd")
             uhd_seen = self._seen_guids.setdefault(uhd_sk, set())
             uhd_dense = self._dense.setdefault(uhd_sk, [])
-            for b in briefs:
-                if b["guid"] in uhd_seen:
-                    continue
-                if not is_uhd_title(b["title"], b["remarks"]):
-                    continue
-                uhd_seen.add(b["guid"])
-                uhd_dense.append({**b, "catalog_cat": "uhd",
-                                  "catalog_route": {**b["catalog_route"],
-                                                    "cat": "uhd"}})
+            self._append_unique([
+                {**b, "catalog_cat": "uhd",
+                 "catalog_route": {**b["catalog_route"], "cat": "uhd"}}
+                for b in briefs if is_uhd_title(b["title"], b["remarks"])
+            ], uhd_dense, uhd_seen)
             self._dense_count[uhd_sk] = len(uhd_dense)
         return briefs
 
     async def _load_page(self, scope: str, cat: str, page: int) -> list[dict]:
         from store import store
+        generation = self._cache_generation
         with self._lock:
             routes = list(self._routes.get(self._scope_key(scope, cat)) or [])
         if not routes and cat == "uhd":
@@ -1000,6 +1321,8 @@ class Catalog:
                     results = await asyncio.gather(
                         *[bound(r) for r in routes],
                         return_exceptions=True)
+                if generation != self._cache_generation:
+                    return []
                 merged: list[dict] = []
                 seen_g: set[str] = set()
                 for res in results:
@@ -1015,6 +1338,8 @@ class Catalog:
 
             for attempt, tmo in enumerate((16.0, 10.0, 8.0)):
                 briefs = await once(tmo)
+                if generation != self._cache_generation:
+                    return []
                 if briefs:
                     return store.remember_merged(briefs)
             return []
@@ -1024,6 +1349,8 @@ class Catalog:
         async with netutil.async_client(timeout=HTTP_TIMEOUT) as client:
             for route in routes:
                 got = await fetch_one(client, route, HTTP_TIMEOUT)
+                if generation != self._cache_generation:
+                    return []
                 if not got:
                     continue
                 source, _route, vods = got
@@ -1036,7 +1363,7 @@ class Catalog:
         """建库后后台预热独立库各分类首页，缓解慢源首屏空白。"""
         try:
             src = self._source_by_id(scope)
-            pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+            pool = list(dict.fromkeys(CATS + list(WELFARE_CATS))) if (_welfare_on() and src and src.get("adult")) else CATS
             await asyncio.gather(
                 *[self.get_page(c, 1, scope) for c in pool
                   if self.available(c, scope)],
@@ -1055,6 +1382,7 @@ class Catalog:
         P1-17：按 DEEP_FETCH_CONCURRENCY 分批并发取页，批内按页号顺序
         合并；任一页失败只记该页为空，不丢同批其它页。
         """
+        generation = self._cache_generation
         out: list[dict] = []
         seen: set[str] = set()
         pg = 1
@@ -1063,13 +1391,11 @@ class Catalog:
             batch = list(range(pg, min(pg + DEEP_FETCH_CONCURRENCY,
                                        MAX_PAGES + 1)))
             pages = await self._fetch_pages(scope, cat, batch)
+            if generation != self._cache_generation:
+                return []
             stopped = False
             for pg_i, rows in pages:
-                added = 0
-                for b in rows:
-                    g = b.get("guid")
-                    if g and g not in seen:
-                        seen.add(g); out.append(b); added += 1
+                added = self._append_unique(rows, out, seen)
                 if added:
                     empty_streak = 0
                 else:
@@ -1098,7 +1424,7 @@ class Catalog:
         合并顺序/去重逻辑与旧版完全一致，只是不重复算。
         """
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+        pool = list(dict.fromkeys(CATS + list(WELFARE_CATS))) if (_welfare_on() and src and src.get("adult")) else CATS
         cats = [c for c in pool if self.available(c, scope)]
         if not cats:
             return [], 0
@@ -1108,42 +1434,67 @@ class Catalog:
         with self._lock:
             entry = self._standalone_cache.get(scope)
             updated = self._updated
+            generation = self._cache_generation
         if (entry is not None
                 and entry.get("cats") == tuple(cats)
                 and entry.get("updated") == updated
                 and time.time() - entry.get("built_at", 0) < STANDALONE_MERGED_TTL
                 and len(entry.get("merged") or []) >= end):
             return list(entry["merged"][offset:end]), entry["total"]
-        results = await asyncio.gather(
-            *[self._source_cat_window(scope, c, 0, end) for c in cats],
-            return_exceptions=True)
-        per: list[list[dict]] = []
-        total = 0
-        for c, r in zip(cats, results):
-            per.append(r if isinstance(r, list) else [])
-            if isinstance(r, list):
-                total += self.total(c, scope)
-        merged: list[dict] = []
-        seen: set[str] = set()
-        maxlen = max((len(x) for x in per), default=0)
-        # 轮次交错：第 i 轮依次取每类第 i 条，近似源站“最近更新”混合排序
-        for i in range(maxlen):
-            for arr in per:
-                if i < len(arr):
-                    b = arr[i]
-                    g = b.get("guid")
-                    if g and g not in seen:
-                        seen.add(g)
-                        merged.append(b)
         with self._lock:
-            self._standalone_cache[scope] = {
-                "merged": merged, "total": total, "cats": tuple(cats),
-                "updated": self._updated, "built_at": time.time()}
-        return merged[offset:offset + limit], total
+            inflight = self._standalone_inflight.get(scope)
+            if inflight is None:
+                inflight = asyncio.get_running_loop().create_future()
+                self._standalone_inflight[scope] = inflight
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            merged, total = await asyncio.shield(inflight)
+            return list(merged[offset:offset + limit]), total
+        try:
+            results = await asyncio.gather(
+                *[self._source_cat_window(scope, c, 0, end) for c in cats],
+                return_exceptions=True)
+            per: list[list[dict]] = []
+            total = 0
+            for c, r in zip(cats, results):
+                per.append(r if isinstance(r, list) else [])
+                if isinstance(r, list):
+                    total += self.total(c, scope)
+            merged: list[dict] = []
+            seen: set[str] = set()
+            maxlen = max((len(x) for x in per), default=0)
+            # 轮次交错：第 i 轮依次取每类第 i 条，近似源站“最近更新”混合排序
+            interleaved = [arr[i] for i in range(maxlen) for arr in per if i < len(arr)]
+            self._append_unique(interleaved, merged, seen)
+            with self._lock:
+                if generation != self._cache_generation:
+                    if not inflight.done():
+                        inflight.set_result(([], 0))
+                    return [], 0
+                # Keep the complete local build for this request and shared
+                # waiters, but retain only a bounded prefix for later slices.
+                cached_merged = merged[:_STANDALONE_MERGED_MAX]
+                self._standalone_cache[scope] = {
+                    "merged": cached_merged, "total": total, "cats": tuple(cats),
+                    "updated": self._updated, "built_at": time.time()}
+                if not inflight.done():
+                    inflight.set_result((merged, total))
+            return merged[offset:offset + limit], total
+        except BaseException as exc:
+            with self._lock:
+                if not inflight.done():
+                    inflight.set_exception(exc)
+            raise
+        finally:
+            with self._lock:
+                if self._standalone_inflight.get(scope) is inflight:
+                    self._standalone_inflight.pop(scope, None)
 
     def standalone_available(self, scope: str) -> bool:
         src = self._source_by_id(scope)
-        pool = CATS + [ADULT_CAT] if (_welfare_on() and src and src.get("adult")) else CATS
+        pool = list(dict.fromkeys(CATS + list(WELFARE_CATS))) if (_welfare_on() and src and src.get("adult")) else CATS
         return any(self.available(c, scope) for c in pool)
 
 

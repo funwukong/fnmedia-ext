@@ -80,6 +80,8 @@ class T4Service:
                 if hit and time.monotonic() - hit[0] < 30:
                     return hit[1]
                 result = await self._player(client, source, target)
+                # Unknown wrapper is still allowed here: t4_media.identify()
+                # performs bounded byte/type inspection before delivery.
                 self._playbacks[key] = time.monotonic(), result
                 self._playbacks.move_to_end(key)
                 while len(self._playbacks) > 128:

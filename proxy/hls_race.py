@@ -26,6 +26,9 @@ import time
 import urllib.parse
 
 from fnlog import get_logger
+from playback_target import (is_slow_line as target_is_slow_line,
+                             mode as playback_mode,
+                             needs_special_resolution)
 
 _log = get_logger("app")  # 与 app._log 同一 logger 对象
 
@@ -1001,24 +1004,18 @@ async def _pansou_fallback_target(picked: dict):
 
 async def _resolve_if_needed(picked: dict, request: Request) -> dict:
     """把播放页(/share/<id>)或 302 跳转地址解析成真实媒体地址（原地更新）。"""
-    # >>> PRIVATE:CATVOD
-    from app import _resolve_catvod, _resolve_dduo_with_fallback, _resolve_drpy, _resolve_spider, ext_client  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    if features.CATVOD and picked and picked.get("catvod"):
-        await _resolve_catvod(picked)
-    # <<< PRIVATE:CATVOD
+
+    from app import _resolve_dduo_with_fallback, _resolve_drpy, ext_client
+    target_mode = playback_mode(picked)
     # >>> PRIVATE:DRPY
-    elif features.DRPY and picked and picked.get("drpy"):
+    if features.DRPY and target_mode == "drpy":
         await _resolve_drpy(picked)
     # <<< PRIVATE:DRPY
-    # >>> PRIVATE:SPIDER
-    elif picked and picked.get("spider_src"):
-        await _resolve_spider(picked)
-    # <<< PRIVATE:SPIDER
     # >>> PRIVATE:DDUO
-    elif picked and picked.get("xsrc") and features.DDUO:
+    elif target_mode == "xsrc" and features.DDUO:
         await _resolve_dduo_with_fallback(picked, request)
     # <<< PRIVATE:DDUO
-    if picked and picked.get("redirect"):
+    if playback_mode(picked) == "redirect":
         real = await providers.resolve_redirect(
             ext_client(request), picked["url"],
             (picked.get("headers") or {}).get("Referer", ""))
@@ -1921,17 +1918,8 @@ def _main_slow_budget() -> float:
 
 
 def _is_slow_line(p: dict) -> bool:
-    """是否为解析很慢的非标准源（爬虫/drpy/专有解码/小雅），需先占位后台自愈。
-    普通 CMS 直链（暴风/量子等 m3u8）返回 False，走直接秒播。（上游 v0.2.70）"""
-    if not isinstance(p, dict):
-        return False
-    if p.get("spider_src") or p.get("drpy") \
-            or p.get("catvod"):
-        return True
-    if p.get("xsrc"):
-        return True
-    ln = str(p.get("line") or "")
-    return ln.startswith(("spider-", "drpy-"))
+    """兼容入口：慢线判定统一由 playback_target 提供。"""
+    return target_is_slow_line(p)
 
 
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/preset.m3u8")
@@ -2000,15 +1988,10 @@ async def hls_preset(mg: str, request: Request):
     # 起播速度优先：preset 只枚举候选线路，不在关键路径解析播放页/302/专有解码，
     # 那些动作延迟到该线路真正被选中取 main 时才做。
     hls_targets = []
-    # 任何可按需解析的专有直链（小雅网盘 / JS / 爬虫等）都要进菜单，死活在 main 探测
-    _SPECIAL = ("catv" + "od", "dr" + "py", "gu" + "ard")
-
-    def _need_resolve(t: dict) -> bool:
-        return bool(t.get("xsrc")) or any(t.get(k) for k in _SPECIAL)
-
+    # 任何可按需解析的专有直链都要进菜单，死活在 main 探测。
     for t in targets:
         if t.get("m3u8") or re.search(r"\.(m3u8|mp4)(\?|$)", t.get("url", ""), re.I) \
-                or t.get("resolve") or t.get("redirect") or _need_resolve(t) \
+                or t.get("resolve") or t.get("redirect") or needs_special_resolution(t) \
                 or t.get("_pansou_manual"):
             hls_targets.append(t)
     if not hls_targets:
@@ -2261,26 +2244,7 @@ async def hls_main(mg: str, request: Request):
                 picked = _switched
                 request.state._failover_picked = picked
 
-        # >>> PRIVATE:CATVOD
-        from app import _resolve_catvod  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-        # 小雅网盘文件（mkv/ts 等）非 HLS：解析出签名直链后直接 302，让客户端直连网盘 CDN
-        if features.CATVOD and picked.get("catvod"):
-            if await _resolve_catvod(picked):
-                # 再探一次死活，小雅“文件不存在”会回 200+JSON 假活；坏则换线
-                if not (await _probe_target(picked, request)):
-                    _mark_line_bad(picked)
-                    alt = await _find_playable(picked, request, skip_current=True)
-                    if alt is not None:
-                        picked = alt
-                        request.state._failover_picked = picked
-                        _log.info("小雅文件不可用，自动切换线路 -> %s", picked.get("line"))
-                    else:
-                        return Response("该线路文件不存在，且暂无其他可用线路",
-                                        status_code=502)
-                if picked.get("catvod_direct"):
-                    return RedirectResponse(picked["url"], status_code=302,
-                                            headers={"Cache-Control": "no-store"})
-        # <<< PRIVATE:CATVOD
+
 
         body = await _get_playlist_cached(mg, picked, request)
         if body is None and _mid_switched_from is not None:
@@ -2304,13 +2268,7 @@ async def hls_main(mg: str, request: Request):
                     picked = alt
                     request.state._failover_picked = alt
                     # 小雅等非 HLS 直链
-                    # >>> PRIVATE:CATVOD
-                    from app import _resolve_catvod  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-                    if features.CATVOD and picked.get("catvod"):
-                        if await _resolve_catvod(picked) and picked.get("catvod_direct"):
-                            return RedirectResponse(picked["url"], status_code=302,
-                                                    headers={"Cache-Control": "no-store"})
-                    # <<< PRIVATE:CATVOD
+
                     body = await _get_playlist_cached(mg, picked, request)
         if body is None:
             # 解析失败（规则详情为空/不可播/需 X5）时直接给硬错误：
@@ -2330,7 +2288,7 @@ async def hls_main(mg: str, request: Request):
             # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
             _mid_switch_note_ok(picked)
         if body is _NOT_HLS:
-            
+
             # 预判为 HLS、解析后实为 mp4：302 到直链代理（direct 复用已解析结果）
             q = urllib.parse.urlencode({"line": picked["line"], "index": picked["index"]})
             return RedirectResponse(f"{ONLINE_PREFIX}/{mg}/direct?{q}", status_code=302)
@@ -2352,22 +2310,22 @@ async def hls_main(mg: str, request: Request):
                 if alt:
                     body2 = await _get_playlist_cached(mg, alt, request)
                     if body2 and body2 is not _NOT_HLS:
-                        
+
                         return Response(body2, media_type="application/vnd.apple.mpegurl",
                                         headers={"Cache-Control": "no-cache",
                                                  "Access-Control-Allow-Origin": "*"})
             if status == "fail":
-                
+
                 return _err_response(
                     "暂无可播线路（该源分片已失效，且未找到其他可用源）",
                     502, "no_line_alive")
             # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
             # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
             if _is_slow_line(picked):
-                
+
                 return _placeholder_playlist_response(mg)
             # running：让客户端稍候重试，不返回错误清单
-            
+
             return Response("正在为你寻找可用线路…", status_code=503,
                             headers={"Retry-After": "3",
                                      "Access-Control-Allow-Origin": "*"})
@@ -2375,7 +2333,7 @@ async def hls_main(mg: str, request: Request):
         if _sk:
             # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
             sourcehealth.record(_sk, True, level="stream")
-        
+
         return Response(body, media_type="application/vnd.apple.mpegurl",
                         headers={"Cache-Control": "no-cache",
                                  "Access-Control-Allow-Origin": "*"})

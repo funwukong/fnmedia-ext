@@ -1,0 +1,69 @@
+"""Build and inspect an FPK archive from the current source tree."""
+import gzip
+import hashlib
+import io
+import subprocess
+import tarfile
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+
+
+def _build_fpk(tmp_path):
+    output = tmp_path / "dist"
+    proc = subprocess.run(
+        ["bash", "packaging/fpk/build.sh", "--out", str(output)],
+        cwd=REPO, check=True, capture_output=True, text=True, timeout=120,
+    )
+    packages = list(output.glob("*.fpk"))
+    assert len(packages) == 1, proc.stdout + proc.stderr
+    package = packages[0]
+    with gzip.open(package, "rb") as stream:
+        outer_blob = stream.read()
+    with tarfile.open(fileobj=io.BytesIO(outer_blob), mode="r:") as outer:
+        outer_members = {member.name: member for member in outer.getmembers()}
+        manifest = outer.extractfile("manifest").read().decode("utf-8")
+        app_blob = outer.extractfile("app.tgz").read()
+    with tarfile.open(fileobj=io.BytesIO(app_blob), mode="r:gz") as app:
+        app_members = {member.name.rstrip("/"): member for member in app.getmembers()}
+    return package, outer_members, app_members, manifest
+
+
+def test_fpk_archive_contents_and_integrity(tmp_path):
+    package, outer, app, manifest = _build_fpk(tmp_path)
+    assert package.stat().st_size > 0
+    assert "cmd/main" in outer
+    assert outer["cmd/main"].mode & 0o111
+    assert "ui/config" in app
+    assert "repo/proxy/line_identity.py" in app
+    assert "repo/proxy/playback_target.py" in app
+    assert "repo/proxy/assets/drpy/sidecar.mjs" in app
+    assert "repo/proxy/assets/drpy/drpy3.js" in app
+    assert "repo/proxy/assets/drpy/node_vendor/cheerio.min.js" in app
+    assert "repo/proxy/drpy.py" in app
+    assert "repo/proxy/runner_client.py" in app
+    assert "repo/proxy/runner_errors.py" in app
+
+    version = (REPO / "VERSION").read_text().splitlines()[0].strip().split("-")[0]
+    fields = {key.strip(): value.strip() for line in manifest.splitlines() if "=" in line
+              for key, value in [line.split("=", 1)]}
+    assert fields["version"] == version
+    assert fields["checksum"] == hashlib.md5(_extract_app_blob(package)).hexdigest()
+
+    for member in app:
+        path = member.lstrip("./")
+        lower = path.lower()
+        assert not lower.endswith((".jar", ".dex", ".apk", ".class")), path
+        assert "/android/" not in f"/{lower}/", path
+        assert "csp" not in lower, path
+        assert "catvod" not in lower or lower == "repo/proxy/catvod.py", path
+        assert not path.startswith("repo/spider-runner/android/"), path
+        assert not path.startswith("repo/proxy/assets/catvod/"), path
+        assert not path.startswith("repo/proxy/assets/guard/"), path
+
+
+def _extract_app_blob(package):
+    with gzip.open(package, "rb") as stream:
+        raw = stream.read()
+    with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as outer:
+        return outer.extractfile("app.tgz").read()

@@ -130,7 +130,7 @@ class LibfilterRouteTests(unittest.TestCase):
                    route={"source": "baofeng", "type_id": "5",
                           "cat": "documentary"})
         self.assertEqual(libfiltermod.brief_lib_keys(b), {
-            "standalone:baofeng", "catalog:movie", "catalog:documentary"})
+            "standalone:baofeng", "catalog:documentary"})
 
     def test_extension_only_library_sees_routed_title(self):
         # 只开 catalog:shortdrama：类型名（连续剧→tv）不开门，路由开门。
@@ -142,7 +142,7 @@ class LibfilterRouteTests(unittest.TestCase):
         self.assertEqual([x["guid"] for x in kept], ["r2"])
         kept = libfiltermod.filter_briefs(
             [b], lambda k: k == "catalog:tv")
-        self.assertEqual([x["guid"] for x in kept], ["r2"])
+        self.assertEqual([x["guid"] for x in kept], [])
 
     def test_documentary_type_without_route_goes_documentary(self):
         b = _brief("r3", "baofeng", "纪录大片", "纪录片")

@@ -95,8 +95,9 @@ class WordingTests(unittest.TestCase):
         self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
 
     def test_nav_renamed(self):
-        self.assertIn('data-page="scanlogin">网盘登录', self.ui)
-        self.assertNotIn('data-page="scanlogin">扫码登录', self.ui)
+        self.assertRegex(self.ui,
+                         r'data-page="scanlogin"[^>]*>[^<]*(?:<[^>]+>[^<]*)*网盘登录')
+        self.assertNotIn('扫码登录', self.ui)
 
     def test_login_hint(self):
         self.assertIn("选择网盘进行登录授权", self.ui)

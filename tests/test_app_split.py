@@ -73,6 +73,7 @@ BASELINE_ROUTES = [
     (('GET',), '/v/api/ext/admin/token'),
     (('POST',), '/v/api/ext/admin/login'),
     (('POST',), '/v/api/ext/admin/token/rotate'),
+    (('GET',), '/v/api/ext/config/export'),
     (('GET',), '/v/api/ext/status'),
     (('GET',), '/v/api/ext/diag/resume'),
     (('GET',), '/v/api/ext/continue'),
@@ -97,6 +98,8 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/lib/order'),
     (('POST',), '/v/api/ext/hot/refresh'),
     (('GET',), '/v/api/ext/online'),
+    (('POST',), '/v/api/ext/config/restore-preview'),
+    (('POST',), '/v/api/ext/config/restore'),
     (('POST',), '/v/api/ext/config/reset'),
     (('POST',), '/v/api/ext/config'),
     (('POST',), '/v/api/ext/subscription-proxy'),
@@ -109,6 +112,8 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/source/delete'),
     (('POST',), '/v/api/ext/source/restore'),
     (('POST',), '/v/api/ext/source/refresh'),
+    (('POST',), '/v/api/ext/source/diagnose'),
+    (('POST',), '/v/api/ext/t4/diagnose'),
     (('POST',), '/v/api/ext/source/test'),
     (('POST',), '/v/api/ext/source/test-all'),
     (('POST',), '/v/api/ext/source/health-check'),
@@ -129,12 +134,6 @@ BASELINE_ROUTES = [
     (('GET',), '/v/online-admin'),
     (('GET',), '/v/api/ext/catvod/credentials'),
     (('POST',), '/v/api/ext/catvod/credentials'),
-    (('GET',), '/v/api/ext/catvod/home'),
-    (('GET',), '/v/api/ext/catvod/category'),
-    (('GET',), '/v/api/ext/catvod/detail'),
-    (('GET',), '/v/api/ext/catvod/search'),
-    (('GET',), '/v/api/ext/catvod/play'),
-    (('GET',), '/v/ext/catvod/redirect'),
     (('GET',), '/v/ext/xlib/play'),
     (('GET',), '/v/api/ext/drpy/status'),
     (('GET',), '/v/api/ext/drpy/home'),
@@ -150,15 +149,6 @@ BASELINE_ROUTES = [
     (('GET',), '/v/api/ext/linepredict'),
     (('POST',), '/v/api/ext/linepredict/config'),
     (('POST',), '/v/api/ext/linepredict/reset'),
-    (('GET',), '/v/api/ext/spider/status'),
-    (('POST',), '/v/api/ext/spider/toggle'),
-    (('POST',), '/v/api/ext/spider/remove'),
-    (('POST',), '/v/api/ext/spider/jar'),
-    (('POST',), '/v/api/ext/spider/jar-retry'),
-    (('POST',), '/v/api/ext/spider/probe'),
-    (('POST',), '/v/api/ext/spider/scan'),
-    (('GET',), '/v/api/ext/spider/scan'),
-    (('POST',), '/v/api/ext/spider/remove-many'),
     (('POST',), '/v/api/ext/pan/cache/clear'),
     (('GET',), '/v/api/ext/pan/status'),
     (('POST',), '/v/api/ext/pan/detect'),
@@ -217,7 +207,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 124  # 上游 121（去 guard +6 探活/订阅） + 网盘缓存/重置 2 条 + 站点刷新 1 条
+    assert len(admin_api.admin_router.routes) == 114
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable

@@ -353,8 +353,7 @@ class ChartPosterColdCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.charts.refresh_calls, 1)
         for cat, row in rows.items():
             self.assertTrue(row["poster"], cat)
-            self.assertTrue(row["poster"].startswith(
-                "/v/api/v1/sys/img/online/"), cat)
+            self.assertTrue(row["poster"].startswith("/online/"), cat)
 
     async def test_refresh_failure_keeps_empty_poster_and_returns(self):
         self.charts.fail = True

@@ -209,7 +209,7 @@ def test_live_poll_stop_present():
     assert "clearInterval(LIVE_TIMER)" in src
     # 切离概览页即停；切回概览才启。
     body = _fn_body(src, "async function switchPage(page){",
-                    '$$("[data-page]").forEach(b=>b.addEventListener')
+                    '$$("[data-page]").forEach(button=>button.addEventListener')
     assert "else{stopLivePoll();}" in body
     assert "startLivePoll();" in body
 
@@ -220,7 +220,7 @@ def test_live_poll_stops_when_leaving_overview_with_node():
     start = _fn_body(src, "function startLivePoll(){",
                      "function renderOverview(){")
     switch = _fn_body(src, "async function switchPage(page){",
-                      '$$("[data-page]").forEach(b=>b.addEventListener')
+                      '$$("[data-page]").forEach(button=>button.addEventListener')
     script = (
         "const _set=setInterval,_clear=clearInterval;\n"
         "let liveIds=new Set();\n"
@@ -242,7 +242,10 @@ def test_live_poll_stops_when_leaving_overview_with_node():
         "function loadAdfilter(){}\n"
         "function loadSpiderMgmt(){}\n"
         "function loadDrpyMgmt(){}\n"
-        "function $$(sel){return [{id:'page-overview',dataset:{page:'overview'},classList:{toggle(){}}}];}\n"
+        "const navAttrs={};\n"
+        "const nav={dataset:{page:'overview'},classList:{toggle(){}},\n"
+        "  setAttribute(k,v){navAttrs[k]=v;},removeAttribute(k){delete navAttrs[k];}};\n"
+        "function $$(sel){return sel==='[data-page]'?[nav]:[];}\n"
         + live_decl + start + switch +
         "(async()=>{\n"
         "  await switchPage('overview');\n"

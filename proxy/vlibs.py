@@ -22,6 +22,7 @@ import hashlib
 
 from config import config
 import features
+import catalog as catalogmod
 
 try:
     from fnlog import get_logger
@@ -40,34 +41,14 @@ CHART_LIB_GUIDS = {
     "anime":   "18372cada44b72c305343c2bfcc026f0",
     "variety": "cb606d5f699560c630c97f7acc84f75b",
 }
-CATALOG_LIB_GUIDS = {
-    "movie":      "e91dd7347a49dbd874fb8a0e78ad7ad7",
-    "tv":         "196381f891d66a4de32f9032e8f244f3",
-    "anime":      "97fc49015edcb20cc423658401711b6c",
-    "variety":    "cfff30730cffca2d1357e0c2b52fc2f5",
-    "documentary": "155f2305c2cbc76c85f981ef31cc192f",
-    "uhd":        "262ce51312d7e72020514db5fd5f63e9",
-    "shortdrama": "037ed7c6df4a9deb8d815c823fd15f79",
-    "overseas":   "c2fe61ae4d3adc87756a253cb108066e",
-    "ai_comic":   "6784f423ff4be5af4fe60cde6c8da303",
-    "ted":        "34883d4af44ca4a5539cb38827158294",
-    "adult":      "411515e17c85709cf1966697b7b2c58e",
-    # cat-wiring 新增：guid 由固定串 md5 派生，与 app.py 一致。
-    # md5("fnmedia-catalog-lib:sports") / md5("fnmedia-catalog-lib:live")
-    # md5("fnmedia-catalog-lib:kids") / md5("fnmedia-catalog-lib:opera")
-    # md5("fnmedia-catalog-lib:music")
-    "sports":     "9b93ebd34f12099811bcb2e700825169",
-    "live":       "465e85f3a6cb1a4ce5d4e397de29384b",
-    "kids":       "cd91e59c8f342225b8741f18d70a26be",
-    "opera":      "495704bcc69d765082a218219fbf3c1e",
-    "music":      "00a744b183e5c4ef1d375ab8514f515b",
-}
+CATALOG_LIB_GUIDS = dict(catalogmod.CATALOG_GUIDS)
 CHART_CAT_LABEL = {"movie": "电影榜", "tv": "剧集榜", "anime": "动漫榜", "variety": "综艺榜"}
 CATALOG_CAT_LABEL = {
     "movie": "海量电影", "tv": "海量剧集", "anime": "海量动漫", "variety": "海量综艺",
     "documentary": "纪录片", "uhd": "4K影视", "shortdrama": "热门短剧",
     "overseas": "海外剧集", "ai_comic": "AI漫剧", "ted": "教育",
     "adult": "扩展资源",
+    "jp_adult": "日韩成人", "domestic": "国产系列", "europe_adult": "欧美专区",
     "sports": "体育节目", "live": "直播", "kids": "少儿",
     "opera": "戏曲", "music": "音乐MV",
 }

@@ -245,14 +245,16 @@ async def collect_charts() -> dict[str, Any]:
     provider_ok = 0
     provider_total = 0
 
-    async def run_weekly(coro):
+    async def run_weekly(factory, *args):
+        # 在拿到 semaphore 后才创建 coroutine，取消排队任务不会泄漏未 await coroutine。
         async with sem:
-            return await coro
+            return await factory(*args)
 
-    async def run_tag(coro):
-        # 周榜走 60s 实例，豆瓣 tag 直连 movie.douban.com，分别限流
+    async def run_tag(factory, *args, **kwargs):
+        # 周榜走 60s 实例，豆瓣 tag 直连 movie.douban.com，分别限流。
+        # 延迟创建 coroutine，避免刷新超时后出现 RuntimeWarning。
         async with tag_sem:
-            return await coro
+            return await factory(*args, **kwargs)
 
     async with httpx.AsyncClient(follow_redirects=True, trust_env=False) as client:
         # 收集 cat -> 配方结果
@@ -263,11 +265,11 @@ async def collect_charts() -> dict[str, Any]:
                 provider_total += 1
                 if rc["kind"] == "weekly":
                     t = asyncio.ensure_future(
-                        run_weekly(_fetch_weekly(client, rc["path"])))
+                        run_weekly(_fetch_weekly, client, rc["path"]))
                 else:
                     t = asyncio.ensure_future(
-                        run_tag(_fetch_tag(client, rc["type"], rc["tag"],
-                                           pages=int(rc.get("pages", 1)))))
+                        run_tag(_fetch_tag, client, rc["type"], rc["tag"],
+                                pages=int(rc.get("pages", 1))))
                 recipe_jobs.setdefault(cat, []).append(t)
                 recipe_meta[t] = (cat, rc)
 
@@ -406,7 +408,8 @@ class ChartCache:
             return await self._task
         loop = asyncio.get_running_loop()
         self._refreshing = True
-        self._task = loop.create_future()
+        task_future = loop.create_future()
+        self._task = task_future
         result: dict[str, Any] = {}
         try:
             data = await asyncio.wait_for(collect_charts(), timeout=REFRESH_TIMEOUT)
@@ -429,8 +432,10 @@ class ChartCache:
                           "last_error": err}
         finally:
             self._refreshing = False
-            if self._task and not self._task.done():
-                self._task.set_result(result)
+            if not task_future.done():
+                task_future.set_result(result)
+            if self._task is task_future:
+                self._task = None
         return result
 
 

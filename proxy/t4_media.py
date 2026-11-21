@@ -18,12 +18,16 @@ from t4_metadata import MediaProbe
 
 PREFIX = "/v/media/t4-resource"
 MAX_MANIFEST = 2 * 1024 * 1024
+_PREFIX_TTL = 15.0
+_PREFIX_MAX = 128
+_PREFIX_RANGE = re.compile(r"bytes=([0-9]{1,4})-([0-9]{1,4})")
 _log = logging.getLogger("fnmedia.t4.media")
 
 
 class T4Media:
     def __init__(self):
         self._resources = OrderedDict()
+        self._prefixes = OrderedDict()
         self._resource_key = secrets.token_bytes(32)
         self.metadata = MediaProbe()
 
@@ -81,6 +85,8 @@ class T4Media:
                             size = response.headers.get("content-length", "")
                         if size.isdigit():
                             playback.size = int(size)
+                    if wrapper in ("MP4", "MKV") and playback.needs_proxy:
+                        self._remember_prefix(playback, response, prefix)
                     _log.info("T4 media identified method=GET declared=%s wrapper=%s",
                               playback.wrapper or "unknown", wrapper)
                     playback.wrapper = wrapper
@@ -92,11 +98,60 @@ class T4Media:
                       status, type(exc).__name__)
         raise t4.T4Error("无法识别 T4 媒体格式，请检查媒体 GET 响应或服务端 type")
 
+    def _prefix_key(self, playback: t4.Playback) -> str:
+        return hashlib.sha256(json.dumps(
+            [playback.url, sorted(playback.headers.items())],
+            separators=(",", ":"), sort_keys=True).encode()).hexdigest()
+
+    def _remember_prefix(self, playback: t4.Playback, response, prefix: bytes) -> None:
+        if not prefix:
+            return
+        now = time.monotonic()
+        key = self._prefix_key(playback)
+        self._prefixes.pop(key, None)
+        while self._prefixes and (len(self._prefixes) >= _PREFIX_MAX or
+                                  next(iter(self._prefixes.values()))[0] <= now):
+            self._prefixes.popitem(last=False)
+        total = playback.size or 0
+        span = re.fullmatch(r"bytes \d+-\d+/(\d+)",
+                            response.headers.get("content-range", ""))
+        if span:
+            total = int(span[1])
+        self._prefixes[key] = (now + _PREFIX_TTL, bytes(prefix), total)
+
+    def _cached_prefix_response(self, playback: t4.Playback, request):
+        if request.method == "HEAD":
+            return None
+        m = _PREFIX_RANGE.fullmatch(request.headers.get("range", ""))
+        if not m:
+            return None
+        start, end = int(m[1]), int(m[2])
+        hit = self._prefixes.get(self._prefix_key(playback))
+        if not hit:
+            return None
+        expiry, data, total = hit
+        if expiry <= time.monotonic():
+            self._prefixes.pop(self._prefix_key(playback), None)
+            return None
+        if start != 0 or end >= len(data):
+            return None
+        actual_end = min(end, len(data) - 1)
+        headers = {"Accept-Ranges": "bytes", "Content-Range":
+                   f"bytes {start}-{actual_end}/{total or len(data)}",
+                   "Content-Length": str(actual_end - start + 1),
+                   "Cache-Control": "no-store"}
+        return Response(data[start:actual_end + 1], status_code=206,
+                        media_type="video/mp4" if playback.wrapper == "MP4" else "video/x-matroska",
+                        headers=headers)
+
     async def deliver(self, client, url: str, playback: t4.Playback, request,
                       *, manifest: bool | None = None):
         if not playback.needs_proxy:
             return RedirectResponse(url, status_code=302,
                                     headers={"Cache-Control": "no-store"})
+        cached = self._cached_prefix_response(playback, request)
+        if cached is not None:
+            return cached
         headers = httpx.Headers(playback.headers)
         for name in ("range", "if-range"):
             if name in request.headers:

@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import time
 import urllib.parse
+from collections import deque
 from dataclasses import dataclass, field
 
 import httpx
@@ -33,6 +35,43 @@ _log = get_logger("providers")
 # 依赖 app 造成循环引用）：死源跳过每搜 1 条 INFO，搜索扇出时会刷爆日志。
 # 默认只记 debug，每 100 次采样 1 条 info 保留心跳。
 _LOG_SAMPLE: dict[str, int] = {}
+_SEARCH_METRICS_LOCK = threading.Lock()
+_SEARCH_METRICS = deque(maxlen=1000)
+_SEARCH_METRICS_TOTAL: dict[str, dict] = {}
+
+
+def record_search_metric(source_id: str, *, status: str, duration_ms: float,
+                         result_count: int = 0) -> None:
+    """Store only source-level aggregate counters; never retain query/result/URL."""
+    sid = str(source_id or "unknown")[:96]
+    with _SEARCH_METRICS_LOCK:
+        row = _SEARCH_METRICS_TOTAL.setdefault(sid, {
+            "calls": 0, "success": 0, "failed": 0, "cancelled": 0,
+            "results": 0, "duration_ms_total": 0.0, "last_duration_ms": 0.0,
+        })
+        row["calls"] += 1
+        row["duration_ms_total"] += max(0.0, float(duration_ms))
+        row["last_duration_ms"] = round(max(0.0, float(duration_ms)), 1)
+        row["results"] += max(0, int(result_count or 0))
+        if status in ("success", "failed", "cancelled"):
+            row[status] += 1
+        _SEARCH_METRICS.append({"source_id": sid, "status": status,
+                                "duration_ms": round(max(0.0, float(duration_ms)), 1),
+                                "result_count": max(0, int(result_count or 0)),
+                                "at": time.time()})
+
+
+def search_metrics_snapshot(*, reset: bool = False) -> dict:
+    with _SEARCH_METRICS_LOCK:
+        data = {sid: {**row,
+                      "avg_duration_ms": round(row["duration_ms_total"] / row["calls"], 1)
+                      if row["calls"] else 0.0}
+                for sid, row in _SEARCH_METRICS_TOTAL.items()}
+        recent = list(_SEARCH_METRICS)[-100:]
+        if reset:
+            _SEARCH_METRICS_TOTAL.clear()
+            _SEARCH_METRICS.clear()
+    return {"sources": data, "recent": recent}
 
 
 def _sampled_log(key: str, every: int = 100) -> bool:
@@ -44,6 +83,7 @@ def _sampled_log(key: str, every: int = 100) -> bool:
 try:
     import sourcehealth as _health
 except Exception:
+    _log.debug("sourcehealth import failed", exc_info=True)
     _health = None  # type: ignore
 
 
@@ -83,14 +123,6 @@ if features.DDUO:
         {"id": "dduo", "name": "多多影视", "api": "https://dduotv01.top",
          "enabled": False, "xsrc": True, "builtin": True})
 # <<< PRIVATE:DDUO
-# >>> PRIVATE:CATVOD
-# 小雅网盘（catvod JVM 爬虫 csp_AListSh，非苹果CMS）。默认开启，搜索/详情/播放
-# 走 catvod 适配层；公开构建剥离此块，源不会出现。
-if features.CATVOD:
-    DEFAULT_SOURCES.append(
-        {"id": "xiaoya", "name": "小雅网盘", "api": "catvod://xiaoya",
-         "enabled": True, "xsrc": True, "catvod": True, "builtin": True})
-# <<< PRIVATE:CATVOD
 
 # >>> PRIVATE:DRPY
 # drpyS JS 爬虫（Node sidecar 跑 TVBox type=3 的 drpy2 .js 站点）。
@@ -151,42 +183,6 @@ def source_priority(source: dict, overrides: dict | None = None) -> int:
     return default_source_priority(source)
 
 
-# >>> PRIVATE:SPIDER
-# 普通 csp_ 爬虫源（饭太硬等订阅导入的纯 Java 在线源，经 redroid 真机解析）。
-SPIDER_DEFAULT_PRIORITY = 36
-DRPY_DEFAULT_PRIORITY = 15
-DDUO_DEFAULT_PRIORITY = 15
-
-
-def _private_source_priority_fn(source: dict) -> int | None:
-    """私有源的质量档位；通用源返回 None，走 DEFAULT_PRIORITY 通用表。"""
-    sid = source.get("id", "")
-    if source.get("spider_src"):
-        return SPIDER_DEFAULT_PRIORITY
-    if source.get("drpy"):
-        return DRPY_DEFAULT_PRIORITY
-    if source.get("dduo") or sid == "dduo":
-        return DDUO_DEFAULT_PRIORITY
-    return None
-
-
-_private_source_priority = _private_source_priority_fn
-
-
-def _bootstrap_spider_sources() -> None:
-    # 普通 csp_ 爬虫源（订阅导入，按各自 jar 加载）
-    try:
-        import spiders as _sp
-        for d in _sp.source_defs():
-            if not any(s["id"] == d["id"] for s in DEFAULT_SOURCES):
-                DEFAULT_SOURCES.append(d)
-    except Exception:
-        _log.debug("_bootstrap_spider_sources failed", exc_info=True)
-        pass
-
-
-_bootstrap_spider_sources()
-# <<< PRIVATE:SPIDER
 
 # >>> PRIVATE:PAN
 # PanSou 网盘搜索源：搜索结果作为真实的一集注入线路（上游同款行为 ——
@@ -1062,62 +1058,6 @@ async def dduo_probe_source(source: dict, keyword: str = "庆余年",
 # <<< PRIVATE:DDUO
 
 
-# >>> PRIVATE:CATVOD
-# ---------------- 小雅网盘（catvod JVM 爬虫，仅完整构建） ----------------
-
-def _xiaoya_map_item(v: dict) -> OnlineTitle:
-    """把小雅分类/搜索列表项映射成 OnlineTitle。
-
-    列表项不带播放线路（线路要 detail 才有），这里用一个占位 Episode 承载
-    vod_id，供聚合层判定"可播"；真正线路在按需详情时补全。
-    """
-    vod_id = str(v.get("vod_id") or "")
-    episodes = []
-    if vod_id:
-        episodes.append(Episode(
-            title="播放", url=vod_id, direct=True,
-            headers={"User-Agent": "Mozilla/5.0"},
-            play_from="xiaoya", catvod=True,
-        ))
-    return OnlineTitle(
-        provider="xiaoya",
-        vod_id=vod_id,
-        title=(v.get("vod_name") or "").strip(),
-        type_name=v.get("type_name", "") or "",
-        year=str(v.get("vod_year", "") or ""),
-        area=v.get("vod_area", "") or "",
-        updated="",
-        remarks=v.get("vod_remarks", "") or "",
-        score="",
-        poster=v.get("vod_pic", "") or "",
-        overview=(v.get("vod_content") or "").strip(),
-        actor="",
-        director="",
-        sources={"小雅网盘": episodes} if episodes else {},
-    )
-
-
-async def xiaoya_search_source(client, source: dict,
-                               keyword: str) -> list[OnlineTitle]:
-    """小雅搜索：catvod 爬虫检索全库索引。不逐个补详情（线路在播放时按需解析）。"""
-    import asyncio
-    import catvod
-    try:
-        lst = await asyncio.to_thread(catvod.search, keyword,
-                                      (await catvod.xiaoya_token()))
-    except Exception:
-        _log.debug("xiaoya_search_source failed: source=%s", source, exc_info=True)
-        return []
-    out = []
-    for v in lst:
-        t = _xiaoya_map_item(v)
-        if t.title and t.sources:
-            out.append(t)
-    return out
-
-
-# <<< PRIVATE:CATVOD
-
 
 # >>> PRIVATE:DRPY
 # ---------------- drpyS JS 爬虫（Node sidecar，仅完整构建） ----------------
@@ -1185,65 +1125,6 @@ async def drpy_search_source(client, source: dict,
 
 
 
-# >>> PRIVATE:SPIDER
-# ---------------- 普通 csp_ 爬虫（订阅导入，redroid 按各自 jar） ----------------
-
-def _spider_conf(source: dict) -> dict | None:
-    import spiders
-    return spiders.site(source.get("spider_key") or "")
-
-
-def _spider_provider(source: dict) -> str:
-    return source.get("id", "spider")
-
-
-def _spider_map_item(source: dict, v: dict) -> OnlineTitle:
-    vod_id = str(v.get("vod_id") or "")
-    episodes = []
-    if vod_id:
-        episodes.append(Episode(
-            title="播放", url=vod_id, direct=True,
-            headers={"User-Agent": "Mozilla/5.0"},
-            play_from=_spider_provider(source), xsrc=True, spider_src=True,
-        ))
-    return OnlineTitle(
-        provider=_spider_provider(source),
-        vod_id=vod_id,
-        title=(v.get("vod_name") or "").strip(),
-        type_name=v.get("type_name", "") or "",
-        year=str(v.get("vod_year", "") or ""),
-        area=v.get("vod_area", "") or "",
-        updated="",
-        remarks=v.get("vod_remarks", "") or "",
-        score=str(v.get("vod_score", "") or ""),
-        poster=v.get("vod_pic", "") or "",
-        overview=(v.get("vod_content") or v.get("vod_blurb") or "").strip(),
-        actor=v.get("vod_actor", "") or "",
-        director=v.get("vod_director", "") or "",
-        sources={source.get("name", "爬虫源"): episodes} if episodes else {},
-    )
-
-
-async def spider_search_source(client, source: dict, keyword: str) -> list[OnlineTitle]:
-    import asyncio
-    import spiders
-    conf = _spider_conf(source)
-    if not conf or not spiders.available():
-        return []
-    try:
-        lst = await asyncio.to_thread(spiders.search, conf, keyword, False, 1)
-    except Exception:
-        _log.debug("spider_search_source failed: source=%s", source, exc_info=True)
-        return []
-    out = []
-    for v in lst:
-        t = _spider_map_item(source, v)
-        if t.title and t.vod_id:
-            out.append(t)
-    return out
-
-
-# <<< PRIVATE:SPIDER
 
 
 async def search_all(keyword: str, sources=None,
@@ -1281,13 +1162,28 @@ async def search_all(keyword: str, sources=None,
     sem = asyncio.Semaphore(8)
 
     async def _one(source):
-        async with sem:
-            return await _dispatch_search(client, source, keyword)
+        started = time.monotonic()
+        sid = str(source.get("id") or "unknown")
+        try:
+            async with sem:
+                rows = await _dispatch_search(client, source, keyword)
+            record_search_metric(sid, status="success", duration_ms=(time.monotonic()-started)*1000,
+                                 result_count=len(rows) if isinstance(rows, list) else 0)
+            return rows
+        except asyncio.CancelledError:
+            record_search_metric(sid, status="cancelled",
+                                 duration_ms=(time.monotonic()-started)*1000)
+            raise
+        except Exception:
+            record_search_metric(sid, status="failed",
+                                 duration_ms=(time.monotonic()-started)*1000)
+            raise
 
     async with netutil.async_client() as client:
         if not scheduled:
             return []
-        tasks = [asyncio.create_task(_one(s)) for s in scheduled]
+        tasks = [asyncio.create_task(_one(s), name=f"search-{s.get('id', 'source')}")
+                 for s in scheduled]
         if budget is None:
             results = await asyncio.gather(*tasks, return_exceptions=True)
         else:
@@ -1362,10 +1258,9 @@ async def search_all(keyword: str, sources=None,
 
 async def _dispatch_search(client, source, keyword):
     """按源类型把一次搜索分发到对应的搜索实现。"""
-    # >>> PRIVATE:CATVOD
-    if features.CATVOD and source.get("catvod"):
-        return await xiaoya_search_source(client, source, keyword)
-    # <<< PRIVATE:CATVOD
+    if source.get("kind") == "hongguo":
+        import hongguo_source
+        return await hongguo_source.search(client, source, keyword)
     # >>> PRIVATE:DRPY
     if features.DRPY and source.get("drpy"):
         return await drpy_search_source(client, source, keyword)
@@ -1381,10 +1276,6 @@ async def _dispatch_search(client, source, keyword):
             _log.warning("pansou search failed: %s", exc, exc_info=True)
             return []
     # <<< PRIVATE:PAN
-    # >>> PRIVATE:SPIDER
-    if source.get("spider_src"):
-        return await spider_search_source(client, source, keyword)
-    # <<< PRIVATE:SPIDER
     # >>> PRIVATE:DDUO
     if features.DDUO and source.get("xsrc"):
         return await dduo_search_source(client, source, keyword)

@@ -92,6 +92,8 @@ NOT_WRITABLE = {
     "source_domain_backups",
     # 红果短剧本地服务开关/地址：无管理端写入口
     "hgdj_enabled", "hgdj_url",
+    # TMDB元数据：默认关闭，API Key只从环境变量注入，不能通过配置接口写入。
+    "tmdb_enabled", "tmdb_language", "tmdb_timeout", "tmdb_api_base", "tmdb_image_base",
     # 标题缓存性能调参：无管理端写入口，改动需改代码/默认值
     "titles_cache_max_entries", "titles_cache_max_mb",
     "titles_flush_debounce",
@@ -140,7 +142,7 @@ def test_defaults_fully_classified():
     keys = set(config_mod.DEFAULTS)
     # 79 → 77：2026-11-12 upstream-merge 去 guard，删 guard_zone_enabled /
     # guard_native_enabled 两项默认配置。
-    assert len(keys) == 84
+    assert len(keys) == 89
     assert WHITELIST & DEDICATED == set()
     assert WHITELIST & NOT_WRITABLE == set()
     assert DEDICATED & NOT_WRITABLE == set()
