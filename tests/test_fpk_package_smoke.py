@@ -2,6 +2,7 @@
 import gzip
 import hashlib
 import io
+import json
 import subprocess
 import tarfile
 from pathlib import Path
@@ -30,7 +31,9 @@ def _build_fpk(tmp_path):
 
 
 def test_fpk_archive_contents_and_integrity(tmp_path):
+    global _LAST_FPK
     package, outer, app, manifest = _build_fpk(tmp_path)
+    _LAST_FPK = package
     assert package.stat().st_size > 0
     assert "cmd/main" in outer
     assert outer["cmd/main"].mode & 0o111
@@ -43,6 +46,11 @@ def test_fpk_archive_contents_and_integrity(tmp_path):
     assert "repo/proxy/drpy.py" in app
     assert "repo/proxy/runner_client.py" in app
     assert "repo/proxy/runner_errors.py" in app
+    rules_path = "repo/proxy/assets/ad_rules/fnmedia-ad-rules.json"
+    assert rules_path in app
+    rules_data = json.loads(app_extract_member(app, rules_path))
+    assert rules_data.get("format") == "fnmedia-ad-rules"
+    assert len(rules_data.get("rules", [])) == 18
 
     version = (REPO / "VERSION").read_text().splitlines()[0].strip().split("-")[0]
     fields = {key.strip(): value.strip() for line in manifest.splitlines() if "=" in line
@@ -60,6 +68,19 @@ def test_fpk_archive_contents_and_integrity(tmp_path):
         assert not path.startswith("repo/spider-runner/android/"), path
         assert not path.startswith("repo/proxy/assets/catvod/"), path
         assert not path.startswith("repo/proxy/assets/guard/"), path
+
+
+_LAST_FPK = None
+
+def app_extract_member(app_members, name):
+    """Read a regular file member stored in the already-open app archive map."""
+    import tarfile
+    with gzip.open(_LAST_FPK, "rb") as stream:
+        outer_blob = stream.read()
+    with tarfile.open(fileobj=io.BytesIO(outer_blob), mode="r:") as outer:
+        app_blob = outer.extractfile("app.tgz").read()
+    with tarfile.open(fileobj=io.BytesIO(app_blob), mode="r:gz") as archive:
+        return archive.extractfile(name).read()
 
 
 def _extract_app_blob(package):

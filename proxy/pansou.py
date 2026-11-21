@@ -44,6 +44,11 @@ import importlib
 import re
 import threading
 import time
+
+import panpool
+
+# 单次网盘转存/取链的等待上限：超过后放弃本次尝试，worker 后台自然结束。
+_PAN_RESOLVE_TIMEOUT = 90.0
 import urllib.parse
 
 import httpx
@@ -912,11 +917,11 @@ async def _pansou_login_qr_png(mg: str):
             rec["provider"] = provider
         return ent["png"], name
     try:
-        session = await asyncio.to_thread(mod.qr_start)
+        session = await panpool.run(mod.qr_start)
         qr_text = (session or {}).get("qr_text") or ""
         if not qr_text:
             return None
-        png = await asyncio.to_thread(mod.qr_png, qr_text)
+        png = await panpool.run(mod.qr_png, qr_text)
     except Exception:
         _log.debug("_pansou_login_qr_png failed: provider=%s", provider,
                    exc_info=True)
@@ -950,7 +955,7 @@ async def _pansou_wait_login(mg: str, provider: str) -> bool:
                 await asyncio.sleep(_QR_POLL_INTERVAL)
                 continue
         try:
-            res = await asyncio.to_thread(mod.qr_poll, ent["session"])
+            res = await panpool.run(mod.qr_poll, ent["session"])
         except Exception:
             _log.debug("_pansou_wait_login poll failed: provider=%s",
                        provider, exc_info=True)
@@ -998,7 +1003,7 @@ async def _pansou_run(mg: str) -> None:
                 # 同步 httpx 搜索约 10 秒：放 to_thread，不堵事件循环
                 #（同函数内 resolve_share 也是 to_thread）。
                 # 搜索用去后缀的干净片名（「凡人修仙传 第05集」搜不到分享）
-                for url in await asyncio.to_thread(
+                for url in await panpool.run(
                         _pansou_search_cached, _pansou_clean_title(title),
                         index) or []:
                     if isinstance(url, str) and url and url not in candidates:
@@ -1040,7 +1045,8 @@ async def _pansou_run(mg: str) -> None:
                 return
             resolve_started = time.monotonic()
             try:
-                res = await asyncio.to_thread(mod.resolve_share, url)
+                res = await panpool.run(mod.resolve_share, url,
+                                         timeout=_PAN_RESOLVE_TIMEOUT)
             except Exception as exc:
                 _pansou_metric("resolve_ms", (time.monotonic() - resolve_started) * 1000)
                 _pansou_metric("failed")

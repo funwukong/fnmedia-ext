@@ -79,6 +79,9 @@ from marks import marks
 from follow import follow_list
 import domain_heal as domain_heal_mod
 import metadata as metadata_mod
+import panpool
+import playback_target as pbt
+from playback_target import mode as playback_mode
 import vlibs as vlibsmod
 import fnusers as fnusersmod
 import libfilter as libfiltermod
@@ -3639,8 +3642,8 @@ async def _vod_line_folder(parent: str, body: dict, client) -> JSONResponse:
         if old is None:
             source_rows[provider] = t
             continue
-        old_direct = bool(old.get("m3u8") or not old.get("resolve"))
-        new_direct = bool(t.get("m3u8") or not t.get("resolve"))
+        old_direct = pbt.is_direct_view(old)
+        new_direct = pbt.is_direct_view(t)
         if new_direct and not old_direct:
             source_rows[provider] = t
     rows = [_vod_line_card(brief, t["line"], index, parent)
@@ -4028,8 +4031,9 @@ async def item_list(request: Request):
         lib_name = standalone_lib_name(src)
         if not catalog.standalone_available(sscope):
             if catalog.routes_stale() and not catalog._refreshing:
-                asyncio.create_task(
-                    catalog.refresh_routes(config.enabled_sources()))
+                _managed_task(
+                    catalog.refresh_routes(config.enabled_sources()),
+                    name=f"catalog-refresh:{sscope}")
             return JSONResponse({"code": 0, "msg": "", "data": {
                 "mdb_name": lib_name, "mdb_category": "Mix", "top_dir": "",
                 "dir": "", "total": 0, "list": [], "jump_list": None}})
@@ -5951,8 +5955,7 @@ def _guess_wrapper(target: dict) -> tuple[str, bool]:
     url = (target.get("url") or "")
     path = url.split("?", 1)[0].lower()
     # 裸 mp4 直链（非跳转/解析页）才直接判 MP4
-    if not target.get("redirect") and not target.get("resolve") \
-            and re.search(r"\.mp4$", path):
+    if playback_mode(target) == "direct" and re.search(r"\.mp4$", path):
         return "MP4", False
     # >>> PRIVATE:DDUO
     if features.DDUO and target.get("xsrc"):
@@ -6622,7 +6625,7 @@ async def _resolve_pan_share(picked: dict) -> bool:
             return False
         try:
             import pan as _panq
-            resolved = await _aio.to_thread(_panq.resolve_linkstart, lm.group(1))
+            resolved = await panpool.run(_panq.resolve_linkstart, lm.group(1), timeout=60.0)
         except Exception:
             _log.debug("_resolve_pan_share linkstart failed", exc_info=True)
             return False
@@ -6651,7 +6654,7 @@ async def _resolve_pan_share(picked: dict) -> bool:
         return False
     hint = _up.parse_qs(_up.urlparse(share).query).get("pwd", [""])[0]
     try:
-        r = await _aio.to_thread(mod.resolve_share, share, hint)
+        r = await panpool.run(mod.resolve_share, share, hint, timeout=90.0)
     except Exception as exc:  # noqa: BLE001
         picked["_pan_error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
         return False
@@ -6809,7 +6812,7 @@ def _client_direct_only(t: dict) -> bool:
 
     特性中立：不直接引用私有模块名，公开构建同样成立。判定依据是解析阶段对
     “客户端直连”类型打的标记。"""
-    return bool(t.get("client_direct"))
+    return pbt.client_direct_only(t)
 
 
 def _dodge_known_bad(picked: dict, request: Request) -> dict:

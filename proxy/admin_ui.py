@@ -113,6 +113,7 @@ const adminTheme = (() => {
   --ok:#16643f;--ok-soft:#e8f5ee;--warn:#90440b;--warn-soft:#fff1df;
   --err:#a62a3a;--err-soft:#fbecef;--info:#225ab2;--violet:#6940b4;
   --radius:16px;--shadow:0 1px 2px #14244208,0 4px 14px #14244205;
+  --shadow-hover:0 2px 6px #14244214,0 14px 30px #14244218;
   --overlay:#13192980;
 }
 :root[data-theme=dark]{
@@ -121,7 +122,7 @@ const adminTheme = (() => {
   --text:#edf1f9;--muted:#aab6cb;
   --ok:#8bdbad;--ok-soft:#1c372e;--warn:#fac984;--warn-soft:#3d2d21;
   --err:#ffacb3;--err-soft:#412731;--info:#a5c5ff;--violet:#c8b3ff;
-  --shadow:0 2px 5px #0003;--overlay:#04060ab8;
+  --shadow:0 2px 5px #0003;--shadow-hover:0 4px 12px #0006,0 18px 36px #0008;--overlay:#04060ab8;
 }
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
@@ -162,7 +163,12 @@ button,summary{cursor:pointer}
 h2.page-title{margin:0;font-size:clamp(24px,3vw,34px);line-height:1.25;letter-spacing:-.025em}
 .page-desc{color:var(--muted);font-size:14px;margin:7px 0 0}
 .card{min-width:0;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  padding:clamp(14px,2.2vw,22px);margin-bottom:14px;box-shadow:var(--shadow)}
+  padding:clamp(14px,2.2vw,22px);margin-bottom:14px;box-shadow:var(--shadow);
+  transition:box-shadow .22s ease,transform .22s ease,border-color .22s ease}
+@media(hover:hover) and (pointer:fine){
+  .card:hover{transform:translateY(-2px);border-color:var(--glass-edge);
+    box-shadow:var(--shadow-hover)}
+}
 .card-title{font-weight:700;font-size:16px;margin-bottom:5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .card-sub{color:var(--muted);font-size:13px;margin:0 0 12px}
 .hint{color:var(--muted);font-size:13px;margin:6px 0}
@@ -366,10 +372,66 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   .bottom-nav .nav-icon{font-size:15px}
   #toast{bottom:calc(65px + env(safe-area-inset-bottom))}
 }
+/* Liquid glass surfaces over a static, low-poly color field. */
+:root{
+  --radius:22px;
+  --glass-card:rgba(251,253,255,.70);
+  --glass-nav:rgba(246,250,255,.83);
+  --glass-edge:rgba(255,255,255,.92);
+  --glass-rim:rgba(255,255,255,.95);
+  --glass-shade:rgba(87,107,157,.12);
+  --poly-wash:linear-gradient(145deg,#f3f8ff 4%,#dce7fc 52%,#dfddf6 100%);
+  --poly-a:linear-gradient(135deg,#ffffffb8,#9fc7fa68);
+  --poly-b:linear-gradient(150deg,#adc4f455,#967fce52);
+  --shadow:0 12px 30px #314c8020,0 2px 6px #223c6d12;
+}
+:root[data-theme=dark]{
+  --glass-card:rgba(27,36,57,.82);
+  --glass-nav:rgba(21,29,48,.88);
+  --glass-edge:rgba(184,205,246,.19);
+  --glass-rim:rgba(213,227,255,.26);
+  --glass-shade:rgba(15,20,35,.20);
+  --poly-wash:linear-gradient(145deg,#2b3c59 0%,#172437 51%,#24203a 100%);
+  --poly-a:linear-gradient(135deg,#a9c2ff38,#3d699a30);
+  --poly-b:linear-gradient(150deg,#5771a334,#8b6fbb38);
+  --shadow:0 12px 30px #0004,0 2px 6px #0003;
+}
+body{isolation:isolate}
+.poly-background{position:fixed;inset:0;z-index:-1;pointer-events:none;
+  background:radial-gradient(ellipse at 5% 0%,var(--glass-rim),transparent 54%),var(--poly-wash)}
+.poly-background::before,.poly-background::after{content:"";position:absolute;inset:0}
+.poly-background::before{background:var(--poly-a);clip-path:polygon(0 0,79% 0,42% 51%,0 77%)}
+.poly-background::after{background:var(--poly-b);clip-path:polygon(79% 0,100% 28%,100% 100%,13% 100%,42% 51%)}
+.sidebar,.bottom-nav,.nav.open{
+  background:linear-gradient(135deg,var(--glass-rim),transparent 45%),var(--glass-nav);
+  border-color:var(--glass-edge);
+  box-shadow:inset 1px 1px 0 var(--glass-rim),var(--shadow);
+  -webkit-backdrop-filter:blur(18px) saturate(150%);
+  backdrop-filter:blur(18px) saturate(150%);
+}
+.nav-item.active{border-color:var(--glass-edge);box-shadow:inset 0 1px 0 var(--glass-rim),0 3px 10px var(--glass-shade)}
+.card,.page-head{
+  background:linear-gradient(142deg,var(--glass-rim),transparent 49%,var(--glass-shade)),var(--glass-card);
+  border-color:var(--glass-edge);
+  box-shadow:inset 1px 1px 0 var(--glass-rim),var(--shadow);
+}
+.page-head{background:linear-gradient(123deg,var(--accent-soft),transparent 66%),var(--glass-card)}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){
+  .sidebar,.bottom-nav,.nav.open{background:var(--card)}
+}
+@media(max-width:760px){
+  :root{--radius:18px}
+  .bottom-nav{inset-inline:8px;bottom:max(6px,env(safe-area-inset-bottom));
+    border:1px solid var(--glass-edge);border-radius:19px;padding-block:3px}
+}
+@media(prefers-reduced-transparency:reduce){
+  .sidebar,.bottom-nav,.nav.open,.card,.page-head{background:var(--card);backdrop-filter:none;-webkit-backdrop-filter:none}
+}
 @media(prefers-reduced-motion:reduce){#toast{transition:none}}
 </style>
 </head>
 <body>
+<div class="poly-background" aria-hidden="true"></div>
 <a class="skip-link" href="#mainContent">跳到主内容</a>
 <div class="layout">
   <aside class="sidebar">
@@ -1550,7 +1612,7 @@ async function loadRuntimeDiagnostics(){
   try{
     const r=await jget("/v/api/ext/status");
     const d=(r&&r.data)||{}, metrics=d.search_metrics||{}, sources=metrics.sources||{};
-    const pansou=d.pansou_metrics||{};
+    const pansou=d.pansou_metrics||{}, trend=d.runtime_trend||{}, panw=d.pan_workers||{};
     const rows=Object.entries(sources).sort((a,b)=>(b[1].calls||0)-(a[1].calls||0)).slice(0,20);
     const tasks=d.background_tasks||[], hist=d.background_task_history||[];
     const cats=d.catalog&&d.catalog.categories||{};
@@ -1560,6 +1622,8 @@ async function loadRuntimeDiagnostics(){
       '<div class="sm" style="margin-top:6px"><b>搜索源统计</b></div>'+
       (rows.length?'<div class="sm muted">'+rows.map(([id,x])=>esc(id)+": "+x.calls+"次 / 成功"+x.success+" / 失败"+x.failed+" / 取消"+x.cancelled+" / 均值"+x.avg_duration_ms+"ms / 结果"+x.results).join("<br>")+'</div>':'<div class="sm muted">暂无搜索统计</div>')+
       '<div class="sm" style="margin-top:6px"><b>PanSou</b> '+(pansou.runs||0)+'次 · 搜索均值'+(pansou.avg_search_ms||0)+'ms · 转存均值'+(pansou.avg_resolve_ms||0)+'ms · 成功'+(pansou.resolve_ok||0)+' · 失败'+(pansou.failed||0)+' · 等待登录'+(pansou.waiting_login||0)+'</div>'+
+      '<div class="sm" style="margin-top:6px"><b>网盘线程池</b> 并发上限 '+(panw.max_workers||0)+' · 提交 '+(panw.submitted||0)+' · 失败 '+(panw.failed||0)+' · 超时 '+(panw.timeouts||0)+' · 排队峰值 '+(panw.queued_peak||0)+' · 平均等待 '+(panw.avg_wait_ms||0)+'ms</div>'+
+      '<div class="sm" style="margin-top:6px"><b>运行趋势</b> RSS '+(trend.rss_mb||0)+'MB（峰值 '+(trend.rss_peak_mb||0)+'MB）· 缓存 '+(trend.cache_mb||0)+'MB · 活跃任务 '+(trend.tasks||0)+' · 采样 '+(trend.samples||0)+'</div>'+
       '<div class="sm" style="margin-top:6px"><b>最近后台任务</b> '+(hist.length?hist.slice(-8).reverse().map(t=>esc(t.name)+" · "+esc(t.state)+(t.error_type?" ("+esc(t.error_type)+")":"")).join("；"):"暂无任务历史")+'</div>';
   }catch(e){box.textContent="读取运行诊断失败："+e.message;}
 }

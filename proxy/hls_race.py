@@ -28,9 +28,31 @@ import urllib.parse
 from fnlog import get_logger
 from playback_target import (is_slow_line as target_is_slow_line,
                              mode as playback_mode,
+                             needs_redirect as target_needs_redirect,
+                             needs_resolve as target_needs_resolve,
                              needs_special_resolution)
 
 _log = get_logger("app")  # 与 app._log 同一 logger 对象
+
+# 清单构建/预热任务统一登记，避免异常静默（播放侧表现为“一直转圈”）。
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _BG_TASKS.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _BG_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            _log.warning("playlist background task failed: %s (%s)",
+                         t.get_name(), type(exc).__name__)
+
+    task.add_done_callback(_done)
+    return task
 
 # 与 app.ONLINE_PREFIX 同值（路由装饰器在定义时求值，无法经 app 懒取）。
 ONLINE_PREFIX = "/v/media/online"
@@ -1023,7 +1045,7 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
             picked["url"] = real
             picked["redirect"] = False
             picked["m3u8"] = bool(re.search(r"\.m3u8(\?|$)", real, re.I))
-    if picked and picked.get("resolve"):
+    if target_needs_resolve(picked):
         # 网盘分享链接：先走转存分支（上游同款），失败再退回网页嗅探。
         # 顺序不能反 —— providers.resolve_share 只认网页播放页，对网盘分享
         # 链接必然抓不到 m3u8。
@@ -1292,7 +1314,7 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     """抓取该线路的上游媒体列表，并把分片改写为经本代理的绝对地址。
     返回 (body_text, base_url)；失败返回 (None, None)。"""
     from app import _fetch_playlist, _resolve_if_needed, _seg_url, _self_url, b64e, ext_client  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    was_redirect = bool(picked.get("redirect"))
+    was_redirect = target_needs_redirect(picked)
     await _resolve_if_needed(picked, request)
     # 解析规则可能在海阔侧刷新 Referer/Cookie/User-Agent；必须读取更新后的 headers。
     headers = dict(picked.get("headers") or {})
@@ -1397,10 +1419,13 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     seg_index = 0
     out_lines = []
 
-    # 先收集所有分片绝对地址（与下方输出顺序一致：URI 标签按出现序，分片行按出现序）
+    # 注册表只包含会在输出清单中保留的媒体 URI；成功解密时 KEY 标签被删除，
+    # 其 URI 不能占据紧凑索引，否则后续所有分片都会整体错位。
     seg_urls: list[str] = []
     for raw0 in text.splitlines():
         ln0 = raw0.strip()
+        if ln0.startswith("#EXT-X-KEY") and decrypt_key is not None:
+            continue
         if ln0.startswith("#"):
             if ln0.startswith("#EXT-X-MAP") or ln0.startswith("#EXT-X-KEY"):
                 m0 = re.search(r'URI="([^"]+)"', ln0, re.I)
@@ -1441,8 +1466,12 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
             out_lines.append(raw)
         else:
             if compact_rid:
-                out_lines.append(
-                    f"hls?r={compact_rid}&i={compact_i}")
+                ref = f"hls?r={compact_rid}&i={compact_i}"
+                # 紧凑路由也必须携带服务端解密参数；否则长 URL 清单会绕过
+                # hls_seg 的 AES-CBC 解密，播放器收到密文 TS。
+                if decrypt_key is not None:
+                    ref += "&" + seg_decrypt_qs()
+                out_lines.append(ref)
                 compact_i += 1
             else:
                 if decrypt_key is not None:
@@ -1486,7 +1515,7 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
             finally:
                 _PLAYLIST_FUT.pop(key, None)
 
-        asyncio.create_task(produce())
+        _spawn(produce(), name=f"playlist-build-{key}")
     return await fut
 
 
@@ -1501,7 +1530,8 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
         return
     if key in _PLAYLIST_FUT:
         return  # 已在途
-    asyncio.create_task(_get_playlist_cached(mg, picked, request))
+    _spawn(_get_playlist_cached(mg, picked, request),
+           name=f"playlist-warm-{key}")
 
 
 # ---- 真实时长（resume3-duration）----
@@ -2751,7 +2781,7 @@ async def hls_seg(mg: str, request: Request):
 async def hls_compact(mg: str, request: Request):
     """紧凑分片：清单只带 r=<注册表ID>&i=<序号>，真实 CDN（夸克/UC 等）地址留
     在服务端。用于签名分片超长、清单过大的转码 HLS，规避外网网关 URL/体积限制。"""
-    from app import _safe_response_headers, app, ext_get_retry  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import _safe_response_headers, app, b64d, ext_get_retry  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     rid = request.query_params.get("r", "")
     try:
         idx = int(request.query_params.get("i", "0"))
@@ -2777,7 +2807,8 @@ async def hls_compact(mg: str, request: Request):
         _log.debug("hls_compact failed", exc_info=True)
         pass
     # <<< PRIVATE:PAN
-    if request.headers.get("range"):
+    decrypt = request.query_params.get("dec") == "1"
+    if request.headers.get("range") and not decrypt:
         fwd["Range"] = request.headers["range"]
     try:
         r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
@@ -2786,6 +2817,19 @@ async def hls_compact(mg: str, request: Request):
         return Response("seg fail", status_code=502)
     body = r.content
     ctype = r.headers.get("content-type", "")
+    response_status = r.status_code
+    if decrypt:
+        try:
+            import quality as _quality
+            key = bytes.fromhex(b64d(request.query_params.get("k", "")))
+            iv = bytes.fromhex(b64d(request.query_params.get("iv", "")))
+            if len(key) == 16 and len(iv) == 16:
+                dec = await _quality._aes_cbc_decrypt(body, key, iv)
+                if dec and len(dec) >= 188 and dec[0] == 0x47:
+                    body = dec
+                    response_status = 200
+        except Exception as exc:
+            _log.warning("compact seg decrypt fail: %s", type(exc).__name__)
     if body[:8] == b"\x89PNG\r\n\x1a\n":
         try:
             import quality
@@ -2795,11 +2839,14 @@ async def hls_compact(mg: str, request: Request):
         except Exception:
             _log.debug("hls_compact failed", exc_info=True)
             pass
-    h = _safe_response_headers(r.headers, {"content-security-policy"})
+    drop = {"content-security-policy"}
+    if decrypt:
+        drop.update({"content-range", "accept-ranges"})
+    h = _safe_response_headers(r.headers, drop)
     h["Access-Control-Allow-Origin"] = "*"
     h["Content-Length"] = str(len(body))
     h.setdefault("Content-Type", ctype or "video/mp2t")
-    return Response(content=body, status_code=r.status_code, headers=h)
+    return Response(content=body, status_code=response_status, headers=h)
 
 
 # ------------------------------------------------------------- 海报代理

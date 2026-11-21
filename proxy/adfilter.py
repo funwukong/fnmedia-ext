@@ -40,6 +40,9 @@ _log = get_logger("adfilter")
 # ---- 持久化 --------------------------------------------------------------
 _STATE_DIR = Path(__file__).resolve().parent.parent / "state"
 _RULES_FILE = _STATE_DIR / "ad_rules.json"   # 订阅合并来的去广告规则
+_BUILTIN_RULE_FILE = Path(__file__).resolve().parent / "assets" / "ad_rules" / "fnmedia-ad-rules.json"
+_BUILTIN_RULES: list[dict] | None = None
+_BUILTIN_RULES_MTIME: float = -1.0
 _ENABLE_KEY = "ad_filter_enabled"            # 总开关存 config.json
 
 # 片源方标注的固定广告时长（秒）。DISCONTINUITY 分组后，若主体媒体块 >= MIN_MAIN_DUR
@@ -161,7 +164,9 @@ def _save_rules(rules: list[dict]) -> None:
 
 def stats() -> dict:
     with _lock:
-        rules = _load_rules()
+        user_rules = _load_rules()
+    builtin_rules = _load_builtin_rules()
+    rules = builtin_rules + user_rules
     hosts = set()
     n_regex = 0
     for r in rules:
@@ -175,11 +180,32 @@ def _norm_group(g: dict) -> dict | None:
     if not isinstance(g, dict):
         return None
     hosts = [str(h).strip().lower() for h in (g.get("hosts") or []) if str(h).strip()]
-    regex = [str(x) for x in (g.get("regex") or []) if str(x).strip()]
+    # Exact host markers (e.g. "magnet") are used by TVBox rules; URL/DNS rules
+    # use conservative suffix/host-token matching without matching unrelated path text.
+    regex = []
+    for raw in (g.get("regex") or []):
+        pattern = str(raw).strip()
+        if not pattern:
+            continue
+        try:
+            re.compile(pattern, flags=re.S)
+        except re.error:
+            _log.warning("skip invalid ad rule regex: group=%s", str(g.get("name") or "unknown"))
+            continue
+        regex.append(pattern)
+    durations = []
+    for value in (g.get("durations") or []):
+        try:
+            duration = float(value)
+        except (TypeError, ValueError):
+            continue
+        if 0 < duration < 3600:
+            durations.append(duration)
     name = str(g.get("name") or (hosts[0] if hosts else "")).strip()
-    if not regex:
+    if not regex and not durations:
         return None
-    return {"name": name, "hosts": hosts, "regex": regex}
+    return {"name": name, "hosts": hosts, "regex": regex,
+            "durations": durations}
 
 
 def merge_subscription_rules(rules) -> int:
@@ -239,12 +265,38 @@ def _host_matches(hosts: list[str], media_url: str) -> bool:
     return False
 
 
+def _load_builtin_rules() -> list[dict]:
+    global _BUILTIN_RULES, _BUILTIN_RULES_MTIME
+    try:
+        mtime = _BUILTIN_RULE_FILE.stat().st_mtime
+        if _BUILTIN_RULES is not None and mtime == _BUILTIN_RULES_MTIME:
+            return _BUILTIN_RULES
+        data = json.loads(_BUILTIN_RULE_FILE.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or data.get("format") != "fnmedia-ad-rules" or data.get("version") != 1 or not isinstance(data.get("rules"), list):
+            raise ValueError("unsupported built-in ad rules schema")
+        rules = [g for raw in data["rules"] if (g := _norm_group(raw))]
+        _BUILTIN_RULES = rules
+        _BUILTIN_RULES_MTIME = mtime
+        return rules
+    except (OSError, ValueError, TypeError):
+        _log.warning("built-in ad rules unavailable or invalid", exc_info=True)
+        return []
+
+
+def _all_rules() -> list[dict]:
+    # Builtin groups first; user/imported groups remain additive and take effect immediately.
+    with _lock:
+        return list(_load_builtin_rules()) + _load_rules()
+
+
 def _rules_for(media_url: str) -> list[str]:
     pat: list[str] = []
-    with _lock:
-        for g in _load_rules():
-            if _host_matches(g.get("hosts") or [], media_url):
-                pat.extend(g.get("regex") or [])
+    for g in _all_rules():
+        if _host_matches(g.get("hosts") or [], media_url):
+            pat.extend(g.get("regex") or [])
+            durations = g.get("durations") or []
+            if durations:
+                pat.append("__FNMEDIA_DURATIONS__:" + ",".join(str(float(d)) for d in durations))
     return pat
 
 
@@ -255,8 +307,11 @@ def _apply_host_regex(text: str, patterns: list[str]) -> str:
         if not pat:
             continue
         try:
-            if _PURE_DURATION.match(pat):
-                # 删除“EXTINF 时长恰为该值”的分片（EXTINF 行 + 紧随的 URL 行）。
+            if pat.startswith("__FNMEDIA_DURATIONS__:"):
+                durations = {float(x) for x in pat.split(":", 1)[1].split(",") if x}
+                text = _drop_segments_by_duration(text, durations)
+            elif _PURE_DURATION.match(pat):
+                # 删除“EXTINF 时长恰为该值”的分片（TVBox 订阅规则行为）。
                 text = _drop_segments_by_duration(text, {float(pat)})
             else:
                 text = re.sub(pat, "", text, flags=re.S)

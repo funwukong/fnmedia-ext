@@ -30,6 +30,27 @@ import catvod
 
 _log = logging.getLogger("fnmedia")
 
+# 后台索引/海报任务统一登记：异常必须被取出，否则只留
+# "Task exception was never retrieved"，用户侧表现为“建库中”永久卡住。
+_BG_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> asyncio.Task:
+    task = asyncio.create_task(coro, name=name)
+    _BG_TASKS.add(task)
+
+    def _done(t: asyncio.Task) -> None:
+        _BG_TASKS.discard(t)
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            _log.warning("xlib background task failed: %s (%s)",
+                         t.get_name(), type(exc).__name__)
+
+    task.add_done_callback(_done)
+    return task
+
 # 顶层大类 → (AList 目录, 飞牛媒体库 category, 展示名, 类型关键字)
 # 只纳入影视大类；体育/教育/曲艺/有声书/音乐等非影视不建库。
 CATEGORIES = [
@@ -580,7 +601,7 @@ class XiaoyaLibrary:
         if getattr(self, "_poster_started", False):
             return
         self._poster_started = True
-        asyncio.create_task(self._poster_loop())
+        _spawn(self._poster_loop(), name="xlib-poster-filler")
 
     @staticmethod
     def _poster_query(title: str) -> str:
@@ -741,7 +762,7 @@ class XiaoyaLibrary:
         if idx.done:
             return
         self._started.add(cat_id)
-        asyncio.create_task(self._build(cat_id))
+        _spawn(self._build(cat_id), name=f"xlib-build-{cat_id}")
 
     def start_manual_build(self, cat_id: str | None = None) -> str:
         """用户在管理入口显式触发的手动索引刷新（仍只读条目名、不转存）。
@@ -761,7 +782,7 @@ class XiaoyaLibrary:
             if not idx.done:
                 self._build_enabled = True
                 self._started.add(cid)
-                asyncio.create_task(self._build(cid))
+                _spawn(self._build(cid), name=f"xlib-build-{cid}")
                 n += 1
         return f"已排队 {n} 个分类的手动索引刷新"
 

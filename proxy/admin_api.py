@@ -360,6 +360,21 @@ async def ext_config_export(request: Request):
 # ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
+def _runtime_trend() -> dict:
+    """Sample RSS/cache/tasks on read (rate-limited inside runtime_metrics)."""
+    import runtime_metrics
+    from app import _BACKGROUND_TASKS
+    try:
+        cache_bytes = sum(int(v.get("bytes") or 0)
+                          for v in _cache_sizes().values()
+                          if isinstance(v, dict))
+        runtime_metrics.sample(cache_bytes=cache_bytes,
+                              active_tasks=len(_BACKGROUND_TASKS))
+    except Exception:
+        _log.debug("runtime trend sampling failed", exc_info=True)
+    return runtime_metrics.snapshot()
+
+
 @admin_router.get("/v/api/ext/status")
 async def ext_status(request: Request):
     from app import BUILD_LABEL, _background_task_history, _background_task_snapshot, _catalog_poster_metrics, app, chart_cache, config, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -379,6 +394,8 @@ async def ext_status(request: Request):
             "background_task_history": _background_task_history(),
             "search_metrics": providers.search_metrics_snapshot(),
             "catalog_poster_metrics": _catalog_poster_metrics(),
+            "runtime_trend": _runtime_trend(),
+            "pan_workers": __import__("panpool").stats(),
             "pansou_metrics": __import__("pansou")._pansou_metrics_snapshot(),
             "tmdb": {"enabled": bool(config.read("tmdb_enabled", False)),
                      "api_key_configured": bool(os.environ.get("TMDB_API_KEY")),
@@ -1082,7 +1099,15 @@ def _schedule_routes_refresh():
             await catalog.refresh_routes(config.enabled_sources())
 
     try:
-        asyncio.create_task(_run_after_current())
+        task = asyncio.create_task(_run_after_current(),
+                                   name="catalog-refresh-after-save")
+
+        def _refresh_done(t):
+            if not t.cancelled() and t.exception() is not None:
+                _log.warning("catalog refresh after save failed (%s)",
+                             type(t.exception()).__name__)
+
+        task.add_done_callback(_refresh_done)
     except Exception:
         _log.debug("_schedule_routes_refresh failed", exc_info=True)
         pass

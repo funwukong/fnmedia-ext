@@ -51,3 +51,15 @@ def is_slow_line(target: dict | None) -> bool:
         return True
     line = str(target.get("line") or "")
     return line.startswith(("spider-", "drpy-"))
+
+
+def client_direct_only(target: dict | None) -> bool:
+    """Whether an already-resolved target must be handed to the client (302)."""
+    return isinstance(target, dict) and bool(target.get("client_direct"))
+
+
+def is_direct_view(target: dict | None) -> bool:
+    """Legacy 'direct' semantics: explicit HLS, or no web-page resolution needed."""
+    if not isinstance(target, dict):
+        return True
+    return bool(target.get("m3u8")) or not target.get("resolve")

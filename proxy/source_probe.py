@@ -167,6 +167,16 @@ async def start(sources: list[dict], *, concurrency: int = 4,
                 _state["running"] = False
 
     _task = asyncio.create_task(job(), name=f"cms-source-probe-{rid}")
+
+    def _done(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            _log.warning("cms source probe task failed (%s)",
+                         type(exc).__name__)
+
+    _task.add_done_callback(_done)
     return status()
 
 
