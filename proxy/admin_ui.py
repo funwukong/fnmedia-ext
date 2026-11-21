@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """飞牛影视·在线扩展 管理台（单文件 HTML，无外部依赖）。
 
 布局对齐 fnmusic-ext 管理台：桌面左侧导航 + 移动端底部导航，多页卡片。
@@ -137,18 +137,45 @@ button,summary{cursor:pointer}
   position:sticky;top:0;height:100vh;height:100dvh;overflow:auto;z-index:46;
   display:flex;flex-direction:column;gap:22px}
 .brand{display:flex;align-items:center;gap:11px;padding:0 5px;min-width:0}
-.brand-mark{width:40px;height:40px;border-radius:12px;flex:none;display:grid;place-items:center;
-  background:var(--accent-fill);color:var(--accent-on)}
-.brand-mark::before{content:"";margin-left:2px;border-block:6px solid transparent;border-left:10px solid currentColor}
+/* iOS 26 液态玻璃 App 图标：连续圆角 + 内高光 + 柔和投影 */
+.brand-mark{width:42px;height:42px;border-radius:13px;flex:none;display:grid;place-items:center;
+  background:linear-gradient(145deg,color-mix(in srgb,var(--accent) 88%,white 12%),
+                                   color-mix(in srgb,var(--accent) 72%,#7b5cff));
+  color:var(--accent-on);position:relative;overflow:hidden;
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.55),inset 0 -2px 5px rgba(0,0,0,.1),
+             0 6px 14px color-mix(in srgb,var(--accent) 30%,transparent)}
+.brand-mark::after{content:"";position:absolute;inset:0;border-radius:inherit;
+  background:radial-gradient(circle at 30% 20%,rgba(255,255,255,.45),transparent 55%);pointer-events:none}
+.brand-mark::before{content:"";margin-left:2px;border-block:6.5px solid transparent;
+  border-left:10.5px solid currentColor;filter:drop-shadow(0 1px 1px rgba(0,0,0,.18))}
 .brand-name{font-weight:750;letter-spacing:-.025em;line-height:1.25}
 .brand-sub{font-size:12px;color:var(--muted)}
 .nav{display:grid;gap:4px}
-.nav-item,.theme-trigger,.menu-trigger{display:flex;align-items:center;gap:10px;text-align:left;
-  border:1px solid transparent;border-radius:9px;background:transparent;color:var(--muted);font-weight:570}
-.nav-item{min-height:42px;padding:7px 11px}
-.nav-item:hover,.theme-trigger:hover,.menu-trigger:hover{background:var(--inset);color:var(--text)}
-.nav-item.active{background:var(--accent-soft);color:var(--accent);font-weight:700}
-.nav-icon{display:inline-grid;place-items:center;font-size:17px;line-height:1;width:20px;flex:none}
+/* ===== iOS 26 液态玻璃导航 ===== */
+.nav-item,.theme-trigger,.menu-trigger{display:flex;align-items:center;gap:11px;text-align:left;
+  border:1px solid transparent;border-radius:14px;background:transparent;color:var(--muted);font-weight:560;
+  -webkit-tap-highlight-color:transparent;
+  transition:background .34s cubic-bezier(.2,.9,.24,1),color .28s ease,
+             transform .34s cubic-bezier(.34,1.56,.64,1),box-shadow .34s ease,border-color .3s ease}
+.nav-item{position:relative;min-height:46px;padding:8px 12px;letter-spacing:.01em}
+.nav-item:hover,.theme-trigger:hover,.menu-trigger:hover{
+  background:var(--inset);color:var(--text);transform:translateX(2px)}
+.nav-item:active{transform:scale(.965)}
+.nav-item.active{
+  background:linear-gradient(135deg,var(--accent-soft),color-mix(in srgb,var(--accent-soft) 55%,transparent));
+  color:var(--accent);font-weight:680;
+  border-color:color-mix(in srgb,var(--accent) 18%,transparent);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 6px 18px color-mix(in srgb,var(--accent) 16%,transparent)}
+.nav-item.active::before{content:"";position:absolute;left:-5px;top:50%;transform:translateY(-50%);
+  width:3px;height:20px;border-radius:2px;background:var(--accent);
+  box-shadow:0 0 8px var(--accent)}
+/* SF Symbols 观感：实心双色分层，颜色随 currentColor 自动适配深浅主题 */
+.nav-icon{display:inline-grid;place-items:center;width:24px;height:24px;flex:none;
+  transition:transform .38s cubic-bezier(.34,1.56,.64,1),filter .3s ease}
+.nav-icon svg{width:21px;height:21px;display:block;overflow:visible}
+.nav-item:hover .nav-icon{transform:scale(1.08) rotate(-3deg)}
+.nav-item.active .nav-icon{transform:scale(1.12);
+  filter:drop-shadow(0 2px 5px color-mix(in srgb,var(--accent) 35%,transparent))}
 .sidebar-tools{display:grid;gap:12px;margin-top:auto}
 .theme-trigger,.menu-trigger{min-height:44px;padding:7px 10px;border-color:var(--line);color:var(--text)}
 .theme-trigger::before{content:"";width:16px;height:16px;flex:none;border-radius:50%;
@@ -369,7 +396,9 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
     padding:3px max(4px,env(safe-area-inset-right)) calc(3px + env(safe-area-inset-bottom)) max(4px,env(safe-area-inset-left))}
   .bottom-nav .nav-item{flex:1;min-width:0;flex-direction:column;justify-content:center;min-height:48px;
     text-align:center;gap:3px;padding:3px 0;font-size:11px;white-space:nowrap}
-  .bottom-nav .nav-icon{font-size:15px}
+.bottom-nav .nav-icon{width:25px;height:25px}
+.bottom-nav .nav-icon svg{width:22px;height:22px}
+.bottom-nav .nav-item.active .nav-icon{transform:scale(1.14) translateY(-2px)}
   #toast{bottom:calc(65px + env(safe-area-inset-bottom))}
 }
 /* Liquid glass surfaces over a static, low-poly color field. */
@@ -431,6 +460,19 @@ body{isolation:isolate}
 </style>
 </head>
 <body>
+<!-- iOS 26 风格图标精灵：SF Symbols 观感，实心圆角 + 双色分层，24×24 -->
+<svg xmlns="http://www.w3.org/2000/svg" style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <symbol id="i-overview" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="2.4" fill="currentColor" opacity=".95"/><rect x="13" y="3" width="8" height="8" rx="2.4" fill="currentColor" opacity=".55"/><rect x="3" y="13" width="8" height="8" rx="2.4" fill="currentColor" opacity=".55"/><rect x="13" y="13" width="8" height="8" rx="2.4" fill="currentColor" opacity=".95"/></symbol>
+  <symbol id="i-library" viewBox="0 0 24 24"><rect x="3" y="4" width="5" height="16" rx="1.8" fill="currentColor" opacity=".95"/><rect x="9.5" y="4" width="5" height="16" rx="1.8" fill="currentColor" opacity=".65"/><path d="M16.5 5.2a1.6 1.6 0 0 1 1.94-1.16l1.9.5a1.6 1.6 0 0 1 1.16 1.94l2.5 12.1a1.6 1.6 0 0 1-1.16 1.94l-1.9.5a1.6 1.6 0 0 1-1.94-1.16z" fill="currentColor" opacity=".4"/></symbol>
+  <symbol id="i-quality" viewBox="0 0 24 24"><path d="M4 6.5h16M4 12h16M4 17.5h16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" opacity=".45"/><circle cx="8.5" cy="6.5" r="2.6" fill="currentColor" opacity=".95"/><circle cx="15.5" cy="12" r="2.6" fill="currentColor" opacity=".95"/><circle cx="10.5" cy="17.5" r="2.6" fill="currentColor" opacity=".95"/></symbol>
+  <symbol id="i-perf" viewBox="0 0 24 24"><path d="M13.4 2.3a1 1 0 0 1 1.72.02l.02.04a1 1 0 0 1-.18 1.14L12 6.9h5.5a1 1 0 0 1 .78 1.63l-8.2 10.2a1 1 0 0 1-1.72-.02 1 1 0 0 1 .18-1.14L11.4 14H5.9a1 1 0 0 1-.78-1.63z" fill="currentColor" opacity=".95"/></symbol>
+  <symbol id="i-sources" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="currentColor" opacity=".28"/><circle cx="12" cy="12" r="6" fill="currentColor" opacity=".5"/><circle cx="12" cy="12" r="3" fill="currentColor" opacity=".95"/></symbol>
+  <symbol id="i-import" viewBox="0 0 24 24"><path d="M11.3 3.7a1 1 0 0 1 1.4 0l4 4a1 1 0 0 1-1.4 1.4L13 6.8V15a1 1 0 1 1-2 0V6.8L8.7 9.1a1 1 0 0 1-1.4-1.4z" fill="currentColor" opacity=".95"/><path d="M4 16v2.5A2.5 2.5 0 0 0 6.5 21h11a2.5 2.5 0 0 0 2.5-2.5V16" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" opacity=".55"/></symbol>
+  <symbol id="i-login" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="4" fill="currentColor" opacity=".3"/><path d="M3 10h18" stroke="currentColor" stroke-width="2" opacity=".55"/><rect x="7" y="13.5" width="6" height="2.3" rx="1.15" fill="currentColor" opacity=".95"/><rect x="7" y="17" width="10" height="2.3" rx="1.15" fill="currentColor" opacity=".7"/></symbol>
+  <symbol id="i-script" viewBox="0 0 24 24"><path d="M7.5 2.8h7.2l4.5 4.5V19a2.2 2.2 0 0 1-2.2 2.2H7.5A2.2 2.2 0 0 1 5.3 19V5a2.2 2.2 0 0 1 2.2-2.2z" fill="currentColor" opacity=".32"/><path d="M14.7 3v3.2a1.3 1.3 0 0 0 1.3 1.3h3" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" opacity=".6"/><path d="M8.5 12h7M8.5 16h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" opacity=".95"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.3" fill="currentColor" opacity=".32"/><circle cx="10.8" cy="10.8" r="6.3" stroke="currentColor" stroke-width="2.2" opacity=".95"/><path d="m15.6 15.6 4.4 4.4" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" opacity=".95"/></symbol>
+  <symbol id="i-about" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9.2" fill="currentColor" opacity=".32"/><circle cx="12" cy="12" r="9.2" stroke="currentColor" stroke-width="2" opacity=".95"/><circle cx="12" cy="7.8" r="1.5" fill="currentColor" opacity=".95"/><rect x="11" y="10.8" width="2" height="6" rx="1" fill="currentColor" opacity=".95"/></symbol>
+</svg>
 <div class="poly-background" aria-hidden="true"></div>
 <a class="skip-link" href="#mainContent">跳到主内容</a>
 <div class="layout">
@@ -440,19 +482,20 @@ body{isolation:isolate}
       <div><div class="brand-name">fnmedia-ext</div><div class="brand-sub">管理台</div></div>
     </div>
     <nav class="nav" id="nav" aria-label="管理台页面">
-      <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span>概览</button>
-      <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true">▤</span>虚拟媒体库</button>
-      <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true">≋</span>片源质量</button>
-      <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true">◎</span>资源站</button>
-      <button type="button" class="nav-item" data-page="importsub" aria-controls="page-importsub"><span class="nav-icon" aria-hidden="true">⇩</span>导入订阅</button>
+      <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-overview"></use></svg></span>概览</button>
+      <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-library"></use></svg></span>虚拟媒体库</button>
+      <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-quality"></use></svg></span>片源质量</button>
+      <button type="button" class="nav-item" data-page="perf" aria-controls="page-perf"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-perf"></use></svg></span>性能</button>
+      <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-sources"></use></svg></span>资源站</button>
+      <button type="button" class="nav-item" data-page="importsub" aria-controls="page-importsub"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-import"></use></svg></span>导入订阅</button>
       <!-- >>> PRIVATE:SCANLOGIN -->
-      <button type="button" class="nav-item" data-page="scanlogin" aria-controls="page-scanlogin"><span class="nav-icon" aria-hidden="true">◈</span>网盘登录</button>
+      <button type="button" class="nav-item" data-page="scanlogin" aria-controls="page-scanlogin"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-login"></use></svg></span>网盘登录</button>
       <!-- <<< PRIVATE:SCANLOGIN -->
       <!-- >>> PRIVATE:CATVOD -->
-      <button type="button" class="nav-item" data-page="xiaoya" aria-controls="page-xiaoya"><span class="nav-icon" aria-hidden="true">⌘</span>小雅 / JS</button>
+      <button type="button" class="nav-item" data-page="xiaoya" aria-controls="page-xiaoya"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-script"></use></svg></span>小雅 / JS</button>
       <!-- <<< PRIVATE:CATVOD -->
-      <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true">⌕</span>搜索</button>
-      <button type="button" class="nav-item" data-page="about" aria-controls="page-about"><span class="nav-icon" aria-hidden="true">ⓘ</span>关于</button>
+      <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-search"></use></svg></span>搜索</button>
+      <button type="button" class="nav-item" data-page="about" aria-controls="page-about"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-about"></use></svg></span>关于</button>
     </nav>
     <div class="sidebar-tools">
       <button type="button" class="theme-trigger" id="themeTrigger" aria-haspopup="dialog" aria-controls="themeDialog">外观</button>
@@ -662,6 +705,32 @@ body{isolation:isolate}
         </table>
         </div>
         <div class="btn-row"><button class="primary small" onclick="savePriority()">保存权重</button></div>
+      </div>
+    </section>
+
+    <!-- ============ 性能面板 ============ -->
+    <section class="page" id="page-perf" aria-labelledby="title-perf">
+      <header class="page-head">
+        <h2 class="page-title" id="title-perf" tabindex="-1">播放性能</h2>
+        <p class="page-desc">最近 500 次采样的起播指标。P95 是 95% 用户体验到的最差延迟，比平均值更能反映卡顿。</p>
+      </header>
+      <div class="card">
+        <div class="card-title">起播延迟 <span class="muted sm" style="font-weight:400">单位：秒</span>
+          <button class="small ghost" style="margin-left:auto" onclick="resetPerf()">重置采样</button>
+        </div>
+        <div class="stat-grid" id="perfStats"><div class="muted sm">加载中…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">播放链路明细</div>
+        <table>
+          <thead><tr><th>指标</th><th>样本</th><th>P50</th><th>P95</th><th>平均</th><th>最大</th></tr></thead>
+          <tbody id="perfRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
+        </table>
+        <div class="hint" id="perfExtra"></div>
+      </div>
+      <div class="card">
+        <div class="card-title">网盘工作池 <span class="muted sm" style="font-weight:400">同步任务隔离，满载时拒收保护播放带宽</span></div>
+        <div class="stat-grid" id="panPoolStats"><div class="muted sm">加载中…</div></div>
       </div>
     </section>
 
@@ -1121,11 +1190,12 @@ body{isolation:isolate}
 </div>
 
 <nav class="bottom-nav" id="bottomNav" aria-label="快捷导航">
-  <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true">▦</span>概览</button>
-  <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true">▤</span>媒体库</button>
-  <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true">≋</span>质量</button>
-  <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true">◎</span>资源站</button>
-  <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true">⌕</span>搜索</button>
+  <button type="button" class="nav-item active" data-page="overview" aria-controls="page-overview" aria-current="page"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-overview"></use></svg></span>概览</button>
+  <button type="button" class="nav-item" data-page="library" aria-controls="page-library"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-library"></use></svg></span>媒体库</button>
+  <button type="button" class="nav-item" data-page="quality" aria-controls="page-quality"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-quality"></use></svg></span>质量</button>
+  <button type="button" class="nav-item" data-page="perf" aria-controls="page-perf"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-perf"></use></svg></span>性能</button>
+  <button type="button" class="nav-item" data-page="sources" aria-controls="page-sources"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-sources"></use></svg></span>资源站</button>
+  <button type="button" class="nav-item" data-page="search" aria-controls="page-search"><span class="nav-icon" aria-hidden="true"><svg><use href="#i-search"></use></svg></span>搜索</button>
 </nav>
 
 <dialog id="themeDialog" class="theme-dialog" aria-labelledby="themeTitle" aria-describedby="themeHelp">
@@ -1278,6 +1348,8 @@ async function switchPage(page){
   else{stopLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
+  if(page==="perf"){startPerfPoll();}
+  else{stopPerfPoll();}
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
@@ -1863,6 +1935,47 @@ async function refreshHot(){
   await loadStatus();await loadLibs();renderLibrary();
   toast(r.code===0?"榜单已刷新":(r.msg||"刷新失败"),r.code===0?"ok":"fail");
 }
+
+/* ---------- 播放性能 ---------- */
+const PERF_LABELS={
+  race_latency:"线路竞速胜出延迟",
+  playlist_ttfb:"清单 TTFB（点播到出清单）",
+  seg_ttfb:"分片首字节",
+  seg_throughput_kbps:"分片吞吐（KB/s）",
+  race_candidates:"竞速参与线路数"
+};
+async function loadPerf(){
+  try{
+    const r=await jget("/v/api/ext/perf");
+    const p=r.playback||{}, pool=r.pan_workers||{};
+    const keys=Object.keys(PERF_LABELS);
+    $("perfRows").innerHTML=keys.map(k=>{
+      const v=p[k];
+      if(!v)return `<tr><td>${PERF_LABELS[k]}</td><td colspan="5" class="muted">暂无采样</td></tr>`;
+      return `<tr><td>${PERF_LABELS[k]}</td><td>${v.count}</td><td>${v.p50}</td><td>${v.p95}</td><td>${v.mean}</td><td>${v.max}</td></tr>`;
+    }).join("");
+    $("perfStats").innerHTML=`
+      <div class="stat"><div class="n">${p.race_latency?p.race_latency.p95:"-"}</div><div class="l">竞速 P95 (s)</div></div>
+      <div class="stat"><div class="n">${p.playlist_ttfb?p.playlist_ttfb.p95:"-"}</div><div class="l">清单 P95 (s)</div></div>
+      <div class="stat"><div class="n">${p.cache_hit_rate!=null?(p.cache_hit_rate*100).toFixed(0)+"%":"-"}</div><div class="l">清单缓存命中</div></div>
+      <div class="stat"><div class="n">${p.predict_direct_rate!=null?(p.predict_direct_rate*100).toFixed(0)+"%":"-"}</div><div class="l">零竞速直出</div></div>`;
+    $("perfExtra").textContent=`运行 ${Math.round(p.uptime_seconds||0)} 秒 · 采样窗口 500 次 · 内存态，重启清空`;
+    $("panPoolStats").innerHTML=`
+      <div class="stat"><div class="n">${pool.running||0}/${pool.max_workers||4}</div><div class="l">运行中</div></div>
+      <div class="stat"><div class="n">${pool.queued||0}/${pool.max_queue||8}</div><div class="l">排队中</div></div>
+      <div class="stat"><div class="n">${pool.queued_peak||0}</div><div class="l">排队峰值</div></div>
+      <div class="stat"><div class="n">${pool.rejected||0}</div><div class="l">满载拒收</div></div>
+      <div class="stat"><div class="n">${pool.avg_wait_ms||0}ms</div><div class="l">平均等待</div></div>`;
+  }catch(e){toast("加载性能数据失败: "+e.message,"fail");}
+}
+async function resetPerf(){
+  try{await jpost("/v/api/ext/perf/reset",{});toast("采样已重置");loadPerf();}catch(e){toast("失败: "+e.message,"fail");}
+}
+
+// 性能面板：进入页面每 3 秒自动刷新，离开页面即停（与概览实时诊断同模式）
+let PERF_TIMER=null;
+function startPerfPoll(){ if(PERF_TIMER)return; PERF_TIMER=setInterval(loadPerf,3000); loadPerf(); }
+function stopPerfPoll(){ if(PERF_TIMER){clearInterval(PERF_TIMER);PERF_TIMER=null;} }
 
 /* ---------- 片源质量 ---------- */
 function renderQuality(){

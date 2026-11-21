@@ -396,11 +396,30 @@ async def ext_status(request: Request):
             "catalog_poster_metrics": _catalog_poster_metrics(),
             "runtime_trend": _runtime_trend(),
             "pan_workers": __import__("panpool").stats(),
+            "playback_perf": __import__("perfmetrics").snapshot(),
             "pansou_metrics": __import__("pansou")._pansou_metrics_snapshot(),
             "tmdb": {"enabled": bool(config.read("tmdb_enabled", False)),
                      "api_key_configured": bool(os.environ.get("TMDB_API_KEY")),
                      "language": config.read("tmdb_language", "zh-CN"),
                      "timeout": config.read("tmdb_timeout", 5)}}
+
+
+@admin_router.get("/v/api/ext/perf")
+async def ext_perf(request: Request):
+    """播放性能指标快照（竞速/清单/分片延迟、命中率、后台队列）。"""
+    import perfmetrics
+    from app import resume_background, pause_background  # noqa: F401 导出给前端状态参考
+    return {"ok": True,
+            "playback": perfmetrics.snapshot(),
+            "pan_workers": __import__("panpool").stats()}
+
+
+@admin_router.post("/v/api/ext/perf/reset")
+async def ext_perf_reset(request: Request):
+    """重置性能采样窗口。"""
+    import perfmetrics
+    perfmetrics.reset()
+    return {"ok": True}
 
 
 @admin_router.get("/v/api/ext/diag/resume")

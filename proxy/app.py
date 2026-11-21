@@ -96,9 +96,50 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 _BACKGROUND_TASK_HISTORY: list[dict] = []
 _BACKGROUND_TASK_HISTORY_LIMIT = 50
 
+# ---- P0-3 播放优先让路门闸 ----
+# 播放请求与后台任务（预热/清理/探测）共享同一事件循环与出口带宽。
+# hls_main 入口 pause_background()，响应后延迟 resume_background()：
+# 后台任务在门闸处挂起，播放独占带宽 5 秒，起播不再被预热抢资源。
+_BG_GATE: asyncio.Event | None = None
 
-def _managed_task(coro, *, name: str, registry=None) -> asyncio.Task:
+
+def _bg_gate() -> asyncio.Event:
+    """惰性创建门闸（首次调用须在事件循环内）。"""
+    global _BG_GATE
+    if _BG_GATE is None:
+        _BG_GATE = asyncio.Event()
+        _BG_GATE.set()  # 初始放行
+    return _BG_GATE
+
+
+def pause_background() -> None:
+    """播放开始：挂起所有 background=True 的后台任务。"""
+    try:
+        _bg_gate().clear()
+    except Exception:  # noqa: BLE001
+        _log.debug("pause_background failed", exc_info=True)
+
+
+def resume_background() -> None:
+    """播放结束（延迟调用）：恢复后台任务。"""
+    try:
+        _bg_gate().set()
+    except Exception:  # noqa: BLE001
+        _log.debug("resume_background failed", exc_info=True)
+
+
+async def _bg_gated(coro, *, background: bool = False):
+    """background=True 的任务先等门闸放行再跑。"""
+    if background:
+        await _bg_gate().wait()
+    return await coro
+
+
+def _managed_task(coro, *, name: str, registry=None,
+                  background: bool = False) -> asyncio.Task:
     tasks = _BACKGROUND_TASKS if registry is None else registry
+    if background:
+        coro = _bg_gated(coro, background=True)
     task = asyncio.create_task(coro, name=name)
     task._fnmedia_started_at = time.monotonic()
     tasks.add(task)
@@ -456,7 +497,7 @@ def _schedule_catalog_card_warm(cat: str, scope: str) -> None:
             _log.debug("catalog card background warm failed", exc_info=True)
         finally:
             _CATALOG_CARD_WARM.discard(key)
-    _managed_task(warm(), name=f"catalog-card-warm:{scope}:{cat}")
+    _managed_task(warm(), name=f"catalog-card-warm:{scope}:{cat}", background=True)
 
 
 def standalone_lib_name(src: dict) -> str:
@@ -1147,12 +1188,16 @@ async def lifespan(app: FastAPI):
         transport=httpx.AsyncHTTPTransport(uds=UPSTREAM_SOCK),
         timeout=httpx.Timeout(120), trust_env=False)
     app.state.ext = httpx.AsyncClient(
-        timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True)
+        timeout=httpx.Timeout(30), trust_env=False, follow_redirects=True,
+        limits=httpx.Limits(max_connections=64, max_keepalive_connections=32,
+                            keepalive_expiry=30.0))
     app.state.stop_hot = asyncio.Event()
     catalog.set_task_registrar(lambda coro, *, name: _managed_task(coro, name=name))
     app.state.hot_task = _managed_task(_hot_worker(app), name="hot-worker")
     # 重启后后台预热热门四库首屏（纯 CMS 冠军线），消除冷启动首批片慢/无线路
-    app.state.startup_warm = _managed_task(startup_prewarm_hot(), name="startup-prewarm")
+    # P0-3：启动预热标记 background=True——刚重启就点播放的用户不再被预热抢带宽
+    app.state.startup_warm = _managed_task(startup_prewarm_hot(), name="startup-prewarm",
+                                           background=True)
 
     # 网盘转存缓存定时清理（默认保留 6h，每小时检查；配置关闭则不跑）。
     async def _pan_cache_loop():
@@ -1168,7 +1213,8 @@ async def lifespan(app: FastAPI):
                 await asyncio.sleep(3600)
         except asyncio.CancelledError:
             pass
-    app.state.pan_cache_task = _managed_task(_pan_cache_loop(), name="pan-cache-cleanup")
+    app.state.pan_cache_task = _managed_task(_pan_cache_loop(), name="pan-cache-cleanup",
+                                              background=True)
 
     # 方案B（上游 v0.2.69 chartbind）：persist 模式下从磁盘恢复榜单绑定（线路），
     # 重启后热门片无需重新全网搜源。恢复的绑定只作起播种子，起播仍走竞速。
@@ -1196,13 +1242,15 @@ async def lifespan(app: FastAPI):
             except Exception:
                 _log.debug("_health_flush_loop failed", exc_info=True)
                 pass
-    app.state.health_task = _managed_task(_health_flush_loop(), name="source-health-flush")
+    app.state.health_task = _managed_task(_health_flush_loop(), name="source-health-flush",
+                                          background=True)
 
 
     # 后台只读检查 GitHub 更新（仅提示，绝不自动安装）
     app.state.stop_update = asyncio.Event()
     app.state.update_task = _managed_task(
-        updater.periodic_loop(app.state.stop_update), name="update-check")
+        updater.periodic_loop(app.state.stop_update), name="update-check",
+        background=True)
 
     # 订阅按各自周期有界刷新（移植上游 beta.3，B8）：单次≤5、并发≤2、
     # 连续失败 3 次暂停；失败保留旧源，不在起播/搜索关键路径执行。
@@ -1274,8 +1322,13 @@ async def lifespan(app: FastAPI):
         except Exception:
             _log.debug("catalog task registrar cleanup failed", exc_info=True)
         await t4_media.metadata.close()
-        await app.state.up.aclose()
-        await app.state.ext.aclose()
+    await app.state.up.aclose()
+    await app.state.ext.aclose()
+    # P0-1：关闭 netutil 共享连接池（搜索/探活/深翻的长驻客户端）
+    try:
+        await netutil.close_shared()
+    except Exception:  # noqa: BLE001
+        _log.debug("close netutil shared pool failed", exc_info=True)
         # 关闭前把防抖未落盘的在线资源缓存同步写一次（issue #42 异步落盘配套）
         try:
             await asyncio.to_thread(store.close)
@@ -4078,7 +4131,7 @@ async def item_list(request: Request):
         # 路由表过期则后台重建（不阻塞）
         if catalog.routes_stale() and not catalog._refreshing:
             _managed_task(catalog.refresh_routes(config.enabled_sources()),
-                          name=f"catalog-refresh:{ccat}")
+                          name=f"catalog-refresh:{ccat}", background=True)
         page = int(body.get("page") or body.get("p") or body.get("page_index")
                    or body.get("pn") or 1)
         page = max(1, page)
@@ -7186,7 +7239,7 @@ def _schedule_browse_probe(rows, request) -> None:
         if not ogs:
             return
         task = _managed_task(_browse_probe_worker(ogs, request),
-                             name=f"browse-probe:{len(ogs)}")
+                             name=f"browse-probe:{len(ogs)}", background=True)
         _BROWSE_PROBE_TASKS.add(task)
         task.add_done_callback(_browse_probe_task_done)
     except Exception:
@@ -7219,6 +7272,13 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
     async def finish(winner: dict, wlat: float, n_ok: int) -> dict:
         """选定胜者后：记最快线 + 预热改写后的播放列表（main 取流零额外抓取）。"""
         _remember_fast(picked, winner["line"], wlat)
+        # N-1：竞速胜出延迟 / 候选数埋点
+        try:
+            import perfmetrics
+            perfmetrics.record("race_latency", wlat)
+            perfmetrics.record("race_candidates", n_ok)
+        except Exception:  # noqa: BLE001
+            pass
         if re.search(r"\.m3u8(\?|$)", winner.get("url", "").split("?", 1)[0], re.I):
             mg = getattr(request.state, "_play_mg", "") if hasattr(request, "state") else ""
             if mg:

@@ -35,6 +35,51 @@ except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
 
 _log = get_logger("netutil")
 
+# ---- P0-1 连接池单例（v1.2.3 性能补丁）----
+# async_client() 此前每次调用都新建 AsyncClient：聚合搜索/探活/深翻全走它，
+# 每条请求重复 TCP+TLS 握手（慢源 0.5-2s/次）。现按 (mode, proxy) 缓存
+# 两个长驻客户端并配置 keepalive 连接池，30 秒内复用免握手。
+_SHARED: dict[str, httpx.AsyncClient] = {}
+_SHARED_LOCK = threading.Lock()
+
+_LIMITS = httpx.Limits(
+    max_connections=64,           # 全局连接上限
+    max_keepalive_connections=32, # 空闲保活连接数
+    keepalive_expiry=30.0,        # 30 秒内复用免握手
+)
+
+
+def _shared_client(key: str, *, proxy: str = "",
+                   timeout: float = 12.0) -> httpx.AsyncClient:
+    """取/建共享客户端。已存在且未关闭则直接复用（双检锁）。"""
+    cli = _SHARED.get(key)
+    if cli is not None and not cli.is_closed:
+        return cli
+    with _SHARED_LOCK:
+        cli = _SHARED.get(key)
+        if cli is not None and not cli.is_closed:
+            return cli
+        kw = {"follow_redirects": True, "trust_env": False, "verify": True,
+              "timeout": timeout, "limits": _LIMITS}
+        if proxy:
+            kw.update(_proxy_kwargs(proxy))
+        cli = httpx.AsyncClient(**kw)
+        _SHARED[key] = cli
+        return cli
+
+
+async def close_shared() -> None:
+    """lifespan shutdown 时关闭全部共享客户端。"""
+    with _SHARED_LOCK:
+        clients = list(_SHARED.values())
+        _SHARED.clear()
+    for c in clients:
+        try:
+            await c.aclose()
+        except Exception:  # noqa: BLE001
+            _log.debug("close_shared failed", exc_info=True)
+            pass
+
 
 # 阻塞式源适配器（例如需要同步 HTTP/RPC 的源）不能占用 asyncio 默认线程池：
 # 默认池还负责 httpx 的 DNS/连接等异步底层工作，一旦被慢源排队占满，海报、
@@ -136,15 +181,19 @@ def clear_proxy_hosts() -> None:
         _proxy_hosts.clear()
 
 
+# httpx >= 0.26 使用 proxy=；极旧版用 proxies=。模块加载时探测一次，
+# 替代此前每次调用 _proxy_kwargs 都现场构造一个客户端再扔掉的开销。
+try:
+    httpx.AsyncClient(proxy="http://127.0.0.1:1")
+    _PROXY_KW = "proxy"
+except TypeError:
+    _PROXY_KW = "proxies"
+
+
 def _proxy_kwargs(px: str) -> dict:
     if not px:
         return {}
-    # httpx >= 0.26 使用 proxy=；极旧版用 proxies=
-    try:
-        httpx.AsyncClient(proxy=px)
-        return {"proxy": px}
-    except TypeError:
-        return {"proxies": px}
+    return {_PROXY_KW: px}
 
 
 def _client_kwargs(timeout: float, follow_redirects: bool, verify: bool) -> dict:
@@ -160,6 +209,19 @@ def async_client(*, timeout: float = 12.0, follow_redirects: bool = True,
     - px=None（默认）时：按配置的代理模式构造——off 直连、on 全走代理、
       auto 返回自适应客户端（直连失败按主机自动切代理）。
     """
+    # 共享路径：默认参数复用长驻客户端（timeout 由 request 级覆盖）。
+    # follow_redirects/verify 非默认值的调用方仍走新建（行为兼容）。
+    if px is None and follow_redirects and verify:
+        mode = proxy_mode()
+        purl = source_proxy()
+        if mode == "on" and purl:
+            return _shared_client("proxied", proxy=purl, timeout=timeout)
+        if mode != "auto" or not purl:
+            return _shared_client("direct", timeout=timeout)
+        # auto 模式：内部两个底层客户端同样复用共享实例
+        return _AdaptiveAsyncClient(
+            _shared_client("direct", timeout=timeout),
+            _shared_client("proxied", proxy=purl, timeout=timeout))
     if px is not None:
         url = px.strip()
         return httpx.AsyncClient(**_client_kwargs(timeout, follow_redirects, verify),

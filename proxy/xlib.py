@@ -152,7 +152,9 @@ def _patched_media_client() -> httpx.AsyncClient:
             if _needs_realip(host):
                 ip = _ip_cache.get(host)
                 if ip is None:
-                    ips = _real_ips(host)
+                    # P0-4：DoH 用同步 urlopen(6s)，直接跑在事件循环会卡所有
+                    # 请求；丢到线程池执行，TTL 300s 缓存保证复用后零开销。
+                    ips = await asyncio.to_thread(_real_ips, host)
                     ip = ips[0] if ips else ""
                     _bounded_put(_ip_cache, host, ip)
                 if ip:

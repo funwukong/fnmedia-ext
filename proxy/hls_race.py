@@ -62,7 +62,7 @@ from fastapi import APIRouter
 hls_router = APIRouter()
 _LINE_BAD_TTL = 300.0          # 坏线记忆 5 分钟（签名时效内，避免长期误判偶发抖动）
 _LINE_BAD: dict[str, float] = {}
-_PROBE_TIMEOUT = 8.0
+_PROBE_TIMEOUT = 4.0  # P0-2：与 config line_fastest_timeout 对齐，内层不再自成体系
 _PROBE_MAX_CANDIDATES = 8     # 最多探测候选线路数（控制起播开销）
 _PROBE_RANGE = "bytes=0-2047"
 
@@ -188,7 +188,12 @@ async def _probe_latency(cand: dict, request: Request,
     from app import _fetch_playlist, _get_playlist_cached, _resolve_if_needed, _self_url, _verify_rewritten_first_seg, ext_client  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     t0 = time.time()
     try:
-        await _resolve_if_needed(cand, request)
+        # P0-2：解析（播放页/302/专有源）单独限 2 秒——解析都超时的线
+        # 竞速阶段直接放弃，不让它吃满整个探测预算
+        try:
+            await asyncio.wait_for(_resolve_if_needed(cand, request), timeout=2.0)
+        except asyncio.TimeoutError:
+            return None
         raw_url = cand.get("url", "")
         if not raw_url:
             return None
@@ -401,14 +406,24 @@ async def _find_playable(picked: dict, request: Request,
         return None
     fresh = [c for c in cands if not _line_is_bad(c)] or cands
     fresh = fresh[:_PROBE_MAX_CANDIDATES]
-    for i in range(0, len(fresh), 3):
-        batch = fresh[i:i + 3]
-        results = await asyncio.gather(
-            *[_probe_target(c, request) for c in batch])
-        for cand, ok in zip(batch, results):
-            if ok:
-                return cand
-    return None
+    # P0-2：全量并发 + 首成功取消（对照 _race_fastest 的 FIRST_COMPLETED 模式）。
+    # 旧实现批 3 串行：最坏 3 批 × 8s = 24s 才轮到第 4 条候选，慢批拖死快批。
+    tasks = [asyncio.create_task(_probe_target(c, request)) for c in fresh]
+    try:
+        pending = set(tasks)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending, timeout=_PROBE_TIMEOUT,
+                return_when=asyncio.FIRST_COMPLETED)
+            for t, c in zip(tasks, fresh):
+                if t in done and not t.cancelled() and t.exception() is None and t.result():
+                    return c
+        return None
+    finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 # 内置线路全死后，按片名全网回源找到的可播记录：原 media_guid -> 真实可播 og。
@@ -946,6 +961,11 @@ async def _ensure_playable(picked: dict, request: Request,
     if auto and _autofail_on() and _fastest_on():
         direct = trusted_predicted_target(picked)
         if direct is not None:
+            try:
+                import perfmetrics
+                perfmetrics.record("predict_direct", 1)
+            except Exception:  # noqa: BLE001
+                pass
             _log.info("预测零竞速直出: 《%s》%s 选用 %s，跳过竞速",
                       picked.get("title"), picked.get("ep_title") or "",
                       direct.get("line"))
@@ -1493,8 +1513,19 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
     hit = _PLAYLIST_CACHE.get(key)
     if hit:
         if now - hit[0] < _PLAYLIST_TTL:
+            try:
+                import perfmetrics
+                perfmetrics.record("cache_hit", 1)
+            except Exception:  # noqa: BLE001
+                pass
             return hit[1]
         _playlist_cache_drop(key)
+    else:
+        try:
+            import perfmetrics
+            perfmetrics.record("cache_hit", 0)
+        except Exception:  # noqa: BLE001
+            pass
     fut = _PLAYLIST_FUT.get(key)
     if fut is None:
         fut = asyncio.get_event_loop().create_future()
@@ -2214,10 +2245,21 @@ def _err_response(body: str, status: int, code: str,
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
 async def hls_main(mg: str, request: Request):
     from app import _autofail_on, _await_pending_chart, _chart_key_open, _denied_lib_response, _dodge_known_bad, _ensure_playable, _get_playlist_cached, _main_slow_budget, _online_target_viewable, _pick_episode, _verify_rewritten_first_seg, _viewer_ctx, app, chart_guid_by_media  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import pause_background, resume_background  # noqa: E402 P0-3 播放优先
     from app import (_PANSOU_MAN_SNAP, _pansou_manual_arm,  # noqa
                      _pansou_manual_state, _pansou_reset, store)
     from pansou import _pansou_snapshot  # noqa: E402 PanSou 手动线
     _req_t0 = time.time()  # hls_main 入口处、任何分支之前（上游 v1.0.0）
+    # P0-3：起播期间挂起预热/清理/探活等后台任务，响应后 5 秒恢复
+    pause_background()
+    asyncio.get_running_loop().call_later(5.0, resume_background)
+    # N-1：清单 TTFB 计时（所有正常返回分支共用；错误分支不计入）
+    def _record_playlist_ttfb() -> None:
+        try:
+            import perfmetrics
+            perfmetrics.record("playlist_ttfb", time.time() - _req_t0)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _budget_left(floor: float) -> float:
         # 首次 main 的总预算：从请求进入起计，含绑定等待、选线、dodge 等前置耗时。
@@ -2364,6 +2406,7 @@ async def hls_main(mg: str, request: Request):
             # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
             sourcehealth.record(_sk, True, level="stream")
 
+        _record_playlist_ttfb()
         return Response(body, media_type="application/vnd.apple.mpegurl",
                         headers={"Cache-Control": "no-cache",
                                  "Access-Control-Allow-Origin": "*"})
@@ -2463,9 +2506,13 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     """
     from app import _is_pansou_line_name, _safe_response_headers, ext_client  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     client = ext_client(request)
+    _seg_open_t0 = time.time()  # N-1：分片 TTFB 起点
     # 连接超时必须短：源站偶尔 TCP 都连不上，等默认 30s 才回退会让播放器干等半分钟。
     # 读超时给宽松值——慢源是"能连上但很慢"，不能因此判死。
-    tmo = httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=10.0)
+    # pool 超时放大到 60s（P1-A）：P0-1 全局连接池已扩到 64，但分片流量极大，
+    # 慢源多分片并发时队列等待若仍限 10s 会触发回退整段缓冲路径，表现为播放抖动。
+    # 60s 与 app.state.ext（30s）/竞速（10s）协调：分片是稳态长流，值得多等。
+    tmo = httpx.Timeout(connect=8.0, read=90.0, write=30.0, pool=60.0)
     try:
         # 注意：httpx 的 send() 不接受 timeout 参数，超时必须挂在 request 上
         req = client.build_request("GET", src_url, headers=fwd, timeout=tmo)
@@ -2483,6 +2530,12 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
     it = rs.aiter_raw()
     try:
         first = await it.__anext__()
+        # N-1：分片首字节延迟（连接+源站响应，不含分片整体下载时间）
+        try:
+            import perfmetrics
+            perfmetrics.record("seg_ttfb", time.time() - _seg_open_t0)
+        except Exception:  # noqa: BLE001
+            pass
     except StopAsyncIteration:
         first = b""
     except Exception:  # noqa: BLE001
@@ -2517,6 +2570,8 @@ async def _try_stream_segment(request: Request, src_url: str, fwd: dict,
                 dt = time.time() - t0
                 if nbytes and dt > 0.05:
                     _remember_speed(picked, nbytes / 1024.0 / dt)
+                    import perfmetrics
+                    perfmetrics.record("seg_throughput_kbps", nbytes / 1024.0 / dt)
             except Exception:
                 _log.debug("pump failed", exc_info=True)
                 pass
