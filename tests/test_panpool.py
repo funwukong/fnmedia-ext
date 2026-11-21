@@ -1,5 +1,6 @@
 import asyncio
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -32,7 +33,38 @@ def test_timeout_is_counted_and_propagated():
         return False
 
     assert _run(main()) is True
-    assert panpool.stats()["timeouts"] >= 1
+    st = panpool.stats()
+    assert st["timeouts"] >= 1
+    assert st["pending"] >= 1
+    assert st["running"] >= 1
+    time.sleep(0.35)
+    assert panpool.stats()["pending"] == 0
+
+
+def test_queue_limit_rejects_overload():
+    panpool.shutdown()
+
+    async def main():
+        gate = threading.Event()
+        tasks = [asyncio.create_task(panpool.run(gate.wait))
+                 for _ in range(panpool.MAX_WORKERS + panpool.MAX_QUEUE)]
+        await asyncio.sleep(0.05)
+        try:
+            await panpool.run(lambda: None)
+        except panpool.PoolBusyError:
+            rejected = True
+        else:
+            rejected = False
+        gate.set()
+        await asyncio.gather(*tasks)
+        return rejected
+
+    assert _run(main()) is True
+    st = panpool.stats()
+    assert st["rejected"] >= 1
+    assert st["pending"] == 0
+    assert st["running"] == 0
+    assert st["queued"] == 0
 
 
 def test_failure_is_counted():

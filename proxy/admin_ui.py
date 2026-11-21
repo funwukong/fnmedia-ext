@@ -1622,7 +1622,7 @@ async function loadRuntimeDiagnostics(){
       '<div class="sm" style="margin-top:6px"><b>搜索源统计</b></div>'+
       (rows.length?'<div class="sm muted">'+rows.map(([id,x])=>esc(id)+": "+x.calls+"次 / 成功"+x.success+" / 失败"+x.failed+" / 取消"+x.cancelled+" / 均值"+x.avg_duration_ms+"ms / 结果"+x.results).join("<br>")+'</div>':'<div class="sm muted">暂无搜索统计</div>')+
       '<div class="sm" style="margin-top:6px"><b>PanSou</b> '+(pansou.runs||0)+'次 · 搜索均值'+(pansou.avg_search_ms||0)+'ms · 转存均值'+(pansou.avg_resolve_ms||0)+'ms · 成功'+(pansou.resolve_ok||0)+' · 失败'+(pansou.failed||0)+' · 等待登录'+(pansou.waiting_login||0)+'</div>'+
-      '<div class="sm" style="margin-top:6px"><b>网盘线程池</b> 并发上限 '+(panw.max_workers||0)+' · 提交 '+(panw.submitted||0)+' · 失败 '+(panw.failed||0)+' · 超时 '+(panw.timeouts||0)+' · 排队峰值 '+(panw.queued_peak||0)+' · 平均等待 '+(panw.avg_wait_ms||0)+'ms</div>'+
+      '<div class="sm" style="margin-top:6px"><b>网盘线程池</b> 运行 '+(panw.running||0)+'/'+(panw.max_workers||0)+' · 排队 '+(panw.queued||0)+'/'+(panw.max_queue||0)+' · 待完成 '+(panw.pending||0)+' · 拒绝 '+(panw.rejected||0)+' · 超时 '+(panw.timeouts||0)+' · 峰值 '+(panw.queued_peak||0)+' · 平均等待 '+(panw.avg_wait_ms||0)+'ms</div>'+
       '<div class="sm" style="margin-top:6px"><b>运行趋势</b> RSS '+(trend.rss_mb||0)+'MB（峰值 '+(trend.rss_peak_mb||0)+'MB）· 缓存 '+(trend.cache_mb||0)+'MB · 活跃任务 '+(trend.tasks||0)+' · 采样 '+(trend.samples||0)+'</div>'+
       '<div class="sm" style="margin-top:6px"><b>最近后台任务</b> '+(hist.length?hist.slice(-8).reverse().map(t=>esc(t.name)+" · "+esc(t.state)+(t.error_type?" ("+esc(t.error_type)+")":"")).join("；"):"暂无任务历史")+'</div>';
   }catch(e){box.textContent="读取运行诊断失败："+e.message;}
