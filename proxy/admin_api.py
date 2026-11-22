@@ -198,7 +198,9 @@ async def ext_cache_status(request: Request):
 async def ext_cache_clear(request: Request):
     """一键清除指定缓存。targets: search/charts/catalog/titles/health 的子集；
     省略或 ["all"] 清前四项（health 默认保留，避免冷启动选源退化）。"""
-    from app import _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, chart_cache, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import (_AGG_CACHE, _AGG_BYTES, _AGG_INFLIGHT,
+                     _schedule_routes_refresh, _search_cache, app,
+                     chart_cache, store)  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     body = await request.json()
     targets = body.get("targets")
     if not targets or targets == ["all"]:
@@ -206,16 +208,83 @@ async def ext_cache_clear(request: Request):
     targets = {str(t) for t in targets}
     done, need_restart = [], False
     if "search" in targets:
-        _search_cache.clear(); _AGG_CACHE.clear(); done.append("search")
+        _search_cache.clear()
+        _AGG_CACHE.clear()
+        # 单飞字典不清会把旧请求结果回填进刚清空的缓存；字节记账不同步
+        # 归零会让下次 put 过早淘汰新条目（结果变少、显得"串"）。
+        _AGG_INFLIGHT.clear()
+        _AGG_BYTES.clear()
+        import app as _appmod
+        _appmod._AGG_BYTES_TOTAL = 0
+        done.append("search")
     if "charts" in targets:
         try:
-            chart_cache.reset(); done.append("charts")
+            chart_cache.reset()
+            # 榜单绑定落盘不清，启动恢复时会把旧榜单的播放线路绑到
+            # 新榜单同名/近似片名上（分类串来源之一）。
+            chartbind.bind_store.clear()
+            done.append("charts")
         except Exception:
             _log.debug("ext_cache_clear failed", exc_info=True)
             pass
     if "catalog" in targets:
         try:
-            catalog.reset(); done.append("catalog")
+            catalog.reset()
+            # store 里缓存的 brief 是打标签时的快照（catalog_cat/catalog_route）。
+            # catalog.reset 只清 catalog 自己的 dense/路由，store 里的旧标签
+            # 还在，libfilter 按 stale 标签归库 → 分类串。这里按当前 type_name
+            # 重算新标签；重算不出的摘掉 catalog_* 标签，让该 brief 只按线路
+            # provider 归独立库，下次浏览重新入库覆盖。
+            import catalog as _catalog
+            removed = 0
+            with store._lock:
+                for _g, b in list(store._titles.items()):
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("locator", {}).get("kind") == "t4":
+                        continue
+                    if not (b.get("catalog_cat") or b.get("catalog_route")
+                            or b.get("catalog_scope") or b.get("catalog_source")):
+                        continue
+                    tn = str(b.get("type_name") or "")
+                    n = tn.strip()
+                    new_cat = ""
+                    welfare = _catalog._welfare_on() and any(
+                        k in n for k in (_catalog._ADULT_KW
+                                         + _catalog._JP_ADULT_KW
+                                         + _catalog._DOMESTIC_KW
+                                         + _catalog._EUROPE_ADULT_KW))
+                    if welfare:
+                        if any(k in n for k in _catalog._JP_ADULT_KW):
+                            new_cat = _catalog.JP_ADULT_CAT
+                        elif any(k in n for k in _catalog._EUROPE_ADULT_KW):
+                            new_cat = _catalog.EUROPE_ADULT_CAT
+                        elif any(k in n for k in _catalog._DOMESTIC_KW) \
+                                and "写真热舞" not in n:
+                            new_cat = _catalog.DOMESTIC_CAT
+                        elif any(k in n for k in _catalog._ADULT_KW):
+                            new_cat = _catalog.ADULT_CAT
+                    else:
+                        new_cat = _catalog.classify(n) or ""
+                    if new_cat:
+                        b["catalog_cat"] = new_cat
+                        route = b.get("catalog_route")
+                        if isinstance(route, dict):
+                            b["catalog_route"] = dict(route, cat=new_cat)
+                        else:
+                            b.pop("catalog_route", None)
+                        if b.get("catalog_scope") != _catalog.AGG_SCOPE:
+                            b.pop("catalog_scope", None)
+                            b.pop("catalog_source", None)
+                    else:
+                        for k in ("catalog_cat", "catalog_route",
+                                  "catalog_scope", "catalog_source"):
+                            b.pop(k, None)
+                    removed += 1
+                if removed:
+                    store.bump_titles_version()
+                    store._schedule_flush()
+            done.append("catalog")
             _schedule_routes_refresh()
         except Exception:
             _log.debug("ext_cache_clear failed", exc_info=True)
