@@ -170,7 +170,7 @@ def test_cache_status_and_clear(tmp_path, monkeypatch):
         r = cli.get("/v/api/ext/cache")
         assert r.status_code == 200
         d = r.json()["data"]
-        assert set(d) >= {"titles", "charts", "catalog", "search", "health"}
+        assert set(d) >= {"titles", "charts", "catalog", "search", "health", "playback"}
         assert d["search"]["entries"] == 1
         r = cli.post("/v/api/ext/cache/clear",
                      json={"targets": ["search", "charts", "catalog"]})

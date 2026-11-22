@@ -34,6 +34,9 @@ ADULT = True
 DRPY = True
 # <<< PRIVATE:FEATURE_FLAGS
 
+# P2-A 播放前轻量预检开关（完整构建开启；公开构建同样保留，非剥离特性）
+P2A_PLAYCHECK = True
+
 # 无论何种构建都恒为真的安全红线开关（仅用于语义清晰，不参与剥离）
 REDLINE = True
 

@@ -429,7 +429,10 @@ async def _find_playable(picked: dict, request: Request,
 # 内置线路全死后，按片名全网回源找到的可播记录：原 media_guid -> 真实可播 og。
 # 让播放器后续仍用原 mg 请求时能命中新记录（跨同名记录播放）。
 _MEDIA_REDIRECT: dict[str, str] = {}
-_MEDIA_REDIRECT_MAX = 2000  # 无 TTL 的重定向表：只存可再生的回源结果，超限删最旧
+_MEDIA_REDIRECT_TS: dict[str, float] = {}
+_MEDIA_REDIRECT_MAX = 2000  # 只存可再生的回源结果，超限删最旧
+_MEDIA_REDIRECT_TTL = 30 * 60  # 30 分钟：回源别名只保活一次播放会话附近，
+# 过期后重新走回源，避免旧记录长期把同一个 mg 指到已失效的源。
 _RESURRECT_FAIL: dict[str, float] = {}
 _RESURRECT_FAIL_MAX = 2000  # 10 分钟失败冷却表：超限删最旧
 _RESURRECT_FAIL_TTL = 10 * 60
@@ -443,6 +446,32 @@ def _bounded_put(d: dict, key, value, cap: int) -> None:
     d[key] = value
     while len(d) > cap:
         d.pop(next(iter(d)), None)
+
+
+def _media_redirect_get(mg: str) -> str:
+    """读回源别名；过期即删并返回空（防旧映射长期指向失效源）。"""
+    if not mg:
+        return ""
+    og = _MEDIA_REDIRECT.get(mg)
+    if not og:
+        return ""
+    ts = _MEDIA_REDIRECT_TS.get(mg, 0.0)
+    if ts and time.time() - ts > _MEDIA_REDIRECT_TTL:
+        _MEDIA_REDIRECT.pop(mg, None)
+        _MEDIA_REDIRECT_TS.pop(mg, None)
+        return ""
+    return og
+
+
+def _media_redirect_put(mg: str, og: str) -> None:
+    """写回源别名 + 时间戳；超容量时清掉已被淘汰条目的孤儿时间戳。"""
+    if not mg or not og:
+        return
+    _bounded_put(_MEDIA_REDIRECT, mg, og, _MEDIA_REDIRECT_MAX)
+    _MEDIA_REDIRECT_TS[mg] = time.time()
+    if len(_MEDIA_REDIRECT_TS) > _MEDIA_REDIRECT_MAX + 64:
+        for k in [k for k in _MEDIA_REDIRECT_TS if k not in _MEDIA_REDIRECT]:
+            _MEDIA_REDIRECT_TS.pop(k, None)
 _RESURRECT_FUT: dict[str, asyncio.Future] = {}  # 规范化片名 -> 后台回源任务（单飞）
 
 
@@ -481,7 +510,7 @@ async def _resurrect_start(picked: dict, mg: str) -> str:
     nkey = re.sub(r"[\s\W_]+", "", title.lower())
     if not nkey:
         return "fail"
-    if mg and mg in _MEDIA_REDIRECT:
+    if mg and _media_redirect_get(mg):
         return "ok"
     if time.time() - _RESURRECT_FAIL.get(nkey, 0) < _RESURRECT_FAIL_TTL:
         return "fail"
@@ -560,7 +589,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
                     continue
                 # 命中：记录可播 og，并补一条可解析线路到该 og（_pick_episode 用）
                 if mg:
-                    _bounded_put(_MEDIA_REDIRECT, mg, og, _MEDIA_REDIRECT_MAX)
+                    _media_redirect_put(mg, og)
                 _log.info("内置线路全死，全网回源《%s》-> %s", title, ln)
                 return True
         return False
@@ -944,6 +973,58 @@ def _race_candidates(picked: dict, seed: str = "") -> list[dict]:
 
     cands.sort(key=rank)
     return cands
+
+
+async def _playcheck_target(picked: dict, request: Request) -> dict | None:
+    """P2-A 播放前轻量预检：缓存地址可能已死（上游签名过期/删流/换线）。
+
+    只对「非 HLS 且非网盘代理」的直链做一次 2KB Range 探测（最小开销）：
+    4xx/5xx、JSON 错误页、非媒体 content-type 判死；判死后故障切换到
+    首个可用线路并返回新目标。HLS / 网盘代理 / 无地址的线跳过预检，
+    由现有清单构建 + 首分片验活兜底。返回原目标表示预检通过，返回 None
+    表示无需预检（调用方沿用原目标）。"""
+    url = str(picked.get("url") or picked.get("m3u8") or "").strip()
+    if not url or "/v/api/ext/pan/" in url:
+        return None
+    if picked.get("m3u8") or re.search(r"\.m3u8(\?|$)", url.split("?", 1)[0], re.I):
+        return None
+    from app import ext_client  # noqa: E402,F401 延迟导入：避免循环导入
+    headers = dict(picked.get("headers") or {"User-Agent": "Mozilla/5.0"})
+    headers["Range"] = _PROBE_RANGE
+    cli = ext_client(request)
+    try:
+        req = cli.build_request("GET", url, headers=headers)
+        r = await cli.send(req, follow_redirects=True)
+    except Exception:
+        _log.debug("playcheck probe failed: line=%s", picked.get("line"),
+                   exc_info=True)
+        return None  # 探测异常不判死，交由下游正常播放兜底
+    ctype = (r.headers.get("content-type") or "").lower()
+    body_head = b""
+    try:
+        body_head = await r.aread()
+    except Exception:
+        _log.debug("playcheck read failed", exc_info=True)
+    finally:
+        try:
+            await r.aclose()
+        except Exception:
+            pass
+    if r.status_code < 400 and "json" not in ctype \
+            and body_head[:1] not in (b"{", b"["):
+        return None  # 预检通过：沿用原目标
+    _log.info("P2-A 预检判死: line=%s status=%s ctype=%s 《%s》%s",
+              picked.get("line"), r.status_code, ctype,
+              picked.get("title"), picked.get("ep_title") or "")
+    sk = sourcehealth.source_key_of(picked.get("line"), picked)
+    if sk:
+        sourcehealth.record(sk, False, 0.0, level="stream")
+    fresh = await _find_playable(picked, request, skip_current=True)
+    if fresh is not None:
+        return fresh
+    return picked  # 没有备选：沿用原目标，让下游正常报错（与旧行为一致）
+
+
 async def _ensure_playable(picked: dict, request: Request,
                            auto: bool = False) -> dict:
     """取流前确保目标可播。
@@ -958,6 +1039,17 @@ async def _ensure_playable(picked: dict, request: Request,
     from app import _autofail_on, _fastest_on, _fixed_line_direct_on, _line_is_bad, _race_fastest, _resolve_if_needed  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     if not picked or not picked.get("online_guid"):
         return picked
+    # P2-A 播放前轻量预检：对缓存出的播放地址做一次 2KB Range 探测。
+    # 元数据里“有海报和地址”不等于地址还活着——上游签名/删流/换线后，
+    # 旧记录点开就是播放错误。预检只拦死链（403/404/5xx、JSON 错误页、
+    # 非 HLS 非媒体的 200 假活），判死才换线，不拖慢正常起播。
+    if features.P2A_PLAYCHECK:
+        fresh = await _playcheck_target(picked, request)
+        if fresh is not None and fresh.get("line") != picked.get("line"):
+            _log.info("P2-A 预检换线: %s -> %s 《%s》%s",
+                      picked.get("line"), fresh.get("line"),
+                      picked.get("title"), picked.get("ep_title") or "")
+            picked = fresh
     if auto and _autofail_on() and _fastest_on():
         direct = trusted_predicted_target(picked)
         if direct is not None:
@@ -1097,6 +1189,7 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
 # 上游地址带时效签名，TTL 取短；只缓存成功结果。
 _PLAYLIST_CACHE: dict[str, tuple[float, str]] = {}
 _PLAYLIST_TTL = 120.0
+_PLAYLIST_GEN = 0  # 播放清单缓存代际：源/配置变更 +1，旧在途构建写回旧代际键
 _PLAYLIST_MAX_BYTES = 64 * 1024 * 1024  # 64MB：改写后清单单条可达 1MB+，
 # 600 条数上限最坏 ~600MB；字节上限兜底，超限删最旧（清单可重新抓取生成）。
 _PLAYLIST_SIZE: dict[str, int] = {}     # key -> 该条字节数（len(body)）
@@ -1293,8 +1386,31 @@ def _playlist_cache_key(picked: dict) -> str:
     # 跳过签名进键：改开关/秒数后旧缓存（另一时间线）不再命中，
     # 避免改后仍播出旧的已剪/未剪清单。
     intro_s, outro_s = _skip_seconds()
-    return (f'{picked.get("online_guid","")}|{picked.get("line","")}|'
+    return (f'g{_PLAYLIST_GEN}|{picked.get("online_guid","")}|'
+            f'{picked.get("line","")}|'
             f'{int(picked.get("index",0) or 0)}|sk{intro_s}-{outro_s}')
+
+
+def invalidate_playback_caches() -> int:
+    """源/配置变更后失效播放派生缓存：清单、紧凑分片、首片正缓存、回源别名。
+
+    代际号并入清单缓存键：清理前已在途的旧构建即使晚到，也只会写回旧代际
+    键，不会被新请求命中，杜绝「清完缓存又瞬间回到旧清单」。
+    坏线/最快线/吞吐记忆属线路画像，保留不动作，避免清一次缓存把选源质量
+    也清零（那会让下一次起播重新全量竞速、变慢）。
+    """
+    global _PLAYLIST_GEN, _PLAYLIST_BYTES
+    _PLAYLIST_GEN += 1
+    _PLAYLIST_CACHE.clear()
+    _PLAYLIST_SIZE.clear()
+    _PLAYLIST_BYTES = 0
+    _PLAYLIST_FUT.clear()
+    _SEG_OK_CACHE.clear()
+    for rid in list(_HLS_REG):
+        _hls_reg_drop(rid)
+    _MEDIA_REDIRECT.clear()
+    _MEDIA_REDIRECT_TS.clear()
+    return _PLAYLIST_GEN
 
 
 def _inject_hls_start(body: str, picked: dict) -> str:
@@ -1548,6 +1664,18 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
 
         _spawn(produce(), name=f"playlist-build-{key}")
     return await fut
+
+
+async def _refresh_playlist_after_stale(mg: str, picked: dict, request: Request):
+    """丢弃首分片已失效的清单，并立即同线路重建一次。
+
+    CDN 签名、Cookie 或 referer 可能在短 TTL 内失效。若只标记线路为坏而
+    保留缓存，后续 main 请求会重复拿到同一份死清单，表现为地址存在但播放
+    502/504。这里把失效判定和缓存淘汰绑定，并复用单飞避免并发重复抓取。
+    """
+    key = _playlist_cache_key(picked)
+    _playlist_cache_drop(key)
+    return await _get_playlist_cached(mg, picked, request)
 
 
 def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
@@ -2056,7 +2184,9 @@ async def hls_preset(mg: str, request: Request):
                 or t.get("_pansou_manual"):
             hls_targets.append(t)
     if not hls_targets:
-        return _err_response("no hls line", 404, "no_hls_line")
+        return _err_response("no hls line", 404, "no_hls_line",
+                             request=request, picked=picked,
+                             stage="无可播清单线路")
 
     # 分辨率探测模块已搁置：线路菜单只显示线路名，不追加分辨率标签。
     idx = int(picked.get("index", 0) or 0)
@@ -2206,6 +2336,7 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
                          bool(picked.get("m3u8")) if picked else None)
             if isinstance(picked, dict):
                 picked["_fetch_fail_reason"] = type(exc).__name__
+                picked["_fetch_fail_host"] = _url_shape(cur)
             return None, cur
         if r.status_code != 200:
             _log.warning("playlist fetch failed: error=HTTP %s url=%s m3u8=%s",
@@ -2213,6 +2344,7 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
                          bool(picked.get("m3u8")) if picked else None)
             if isinstance(picked, dict):
                 picked["_fetch_fail_reason"] = f"HTTP {r.status_code}"
+                picked["_fetch_fail_host"] = _url_shape(cur)
             return None, cur
         text = r.text
         if _is_media_playlist(text):
@@ -2225,7 +2357,9 @@ async def _fetch_playlist(request: Request, url: str, headers: dict,
 
 
 def _err_response(body: str, status: int, code: str,
-                  headers: dict | None = None) -> Response:
+                  headers: dict | None = None, *, request: Request | None = None,
+                  picked: dict | None = None, stage: str = "",
+                  reason: str | None = None) -> Response:
     """HLS 代理错误响应：带 X-Fnmedia-Error 标记，便于客户端/日志区分
     「源站问题」与「代理自身问题」（借 FongMi/TV Proxy.java 的
     X-TV-Proxy-Error 思路）。
@@ -2235,11 +2369,60 @@ def _err_response(body: str, status: int, code: str,
       fetch_fail       上游清单抓取失败（源站不可达/403/超时）
       no_line_alive    全部线路分片失效
       seg_fail         分片代理异常
+      resolve_fail     规则详情解析失败
     """
+    if request is not None:
+        _play_error_note(request, stage, picked, reason)
+    detail = reason or (picked or {}).get("_fetch_fail_reason") or \
+        (picked or {}).get("_pan_error") or ""
     h = {"Cache-Control": "no-store", "X-Fnmedia-Error": code}
+    if detail:
+        h["X-Fnmedia-Reason"] = str(detail)[:180]
     if headers:
         h.update(headers)
     return Response(body, status_code=status, headers=h)
+
+
+def _play_error_note(request: Request, stage: str, picked: dict | None = None,
+                     reason: str | None = None) -> str:
+    """把播放失败原因写入请求级状态，供中间件实时诊断记录。
+
+    只保留脱敏信息：失败阶段、异常/HTTP 原因、URL host 形态、线路源 key。
+    绝不写入完整 URL、query、token 或 Cookie。
+    """
+    p = picked or {}
+    if not reason:
+        reason = (p.get("_fetch_fail_reason") or p.get("_pan_error") or
+                  p.get("resolve_error_msg") or "")
+    host = _url_shape(p.get("url") or "")
+    sk = sourcehealth.source_key_of(p.get("line"), p)
+    parts: list[str] = []
+    if stage:
+        parts.append(stage)
+    if reason:
+        parts.append(str(reason))
+    if host:
+        parts.append(host)
+    if sk:
+        parts.append(str(sk))
+    note = " · ".join(parts)[:120]
+    try:
+        request.state.live_error_note = note
+    except Exception:
+        _log.debug("_play_error_note failed", exc_info=True)
+    return note
+
+
+def _record_stream_failure(picked: dict | None = None) -> None:
+    """把清单/直链构建失败记入源健康取流级画像。
+
+    成功路径已记 sourcehealth.record(True)；真实播放失败此前只标坏线，
+    取流级熔断可能反复撞死站。这里补失败画像。
+    """
+    p = picked or {}
+    sk = sourcehealth.source_key_of(p.get("line"), p)
+    if sk:
+        sourcehealth.record(sk, False, level="stream")
 
 
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/main.m3u8")
@@ -2282,7 +2465,11 @@ async def hls_main(mg: str, request: Request):
         if phwait:
             return _placeholder_playlist_response(mg)
         if failed_g:
+            _play_error_note(request, "无可用在线片源", None,
+                             "榜单绑定未完成/所有源均无结果")
             return Response("暂无可用在线片源", status_code=503)
+        _play_error_note(request, "片源未找到", None,
+                         "集/线路解析为空")
         return Response("not found", status_code=404)
     # P0-3：已知在线标题但打不开任一归属库时直接 -6（403）。
     if _online_target_viewable(request, picked, mg, _ctx=_viewer_ctx(request)) is False:
@@ -2347,15 +2534,19 @@ async def hls_main(mg: str, request: Request):
             # 慢线占位会让客户端一直转圈，而解析失败没有"后台自愈"的可能。
             # resolve_error 由解析链写入（无写入方时该分支不触发，属预留钩子）。
             if picked.get("resolve_error"):
-                return Response(picked.get("resolve_error_msg") or "规则解析失败",
-                                status_code=502)
+                return _err_response(
+                    picked.get("resolve_error_msg") or "规则解析失败",
+                    502, "resolve_fail", request=request, picked=picked,
+                    stage="规则解析失败")
             # 上游 v0.2.42/v0.2.70：普通 CMS 抓流失败直接报错，不返回假 HLS 造成无限占位；
             # 爬虫等慢源仍保留占位自愈通道（后台找线，下次轮询切正片）。
             if _is_slow_line(picked):
                 return _placeholder_playlist_response(mg)
 
+            _record_stream_failure(picked)
             return _err_response("fetch fail upstream", 502,
-                                 "fetch_fail")
+                                 "fetch_fail", request=request, picked=picked,
+                                 stage="清单抓取失败")
         if _mid_switched_from is not None:
             # 静默换线成功出流：清零该集失败计数（下次劣化可再换）
             _mid_switch_note_ok(picked)
@@ -2375,32 +2566,35 @@ async def hls_main(mg: str, request: Request):
         # 网关超时，而是让客户端（本就每 3 秒重试）在后台找到可播源后的下一次请求
         # 经 _MEDIA_REDIRECT 命中新记录。
         if _autofail_on() and not await _verify_rewritten_first_seg(body, request, picked):
-            _mark_line_bad(picked)
-            status = await _resurrect_start(picked, mg)
-            if status == "ok":
-                alt = _pick_episode(mg, request)
-                if alt:
-                    body2 = await _get_playlist_cached(mg, alt, request)
-                    if body2 and body2 is not _NOT_HLS:
+            # 先刷新短时签名/CDN 路由；刷新后的清单有效则继续当前线路。
+            refreshed = await _refresh_playlist_after_stale(mg, picked, request)
+            if refreshed is not None and refreshed is not _NOT_HLS \
+                    and await _verify_rewritten_first_seg(refreshed, request, picked):
+                body = refreshed
+            else:
+                _mark_line_bad(picked)
+                status = await _resurrect_start(picked, mg)
+                if status == "ok":
+                    alt = _pick_episode(mg, request)
+                    if alt:
+                        body2 = await _get_playlist_cached(mg, alt, request)
+                        if body2 and body2 is not _NOT_HLS:
 
-                        return Response(body2, media_type="application/vnd.apple.mpegurl",
-                                        headers={"Cache-Control": "no-cache",
-                                                 "Access-Control-Allow-Origin": "*"})
-            if status == "fail":
+                            return Response(body2, media_type="application/vnd.apple.mpegurl",
+                                            headers={"Cache-Control": "no-cache",
+                                                     "Access-Control-Allow-Origin": "*"})
+                if status == "fail":
 
-                return _err_response(
-                    "暂无可播线路（该源分片已失效，且未找到其他可用源）",
-                    502, "no_line_alive")
-            # running：慢源回直播式占位（200），播放器周期重拉 main 即转正，不弹错；
-            # 普通源仍让客户端 3 秒后重试，不返回占位视频（上游 v0.2.42）。
-            if _is_slow_line(picked):
+                    return _err_response(
+                        "暂无可播线路（该源分片已失效，且未找到其他可用源）",
+                        502, "no_line_alive", request=request, picked=picked,
+                        stage="首片失效", reason="首片验证失败且未找到其他线路")
+                if _is_slow_line(picked):
 
-                return _placeholder_playlist_response(mg)
-            # running：让客户端稍候重试，不返回错误清单
-
-            return Response("正在为你寻找可用线路…", status_code=503,
-                            headers={"Retry-After": "3",
-                                     "Access-Control-Allow-Origin": "*"})
+                    return _placeholder_playlist_response(mg)
+                return Response("正在为你寻找可用线路…", status_code=503,
+                                headers={"Retry-After": "3",
+                                         "Access-Control-Allow-Origin": "*"})
         _sk = sourcehealth.source_key_of(picked.get("line"), picked)
         if _sk:
             # 播出成功：取流域复活（只清取流级计数，搜索级计数不动）。
@@ -2467,8 +2661,10 @@ async def hls_main(mg: str, request: Request):
     except asyncio.TimeoutError:
         # 解析已失败（picked 上已有原因）时不再给占位：解析失败没有自愈可能。
         if picked.get("resolve_error"):
-            return Response(picked.get("resolve_error_msg") or "规则解析失败",
-                            status_code=502)
+            return _err_response(
+                picked.get("resolve_error_msg") or "规则解析失败",
+                502, "resolve_fail", request=request, picked=picked,
+                stage="规则解析失败")
         return _placeholder_playlist_response(mg)
 
 
@@ -2769,7 +2965,9 @@ async def hls_seg(mg: str, request: Request):
         _log.warning("seg fetch fail %s %s", type(exc).__name__,
                      urllib.parse.urlsplit(src_url).netloc)
         return _err_response(f"seg fail {type(exc).__name__}", 502,
-                             "seg_fail")
+                             "seg_fail", request=request, picked=picked,
+                             stage="分片请求失败",
+                             reason=type(exc).__name__)
     body = r.content
     # 播放中分片耗时（供静默换线决策）：整段缓冲回退路径同样记录完整下载耗时。
     # （抄上游 v1.1.0 app.py:7404：PanSou 手动线不计入线路测速统计。）
@@ -2821,6 +3019,15 @@ async def hls_seg(mg: str, request: Request):
         drop.update({"content-range", "accept-ranges"})
     if unwrapped:
         drop.add("content-type")
+    if r.status_code >= 400:
+        try:
+            _record_stream_failure(picked)
+            request.state.live_error_note = (
+                f"分片HTTP{r.status_code} · {_url_shape(src_url)} · "
+                f"{sourcehealth.source_key_of((picked or {}).get('line'), picked)}"
+            )[:120]
+        except Exception:
+            _log.debug("seg error note failed", exc_info=True)
     h = _safe_response_headers(r.headers, drop)
     h["Access-Control-Allow-Origin"] = "*"
     h["Content-Length"] = str(len(body))
@@ -2869,7 +3076,15 @@ async def hls_compact(mg: str, request: Request):
         r = await ext_get_retry(request, src_url, fwd, tries=4, timeout=30.0)
     except Exception as exc:  # noqa: BLE001
         _log.warning("hls compact seg fail %s", type(exc).__name__)
-        return Response("seg fail", status_code=502)
+        try:
+            _play_error_note(request, "紧凑分片请求失败", None,
+                             type(exc).__name__)
+            request.state.live_error_note = \
+                f"紧凑分片失败 · {type(exc).__name__} · {_url_shape(src_url)}"
+        except Exception:
+            _log.debug("compact error note failed", exc_info=True)
+        return _err_response("seg fail", 502, "seg_fail", request=request,
+                             reason=type(exc).__name__, stage="紧凑分片请求失败")
     body = r.content
     ctype = r.headers.get("content-type", "")
     response_status = r.status_code
@@ -2901,6 +3116,13 @@ async def hls_compact(mg: str, request: Request):
     h["Access-Control-Allow-Origin"] = "*"
     h["Content-Length"] = str(len(body))
     h.setdefault("Content-Type", ctype or "video/mp2t")
+    if r.status_code >= 400:
+        try:
+            request.state.live_error_note = (
+                f"紧凑分片HTTP{r.status_code} · {_url_shape(src_url)}"
+            )[:120]
+        except Exception:
+            _log.debug("compact status note failed", exc_info=True)
     return Response(content=body, status_code=response_status, headers=h)
 
 

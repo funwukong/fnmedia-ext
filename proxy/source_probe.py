@@ -24,6 +24,7 @@ _log = get_logger("source_probe")
 
 _state: dict = {"running": False, "total": 0, "done": 0, "alive_count": 0,
                 "unknown_count": 0, "removed_count": 0,
+                "runtime_missing_count": 0,
                 "results": [], "started_at": 0.0, "error": ""}
 _task: asyncio.Task | None = None
 _run_id = 0
@@ -67,27 +68,49 @@ async def start(sources: list[dict], *, concurrency: int = 4,
         lim = 0
     targets = all_src if lim <= 0 else all_src[:lim]
     _state.update(running=True, total=len(targets), done=0, alive_count=0,
-                  unknown_count=0, removed_count=0,
+                  unknown_count=0, removed_count=0, runtime_missing_count=0,
                   results=[], started_at=time.time(), error="")
     cursor = 0
     lock = asyncio.Lock()
 
     async def one(source: dict, index: int):
         removed = False
+        timed_out = False
         try:
-            result = await _default_probe()(source)
+            result = await asyncio.wait_for(_default_probe()(source), timeout=8.0)
+        except asyncio.TimeoutError:
+            timed_out = True
+            _log.debug("source probe timeout: id=%s", source.get("id"))
+            result = {"ok": False, "alive": None, "reachable": False,
+                      "elapsed_ms": 8000, "count": 0, "error": "TimeoutError",
+                      "stage": "timeout", "reason": "探活超时，未定论",
+                      "hit": "", "tried": []}
         except Exception as exc:  # noqa: BLE001
             _log.debug("source probe failed: id=%s", source.get("id"),
                        exc_info=True)
-            # 地址非法/配置残缺属于确定性失效（重试也不会好），
-            # TLS 证书链缺失/协议错误同理（站点侧问题，换网络不会好），
-            # 记为 alive=False 交给下面的删除判据；其余网络类异常才算未知。
-            _fatal = isinstance(exc, (ValueError, KeyError)) or \
-                bool(getattr(providers, "_is_site_side_error", lambda e: False)(exc))
-            result = {"alive": False if _fatal else None, "ok": False,
-                      "elapsed_ms": 0,
-                      "count": 0, "error": type(exc).__name__,
-                      "hit": "", "tried": []}
+            # 运行时缺失（Node sidecar / spider-runner 没起来）绝不能判死，
+            # 报「未定论」由人工判断；地址非法/配置残缺才判死。
+            if providers._is_runtime_missing(exc):
+                result = {"alive": None, "ok": False, "reachable": False,
+                          "elapsed_ms": 0, "count": 0,
+                          "error": type(exc).__name__, "stage": "runtime",
+                          "reason": f"{providers._source_kind_of(source)} "
+                                    f"运行时不可用，未参与判定",
+                          "hit": "", "tried": []}
+            else:
+                # 地址非法/配置残缺属于确定性失效（重试也不会好），
+                # TLS 证书链缺失/协议错误同理（站点侧问题，换网络不会好），
+                # 记为 alive=False 交给下面的删除判据；其余网络类异常才算未知。
+                _fatal = isinstance(exc, (ValueError, KeyError)) or \
+                    bool(getattr(providers, "_is_site_side_error",
+                                 lambda e: False)(exc))
+                result = {"alive": False if _fatal else None, "ok": False,
+                          "elapsed_ms": 0,
+                          "count": 0, "error": type(exc).__name__,
+                          "stage": "fatal" if _fatal else "network",
+                          "reason": (f"配置错误：{type(exc).__name__}" if _fatal
+                                     else f"网络层失败：{type(exc).__name__}"),
+                          "hit": "", "tried": []}
         if rid != _run_id:
             return
         # 失效/风险自动处理：只有 probe 明确给出 JSON 判据（ok 且
@@ -113,6 +136,8 @@ async def start(sources: list[dict], *, concurrency: int = 4,
                 key = (sourcehealth.source_key_of(source.get("id"), source)
                        or source.get("id", ""))
         except Exception:  # noqa: BLE001
+            _log.debug("probe health key resolve failed: id=%s",
+                       source.get("id"), exc_info=True)
             key = source.get("id", "") or ""
         if key and result.get("alive") is not None:
             try:
@@ -122,17 +147,20 @@ async def start(sources: list[dict], *, concurrency: int = 4,
             except Exception:  # noqa: BLE001
                 _log.debug("probe health record failed: id=%s",
                            source.get("id"), exc_info=True)
+        runtime_missing = "运行时不可用" in str(result.get("reason") or "")
         row = {"id": source.get("id"), "name": source.get("name", ""),
                "index": index,
-               "alive": bool(result.get("alive")), "hit": result.get("hit", ""),
+               "alive": alive_now, "hit": result.get("hit", ""),
                "tried": result.get("tried", []), "count": result.get("count", 0),
                "elapsed_ms": result.get("elapsed_ms", 0),
                "status": result.get("status", 0), "error": result.get("error", ""),
                "removed": removed, "reason": result.get("reason", ""),
+               "stage": ("timeout" if timed_out else result.get("stage", "")),
                # alive=True/False 是结论，None 是「没测出结论」（网络层失败），
                # 前端必须区分，否则 healthy 源会被显示成失效。
                "state": ("alive" if alive_now is True
-                         else "dead" if alive_now is False else "unknown"),
+                         else "dead" if alive_now is False
+                         else "runtime-missing" if runtime_missing else "unknown"),
                "dead": sourcehealth.is_dead(key) if key else False}
         async with lock:
             _state["results"].append(row)
@@ -140,6 +168,8 @@ async def start(sources: list[dict], *, concurrency: int = 4,
             _state["alive_count"] += int(alive_now is True)
             if alive_now is None:
                 _state["unknown_count"] += 1
+            if runtime_missing:
+                _state["runtime_missing_count"] += 1
             _state["removed_count"] += int(bool(removed))
 
     async def worker():

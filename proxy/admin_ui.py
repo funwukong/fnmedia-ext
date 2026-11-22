@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """飞牛影视·在线扩展 管理台（单文件 HTML，无外部依赖）。
 
 布局对齐 fnmusic-ext 管理台：桌面左侧导航 + 移动端底部导航，多页卡片。
@@ -297,7 +297,7 @@ th{color:var(--muted);font-weight:500;font-size:12px}
 tr:last-child td{border-bottom:0}
 .meta{color:var(--muted);font-size:12px;word-break:break-all}
 .del{color:var(--err);background:transparent;border:0;cursor:pointer;font-size:13px;padding:4px 6px}
-.st{font-size:12px;white-space:nowrap}.st.ok{color:var(--ok)}.st.bad{color:var(--err)}.st.wait{color:var(--muted)}
+.st{font-size:12px;white-space:nowrap}.st.ok{color:var(--ok)}.st.bad{color:var(--err)}.st.wait{color:var(--muted)}.st.warn{color:var(--warn)}
 
 /* ---------- 管理页开关/缓存卡片（移植上游 v0.2.54/69：导入按钮、缓存网格、代理模式段） ---------- */
 label.btn,label.btn-sm{display:inline-flex;align-items:center;justify-content:center;gap:6px;
@@ -1093,10 +1093,10 @@ body{isolation:isolate}
       <!-- 一键清理：只留一个按钮，分项管理已去掉（用户要求） -->
       <div class="card">
         <div class="card-title">🗑 一键清理
-          <span class="hint" style="font-weight:400">清除搜索、榜单、海量库运行缓存，不重启服务；后续访问自动重建</span>
+          <span class="hint" style="font-weight:400">清除搜索、榜单、海量库、播放缓存（清单/分片/首片）运行缓存，不重启服务；线路画像保留，后续访问自动重建</span>
         </div>
         <div class="btn-row">
-          <button class="small danger" onclick="clearCaches(['search','charts','catalog'])">一键清理运行缓存</button>
+          <button class="small danger" onclick="clearCaches(['search','charts','catalog','playback'])">一键清理运行缓存</button>
         </div>
       </div>
     </section>
@@ -2016,7 +2016,7 @@ async function savePreferQ(){
 /* 资源站分页/筛选（P1-16）：纯前端分页/筛选，不改后端接口；CFG.sources
    已在页内。筛选或切换启用状态时回到第 1 页；列表缩短时 renderSources
    会把超出的页码夹回最后一页。 */
-let SRC_FILTER="",SRC_ENABLED="all",SRC_EXPANDED=false;
+let SRC_FILTER="",SRC_ENABLED="all",SRC_EXPANDED=false,SRC_TEST_RESULTS={};
 function srcFiltered(){const q=SRC_FILTER.trim().toLowerCase();
   return (CFG.sources||[]).filter(s=>{
     if(SRC_ENABLED==="on"&&!s.enabled)return false;
@@ -2050,6 +2050,7 @@ let SRC_GEN=0, SRC_ROWS_HTML=[], SRC_RAF=0;
 
 function srcRowHtml(src){
   let extraCell="",extraTag="";
+  const testResult=SRC_TEST_RESULTS[src.id];
   // >>> PRIVATE:ADULT
   extraCell=FEAT_ADULT?`
       <label title="🔞 限制级独立库（18+）：与主库隔离、不进全局搜索；开启即表示你已年满 18 周岁并自行承担责任"
@@ -2073,7 +2074,7 @@ function srcRowHtml(src){
       </td>
       <td class="src-name" title="${esc(src.api)}"><div style="font-weight:500">${esc(src.name)}${src.kind==="t4"?'<span class="tag">T4</span>':''}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
         <div class="meta">${esc(src.api)}</div></td>
-      <td class="st wait" data-st>未测</td>
+      <td class="st ${testResult?testResult.cls:'wait'}" data-st>${testResult?testResult.html:'未测'}</td>
       <td><button class="small" data-test>测试</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
@@ -2211,31 +2212,50 @@ async function toggleAdult(id,on,el){
   else{toast(r.msg||"操作失败","fail");renderSources();}
 }
 // <<< PRIVATE:ADULT
+function probeStageText(d){const s=d&&d.stage;if(!s)return"";const m={timeout:"超时",network:"网络",runtime:"运行时",fatal:"配置",probe:"探测",unknown:"未定论"};return m[s]||s;}
+function probeFailText(d,prefix){const st=probeStageText(d);const reason=(d&&(d.reason||d.error))||"失败";return (prefix||"✕ ")+(st?("["+st+"] "):"")+reason;}
 function setSt(tr,html,cls){const el=tr.querySelector("[data-st]");el.className="st "+cls;el.innerHTML=html;}
+function rememberSourceStatus(id,html,cls){SRC_TEST_RESULTS[id]={html,cls};const tr=$("srcRows").querySelector(`tr[data-id="${CSS.escape(id)}"]`);if(tr)setSt(tr,html,cls);}
 async function testOne(id,tr){
   setSt(tr,"测试中…","wait");tr.querySelector("[data-test]").disabled=true;
-  try{const r=await jpost("/v/api/ext/source/test",{id});const d=r.data;
-    if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
-    else setSt(tr,"✕ "+(d.error||"失败")+(d.elapsed_ms?(" · "+d.elapsed_ms+"ms"):""),"bad");
-  }catch(e){setSt(tr,"✕ "+e,"bad");}
+  try{const r=await jpost("/v/api/ext/source/test",{id});const d=r.data||{};
+    if(d.ok)rememberSourceStatus(id,`✓ ${d.elapsed_ms||0}ms · ${d.count||0}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
+    else if(d.state==="runtime-missing"||d.reason&&d.reason.includes("运行时不可用"))
+      rememberSourceStatus(id,"? "+d.reason,"warn");
+    else rememberSourceStatus(id,probeFailText(d,d.state==="unknown"?"? ":"✕ ")+(d.elapsed_ms?(" · "+d.elapsed_ms+"ms"):""),d.state==="unknown"?"warn":"bad");
+  }catch(e){rememberSourceStatus(id,"✕ 请求失败："+String(e),"bad");}
   tr.querySelector("[data-test]").disabled=false;
 }
 async function testAll(){
   toast("正在并发测速…");
+  const buttons=[...document.querySelectorAll('#page-sources .card-title button')];
+  buttons.forEach(b=>b.disabled=true);
   // 分页后仅当前页的行在 DOM 里：测速请求仍覆盖全部源，这里只刷新当前页行的状态。
   $$("#srcRows [data-st]").forEach(el=>{el.className="st wait";el.textContent="测试中…";});
-  const r=await jpost("/v/api/ext/source/test-all",{});
-  (r.data||[]).forEach(d=>{const tr=$("srcRows").querySelector(`tr[data-id="${d.id}"]`);if(!tr)return;
-    if(d.ok)setSt(tr,`✓ ${d.elapsed_ms}ms · ${d.count}条${d.direct?(' · '+d.direct+'直链'):''}`,"ok");
-    else setSt(tr,"✕ "+(d.error||"失败"),"bad");});
-  toast("测速完成");
+  try{
+    const r=await jpost("/v/api/ext/source/test-all",{});
+    if(r.code!==0)throw new Error(r.msg||"全部测速未完成");
+    let alive=0,unknown=0,dead=0;
+    (r.data||[]).forEach(d=>{
+      let html,cls;
+      if(d.ok){alive++;html=`✓ ${d.elapsed_ms||0}ms · ${d.count||0}条${d.direct?(' · '+d.direct+'直链'):''}`;cls="ok";}
+      else if(d.state==="runtime-missing"||d.reason&&d.reason.includes("运行时不可用")){unknown++;html="? "+d.reason;cls="warn";}
+      else if(d.state==="unknown"){unknown++;html="? "+(d.reason||d.error||"未定论");cls="warn";}
+      else{dead++;html=probeFailText(d);cls="bad";}
+      SRC_TEST_RESULTS[d.id]={html,cls};
+    });
+    renderSources();toast(`测速完成：可用 ${alive} · 未定论 ${unknown} · 失效 ${dead}`);
+  }catch(e){toast("批量测速失败："+(e&&e.message||String(e)),"fail");}
+  finally{buttons.forEach(b=>b.disabled=false);}
 }
 /* ---------- CMS 源批量探活（移植上游 beta.3，B9） ----------
    并发 4、700ms 轮询进度、可中止；已完成结果保留在行内状态。 */
 let SRC_PROBE_TIMER=null;
 async function sourceProbeStart(){
   try{
-    await jpost("/v/api/ext/source/probe/start",{concurrency:4});
+    ["srcRefreshBtn","srcProbeBtn"].forEach(id=>{if($(id))$(id).disabled=true;});
+    const started=await jpost("/v/api/ext/source/probe/start",{concurrency:4});
+    if(started.code!==0)throw new Error(started.msg||"批量探活未启动");
     $("srcProbeCancelBtn").style.display="";$("srcProbeProgress").style.display="";
     if(SRC_PROBE_TIMER)clearInterval(SRC_PROBE_TIMER);
     SRC_PROBE_TIMER=setInterval(sourceProbePoll,700);await sourceProbePoll();
@@ -2244,15 +2264,18 @@ async function sourceProbeStart(){
 async function sourceProbePoll(){
   try{
     const r=await jget("/v/api/ext/source/probe/status"),d=r.data||{};
-    const unk=d.unknown_count||0, rem=d.removed_count||0;
+    const unk=d.unknown_count||0, rem=d.removed_count||0, runtime=d.runtime_missing_count||0;
     $("srcProbeProgress").textContent=`探活 ${d.done||0}/${d.total||0} · 可用 ${d.alive_count||0}`
-      +(unk?` · 未定论 ${unk}`:"")+(rem?` · 已删 ${rem}`:"")
+      +(unk?` · 未定论 ${unk}`:"")+(runtime?` · 运行时缺失 ${runtime}`:"")+(rem?` · 已删 ${rem}`:"")
       +` · ${d.running?"进行中":"已结束"}`;
     (d.results||[]).forEach(x=>{
       const tr=$("srcRows").querySelector(`tr[data-id="${x.id}"]`);if(!tr)return;
-      if(x.alive)setSt(tr,`✓ ${x.elapsed_ms||0}ms · ${x.count||0}条 · ${x.hit||"命中"}`,"ok");
-      else if(x.state==="unknown")setSt(tr,"? "+(x.reason||"网络层失败，未定论")+"（未删除）","");
-      else setSt(tr,"✕ "+(x.reason||x.error||"失效"),"bad");
+      let html,cls;
+      if(x.alive===true){html=`✓ ${x.elapsed_ms||0}ms · ${x.count||0}条 · ${x.hit||"命中"}`;cls="ok";}
+      else if(x.state==="runtime-missing"){html="? "+(x.reason||"运行时不可用，未参与判定");cls="warn";}
+      else if(x.state==="unknown"){html="? "+(x.reason||"网络层失败，未定论")+"（未删除）";cls="warn";}
+      else {html=probeFailText(x);cls="bad";}
+      rememberSourceStatus(x.id,html,cls);
       if(x.removed){
         const tds=tr.querySelectorAll("td");
         if(tds.length)tds[0].innerHTML='<span class="muted sm">已删除</span>';
@@ -2261,6 +2284,7 @@ async function sourceProbePoll(){
     if(!d.running){
       if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
       $("srcProbeCancelBtn").style.display="none";
+      ["srcRefreshBtn","srcProbeBtn"].forEach(id=>{if($(id))$(id).disabled=false;});
       if(rem)setTimeout(loadSources,600);
     }
   }catch(e){/* 单次轮询失败下轮再试，不清空已保留结果 */}
@@ -2269,6 +2293,7 @@ async function sourceProbeCancel(){
   await jpost("/v/api/ext/source/probe/cancel",{});
   if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
   $("srcProbeCancelBtn").style.display="none";
+  ["srcRefreshBtn","srcProbeBtn"].forEach(id=>{if($(id))$(id).disabled=false;});
   $("srcProbeProgress").textContent="探活已中止，已完成结果保留";
 }
 /* ---------- CMS 源批量体检（移植上游 v0.2.71） ----------
@@ -2618,7 +2643,7 @@ async function importCmsFile(input){
 
 /* ---------- 搜索设置 / 噪音词 / 缓存（一键清理，2026-11-12 简化：分项管理已去掉） ---------- */
 async function clearCaches(targets){
-  const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",health:"源健康画像"};
+  const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",playback:"播放缓存（清单/分片/首片）",health:"源健康画像"};
   const names=targets.map(t=>labels[t]||t).join("、");
   if(!confirm("确定清除："+names+" ？"))return;
   const r=await jpost("/v/api/ext/cache/clear",{targets});

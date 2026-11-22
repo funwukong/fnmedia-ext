@@ -38,8 +38,10 @@ _LOCK = threading.RLock()
 # 搜索级（默认，上游 v0.2.71）：5 次失败 / 冷却 3 分钟，与取流级数值一致但独立计数。
 DEAD_FAILS = 5
 DEAD_COOLDOWN = 3 * 60           # 判死后冷却 3 分钟，之后给一次试探
-# 取流级（上游 v0.2.70）：5 次失败 / 冷却 3 分钟。
-STREAM_DEAD_FAILS = 5
+# 取流级：3 次失败 / 冷却 3 分钟。P1 收紧——清单/首片/分片失败现在
+# 都会记入取流级（_record_stream_failure），阈值 5 会让反复 502 的
+# 站拖太久才熔断。搜索级仍保持 5 次，两级独立计数互不误杀。
+STREAM_DEAD_FAILS = 3
 STREAM_DEAD_COOLDOWN = 3 * 60
 DEGRADED_FAIL_RATE = 0.6         # 样本足够时，失败率高于此判差
 MIN_SAMPLES = 6                  # 低于此样本不做失败率判级，避免偶发误杀

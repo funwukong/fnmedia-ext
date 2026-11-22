@@ -64,6 +64,8 @@ BASELINE_ROUTES = [
     (('GET',), '/v/api/v1/sys/img/online/{tok_path:path}'),
     (('GET',), '/_ext/healthz'),
     (('GET',), '/v/api/ext/whoami'),
+    (('GET',), '/v/api/ext/perf'),
+    (('POST',), '/v/api/ext/perf/reset'),
     (('GET',), '/v/api/ext/live'),
     (('POST',), '/v/api/ext/live/clear'),
     (('GET',), '/v/api/ext/titles-cache'),
@@ -207,7 +209,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 114
+    assert len(admin_api.admin_router.routes) == 116
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable
@@ -242,6 +244,6 @@ def test_turbo_freeze_after_split():
     assert appmod._race_fastest.__module__ == "app"
     digest = hashlib.sha256(
         inspect.getsource(appmod._race_fastest).encode()).hexdigest()
-    assert digest == "7035805c9d5021d3442a1116e92c2e6b8c4e6e0c236adbf06d22e82e14d2190a"
+    assert digest == "69f174795c656a6cb3daf3689278ef76b246e5f05fa91871482a30fe78c6f062"
     import hls_race
     assert hls_race.ONLINE_PREFIX == appmod.ONLINE_PREFIX

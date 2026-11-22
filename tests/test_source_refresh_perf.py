@@ -49,7 +49,7 @@ def test_refresh_endpoint_returns_full_snapshot(monkeypatch):
     assert "health" in data and isinstance(data["health"], dict)
     assert "routes" in data
     assert isinstance(data["elapsed_ms"], int)
-    assert data["cleared"] == {"search": True, "agg": True}
+    assert data["cleared"] == {"search": True, "agg": True, "playback": True}
     # 每条源都带前端渲染要用的字段
     if data["sources"]:
         s = data["sources"][0]

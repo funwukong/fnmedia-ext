@@ -134,6 +134,61 @@ class PlaylistCacheTtlTests(unittest.IsolatedAsyncioTestCase):
     async def _noop_resolve(self, cand, request):
         return None
 
+    async def test_stale_playlist_is_dropped_and_rebuilt(self):
+        picked = {"online_guid": "g-refresh", "line": "L", "index": 0}
+        key = hracemod._playlist_cache_key(picked)
+        old_body = "#EXTM3U\n#EXTINF:10,\nold.ts\n"
+        new_body = "#EXTM3U\n#EXTINF:10,\nnew.ts\n"
+        hracemod._playlist_cache_put(key, old_body)
+        request = SimpleNamespace(state=SimpleNamespace(_play_mg="g-refresh"))
+
+        async def _build(mg, cand, req):
+            return new_body, "https://x.test/live.m3u8"
+
+        with patch.object(appmod, "_build_playlist_body", new=_build):
+            result = await hracemod._refresh_playlist_after_stale(
+                "g-refresh", picked, request)
+
+        self.assertEqual(result, new_body)
+        self.assertEqual(hracemod._PLAYLIST_CACHE[key][1], new_body)
+        self.assertNotEqual(hracemod._PLAYLIST_CACHE[key][1], old_body)
+
+
+class PlayErrorNoteTests(unittest.IsolatedAsyncioTestCase):
+    """P0 播放错误归因：请求级 note 供实时诊断读取。"""
+
+    def setUp(self):
+        self.request = SimpleNamespace(state=SimpleNamespace())
+
+    def test_error_note_contains_stage_reason_host_and_key(self):
+        picked = {"url": "https://up.example/live/master.m3u8?sig=abc",
+                  "line": "siteA::线路1", "index": 0,
+                  "_fetch_fail_reason": "HTTP 502"}
+        note = hracemod._play_error_note(self.request, "清单抓取失败", picked)
+        self.assertIn("清单抓取失败", note)
+        self.assertIn("HTTP 502", note)
+        self.assertIn("https://up.example/live/master.m3u8", note)
+        self.assertIn("siteA", note)
+        self.assertEqual(self.request.state.live_error_note, note)
+
+    def test_err_response_sets_reason_header(self):
+        picked = {"url": "https://up.example/a.m3u8", "line": "siteA::L",
+                  "_fetch_fail_reason": "HTTP 504"}
+        r = hracemod._err_response("boom", 502, "fetch_fail",
+                                   request=self.request, picked=picked,
+                                   stage="清单抓取失败")
+        self.assertEqual(r.headers.get("X-Fnmedia-Error"), "fetch_fail")
+        self.assertEqual(r.headers.get("X-Fnmedia-Reason"), "HTTP 504")
+        self.assertIn("HTTP 504", self.request.state.live_error_note)
+
+    def test_stream_failure_records_health(self):
+        import sourcehealth
+        picked = {"line": "siteX::线路", "source": "siteX"}
+        hracemod._record_stream_failure(picked)
+        st = sourcehealth.stats("siteX")
+        self.assertGreaterEqual(st.get("samples", 0), 1)
+        sourcehealth.reset("siteX")
+
 
 class AggCacheTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
@@ -445,3 +500,208 @@ class ChartbindTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class P1PlaybackCacheTests(unittest.TestCase):
+    """P1：播放派生缓存加固（回源别名 TTL / 代际失效 / 健康罚时 / 取流熔断）。"""
+
+    def setUp(self):
+        self._saved = {
+            "redirect": dict(hracemod._MEDIA_REDIRECT),
+            "redirect_ts": dict(hracemod._MEDIA_REDIRECT_TS),
+            "playlist": dict(hracemod._PLAYLIST_CACHE),
+            "playlist_size": dict(hracemod._PLAYLIST_SIZE),
+            "playlist_bytes": hracemod._PLAYLIST_BYTES,
+            "playlist_fut": dict(hracemod._PLAYLIST_FUT),
+            "seg_ok": dict(hracemod._SEG_OK_CACHE),
+            "hls_reg": dict(hracemod._HLS_REG),
+            "hls_reg_size": dict(hracemod._HLS_REG_SIZE),
+            "hls_reg_bytes": hracemod._HLS_REG_BYTES,
+            "gen": hracemod._PLAYLIST_GEN,
+            "line_bad": dict(hracemod._LINE_BAD),
+            "line_fast": dict(hracemod._LINE_FAST),
+            "line_speed": dict(hracemod._LINE_SPEED),
+        }
+        self.addCleanup(self._restore)
+        hracemod._MEDIA_REDIRECT.clear()
+        hracemod._MEDIA_REDIRECT_TS.clear()
+        hracemod._PLAYLIST_CACHE.clear()
+        hracemod._PLAYLIST_SIZE.clear()
+        hracemod._PLAYLIST_BYTES = 0
+        hracemod._PLAYLIST_FUT.clear()
+        hracemod._SEG_OK_CACHE.clear()
+        hracemod._HLS_REG.clear()
+        hracemod._HLS_REG_SIZE.clear()
+        hracemod._HLS_REG_BYTES = 0
+        hracemod._LINE_BAD.clear()
+        hracemod._LINE_FAST.clear()
+        hracemod._LINE_SPEED.clear()
+
+    def _restore(self):
+        s = self._saved
+        hracemod._MEDIA_REDIRECT.clear(); hracemod._MEDIA_REDIRECT.update(s["redirect"])
+        hracemod._MEDIA_REDIRECT_TS.clear(); hracemod._MEDIA_REDIRECT_TS.update(s["redirect_ts"])
+        hracemod._PLAYLIST_CACHE.clear(); hracemod._PLAYLIST_CACHE.update(s["playlist"])
+        hracemod._PLAYLIST_SIZE.clear(); hracemod._PLAYLIST_SIZE.update(s["playlist_size"])
+        hracemod._PLAYLIST_BYTES = s["playlist_bytes"]
+        hracemod._PLAYLIST_FUT.clear(); hracemod._PLAYLIST_FUT.update(s["playlist_fut"])
+        hracemod._SEG_OK_CACHE.clear(); hracemod._SEG_OK_CACHE.update(s["seg_ok"])
+        hracemod._HLS_REG.clear(); hracemod._HLS_REG.update(s["hls_reg"])
+        hracemod._HLS_REG_SIZE.clear(); hracemod._HLS_REG_SIZE.update(s["hls_reg_size"])
+        hracemod._HLS_REG_BYTES = s["hls_reg_bytes"]
+        hracemod._PLAYLIST_GEN = s["gen"]
+        hracemod._LINE_BAD.clear(); hracemod._LINE_BAD.update(s["line_bad"])
+        hracemod._LINE_FAST.clear(); hracemod._LINE_FAST.update(s["line_fast"])
+        hracemod._LINE_SPEED.clear(); hracemod._LINE_SPEED.update(s["line_speed"])
+
+    def test_media_redirect_expired_returns_empty_and_pops(self):
+        hracemod._MEDIA_REDIRECT["mg-exp"] = "og-exp"
+        hracemod._MEDIA_REDIRECT_TS["mg-exp"] = (
+            time.time() - hracemod._MEDIA_REDIRECT_TTL - 1)
+        self.assertEqual(hracemod._media_redirect_get("mg-exp"), "")
+        self.assertNotIn("mg-exp", hracemod._MEDIA_REDIRECT)
+        self.assertNotIn("mg-exp", hracemod._MEDIA_REDIRECT_TS)
+
+    def test_media_redirect_put_stamps_and_roundtrips(self):
+        before = time.time()
+        hracemod._media_redirect_put("mg-ok", "og-ok")
+        self.assertEqual(hracemod._media_redirect_get("mg-ok"), "og-ok")
+        self.assertGreaterEqual(hracemod._MEDIA_REDIRECT_TS["mg-ok"], before)
+
+    def test_invalidate_bumps_generation_clears_playback_keeps_line_profiles(self):
+        hracemod._PLAYLIST_CACHE["k"] = (time.time(), "body")
+        hracemod._PLAYLIST_SIZE["k"] = 4
+        hracemod._PLAYLIST_BYTES = 4
+        hracemod._PLAYLIST_FUT["k"] = object()
+        hracemod._SEG_OK_CACHE["https://x.test/1.ts"] = time.time()
+        hracemod._MEDIA_REDIRECT["m"] = "o"
+        hracemod._MEDIA_REDIRECT_TS["m"] = time.time()
+        rid = hracemod._hls_reg_put(["https://x.test/seg.ts"])
+        self.assertTrue(rid)
+        hracemod._LINE_BAD["src::l1"] = time.time() + 300
+        hracemod._LINE_FAST["src::l1"] = "https://x.test/fast"
+        hracemod._LINE_SPEED["src::l1"] = 1234.0
+
+        g0 = hracemod._PLAYLIST_GEN
+        g1 = hracemod.invalidate_playback_caches()
+
+        self.assertEqual(g1, g0 + 1)
+        self.assertEqual(hracemod._PLAYLIST_CACHE, {})
+        self.assertEqual(hracemod._PLAYLIST_SIZE, {})
+        self.assertEqual(hracemod._PLAYLIST_BYTES, 0)
+        self.assertEqual(hracemod._PLAYLIST_FUT, {})
+        self.assertEqual(hracemod._SEG_OK_CACHE, {})
+        self.assertEqual(hracemod._MEDIA_REDIRECT, {})
+        self.assertEqual(hracemod._MEDIA_REDIRECT_TS, {})
+        self.assertEqual(hracemod._HLS_REG, {})
+        # 线路画像属选源质量记忆，清缓存时必须保留，否则下次起播重新全量竞速。
+        self.assertIn("src::l1", hracemod._LINE_BAD)
+        self.assertEqual(hracemod._LINE_FAST.get("src::l1"), "https://x.test/fast")
+        self.assertEqual(hracemod._LINE_SPEED.get("src::l1"), 1234.0)
+
+    def test_playlist_cache_key_contains_generation(self):
+        picked = {"online_guid": "og", "line": "src::line", "index": 1}
+        with patch.object(hracemod, "_skip_seconds", return_value=(0, 0)):
+            k0 = hracemod._playlist_cache_key(picked)
+            hracemod._PLAYLIST_GEN += 1
+            k1 = hracemod._playlist_cache_key(picked)
+        self.assertNotEqual(k0, k1)
+        self.assertTrue(k1.startswith(f"g{hracemod._PLAYLIST_GEN}|"))
+
+    def test_health_penalty_by_grade(self):
+        cand = {"line": "src::line"}
+        for grade, expect in ((None, 0.0), (0, 0.0), (1, 0.15), (2, 0.30),
+                              (3, 0.50), (9, 0.50)):
+            with patch.object(appmod.sourcehealth, "source_key_of", return_value="src"), \
+                    patch.object(appmod.sourcehealth, "display_grade", return_value=grade):
+                self.assertAlmostEqual(appmod._health_penalty(cand), expect, places=6)
+
+    def test_stream_dead_fails_is_three(self):
+        import sourcehealth as shmod
+        self.assertEqual(shmod.STREAM_DEAD_FAILS, 3)
+
+
+class P2APlaycheckTests(unittest.IsolatedAsyncioTestCase):
+    """P2-A 播放前轻量预检（直链死链判死 → 换线）。"""
+
+    def _mk_req(self, status=200, ctype="video/mp4", body=b"xx"):
+        from types import SimpleNamespace
+
+        class _Cli:
+            def __init__(self):
+                self._status = status
+                self._ctype = ctype
+                self._body = body
+
+            def build_request(self, method, url, headers=None):
+                return {"url": url, "headers": headers}
+
+            async def send(self, req, follow_redirects=True):
+                r = SimpleNamespace(
+                    status_code=self._status,
+                    headers={"content-type": self._ctype},
+                )
+                async def aread():
+                    return self._body
+                async def aclose():
+                    return None
+                r.aread = aread
+                r.aclose = aclose
+                return r
+
+        return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(ext=_Cli())))
+
+    async def test_playcheck_passes_healthy_direct(self):
+        hracemod.features.P2A_PLAYCHECK = True
+        req = self._mk_req()
+        picked = {"url": "https://x.test/v.mp4", "line": "s::l1",
+                  "online_guid": "og1", "title": "T"}
+        out = await hracemod._playcheck_target(picked, req)
+        self.assertIsNone(out)  # 预检通过：沿用原目标
+
+    async def test_playcheck_kills_dead_direct_and_falls_back(self):
+        hracemod.features.P2A_PLAYCHECK = True
+        req = self._mk_req(status=404, ctype="text/html", body=b"not found")
+        picked = {"url": "https://x.test/v.mp4", "line": "s::l1",
+                  "online_guid": "og1", "title": "T"}
+        saved = hracemod._find_playable
+        async def fake_find(p, request, skip_current=False):
+            return {**p, "line": "s::l2"}
+        hracemod._find_playable = fake_find
+        try:
+            out = await hracemod._playcheck_target(picked, req)
+        finally:
+            hracemod._find_playable = saved
+        self.assertIsNotNone(out)
+        self.assertEqual(out.get("line"), "s::l2")
+
+    async def test_playcheck_skips_hls_and_pan(self):
+        hracemod.features.P2A_PLAYCHECK = True
+        req = self._mk_req(status=404)
+        for picked in (
+            {"m3u8": "https://x.test/v.m3u8", "line": "s::l1", "online_guid": "og"},
+            {"url": "/v/api/ext/pan/play?fid=1", "line": "s::l1", "online_guid": "og"},
+            {"url": "", "line": "s::l1", "online_guid": "og"},
+        ):
+            out = await hracemod._playcheck_target(picked, req)
+            self.assertIsNone(out)
+
+    async def test_ensure_playable_uses_playcheck_switch(self):
+        hracemod.features.P2A_PLAYCHECK = True
+        req = self._mk_req(status=404, ctype="text/html", body=b"dead")
+        picked = {"url": "https://x.test/v.mp4", "line": "s::l1",
+                  "online_guid": "og1", "title": "T"}
+        saved_find = hracemod._find_playable
+        async def fake_find(p, request, skip_current=False):
+            return {**p, "line": "s::l2"}
+        hracemod._find_playable = fake_find
+        saved_flags = {}
+        for name in ("_autofail_on", "_fastest_on", "_fixed_line_direct_on"):
+            saved_flags[name] = getattr(hracemod, name, None)
+        async def _true(*a, **k):
+            return False
+        try:
+            hracemod._find_playable = fake_find
+            out = await hracemod._ensure_playable(picked, req, auto=False)
+        finally:
+            hracemod._find_playable = saved_find
+        self.assertEqual(out.get("line"), "s::l2")

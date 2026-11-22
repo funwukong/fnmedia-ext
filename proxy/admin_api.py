@@ -54,6 +54,11 @@ from fnlog import get_logger
 
 _log = get_logger("app")  # 与 app._log 同一 logger 对象
 
+# 资源站批量任务互斥：探活与测速都占用相同的源站/运行时资源，不能并行
+# 扫描，否则会争用连接池并覆盖表格状态。
+_source_batch_lock = asyncio.Lock()
+_source_batch_kind = ""
+
 from fastapi import APIRouter
 
 admin_router = APIRouter()
@@ -140,6 +145,26 @@ async def ext_titles_cache_clear(request: Request):
     return {"code": 0, "msg": "已清空，服务重启中"}
 
 
+def _invalidate_playback_caches() -> bool:
+    """源/配置变更后失效播放派生缓存（清单/紧凑分片/首片正缓存/回源别名）。"""
+    try:
+        import hls_race
+        hls_race.invalidate_playback_caches()
+        return True
+    except Exception:
+        _log.debug("_invalidate_playback_caches failed", exc_info=True)
+        return False
+
+
+def _clear_search_caches(*, playback: bool = True) -> None:
+    """源/配置变更后的统一派生缓存失效：搜索/聚合（+ 播放）。"""
+    from app import _AGG_CACHE, _search_cache  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    _search_cache.clear()
+    _AGG_CACHE.clear()
+    if playback:
+        _invalidate_playback_caches()
+
+
 def _cache_sizes() -> dict:
     """各类可清缓存的体积/条数（管理页缓存管理卡）。"""
     from app import _AGG_BYTES_TOTAL, _search_cache, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -169,6 +194,18 @@ def _cache_sizes() -> dict:
         _log.debug("_cache_sizes failed", exc_info=True)
         out["search"] = {"entries": 0, "bytes": 0, "label": "搜索结果内存缓存"}
     try:
+        import hls_race as _hls
+        out["playback"] = {"playlists": len(_hls._PLAYLIST_CACHE),
+                           "hls_registry": len(_hls._HLS_REG),
+                           "segs_ok": len(_hls._SEG_OK_CACHE),
+                           "redirects": len(_hls._MEDIA_REDIRECT),
+                           "label": "播放清单/分片运行缓存"}
+    except Exception:
+        _log.debug("_cache_sizes failed", exc_info=True)
+        out["playback"] = {"playlists": 0, "hls_registry": 0,
+                           "segs_ok": 0, "redirects": 0,
+                           "label": "播放清单/分片运行缓存"}
+    try:
         import pansou as _pansou
         out["pansou"] = {"search_entries": len(_pansou._PANSOU_SEARCH_CACHE),
                           "states": len(_pansou._PANSOU_STATE),
@@ -196,15 +233,15 @@ async def ext_cache_status(request: Request):
 
 @admin_router.post("/v/api/ext/cache/clear")
 async def ext_cache_clear(request: Request):
-    """一键清除指定缓存。targets: search/charts/catalog/titles/health 的子集；
-    省略或 ["all"] 清前四项（health 默认保留，避免冷启动选源退化）。"""
+    """一键清除指定缓存。targets: search/charts/catalog/playback/titles/health
+    的子集；省略或 ["all"] 清前五项（health 默认保留，避免冷启动选源退化）。"""
     from app import (_AGG_CACHE, _AGG_BYTES, _AGG_INFLIGHT,
                      _schedule_routes_refresh, _search_cache, app,
                      chart_cache, store)  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     body = await request.json()
     targets = body.get("targets")
     if not targets or targets == ["all"]:
-        targets = ["search", "charts", "catalog", "titles"]
+        targets = ["search", "charts", "catalog", "playback", "titles"]
     targets = {str(t) for t in targets}
     done, need_restart = [], False
     if "search" in targets:
@@ -295,6 +332,9 @@ async def ext_cache_clear(request: Request):
         except Exception:
             _log.debug("ext_cache_clear failed", exc_info=True)
             pass
+    if "playback" in targets:
+        if _invalidate_playback_caches():
+            done.append("playback")
     if "titles" in targets:
         need_restart = True
         done.append("titles")
@@ -905,8 +945,8 @@ async def ext_config_restore(request: Request):
     data = apply_restore(config, body.get("document") or body,
                          confirm=body.get("confirm") is True)
     if data.get("ok") and data.get("applied"):
-        _search_cache.clear()
-        _AGG_CACHE.clear()
+        _clear_search_caches()
+
         try:
             chart_cache.reset()
             catalog.reset()
@@ -1066,7 +1106,7 @@ async def ext_set_config(request: Request):
                     cur[sid]["adult"] = ch["adult"] and bool(cur[sid].get("standalone"))
         patch["sources"] = list(cur.values())
     config.save(patch)
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     # 方案B 开关切换：即时启用/停用冠军线记忆持久化
     if "prewarm_mode" in patch:
         try:
@@ -1124,7 +1164,7 @@ async def ext_junk_keywords(request: Request):
         kws = config.reset_junk_keywords()
     else:
         kws = config.set_junk_keywords(body.get("keywords", []))
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     return {"code": 0, "msg": "saved", "data": {"junk_keywords": kws}}
 
 
@@ -1210,7 +1250,7 @@ async def ext_source_add(request: Request):
                                  bool(body.get("standalone", False)))
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     if body.get("standalone"):
         _schedule_routes_refresh()
     return {"code": 0, "msg": "added", "data": {"id": info}}
@@ -1287,7 +1327,7 @@ async def ext_source_delete(request: Request):
     ok, info = config.remove_source(body.get("id", ""))
     if not ok:
         return JSONResponse({"code": 404, "msg": info}, status_code=404)
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "deleted"}
 
@@ -1296,7 +1336,7 @@ async def ext_source_delete(request: Request):
 async def ext_source_restore(request: Request):
     from app import _AGG_CACHE, _search_cache, app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     config.restore_builtin()
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     return {"code": 0, "msg": "restored"}
 
 
@@ -1342,12 +1382,16 @@ async def ext_source_refresh(request: Request):
         _search_cache.clear()
         cleared["search"] = True
     except Exception:  # noqa: BLE001
+        _log.debug("refresh: clear search cache failed", exc_info=True)
         cleared["search"] = False
     try:
         _AGG_CACHE.clear()
         cleared["agg"] = True
     except Exception:  # noqa: BLE001
+        _log.debug("refresh: clear agg cache failed", exc_info=True)
         cleared["agg"] = False
+    # 源列表/接口地址可能刚变：旧播放清单与回源别名一律作废。
+    cleared["playback"] = _invalidate_playback_caches()
 
     # 3) 重建分类路由（海量片库按站点分类深翻要用）。
     #    这一步要拉每个 CMS 源的分类表 + 每类探一个代表叶子，站点多时会
@@ -1461,37 +1505,122 @@ async def ext_source_test(request: Request):
             return JSONResponse({"code": 404, "msg": "源不存在"}, status_code=404)
         api = src["api"]
     keyword = (body.get("keyword") or "庆余年").strip()
-    # >>> PRIVATE:DDUO
-    if features.DDUO:
-        xsrc = next((s for s in config.all_sources() if s.get("xsrc")
-                     and (s["id"] == sid or (not sid and s["api"] == api))), None)
-        if xsrc:
-            result = await providers.dduo_probe_source(xsrc, keyword=keyword)
-            return {"code": 0, "msg": "", "data": result}
-    # <<< PRIVATE:DDUO
-    result = await providers.probe_source(api, keyword=keyword, source=src)
+    # 统一走单源隔离逻辑：DDUO、CMS/T4 和其它源类型都要把运行时缺失、
+    # 网络异常转换为可显示结果，避免管理台直接收到 RuntimeError。
+    source_for_test = src or {
+        "id": sid or "custom",
+        "name": body.get("name") or "custom",
+        "api": api,
+        "kind": body.get("kind") or "cms",
+        "enabled": True,
+    }
+    result = await _test_source_one(source_for_test, keyword=keyword)
     return {"code": 0, "msg": "", "data": result}
+
+
+async def _test_source_one(source: dict, *, keyword: str = "庆余年") -> dict:
+    """隔离单个源的测速异常，并按源类型选择探测器。"""
+    try:
+        if features.DDUO and source.get("xsrc"):
+            result = await providers.dduo_probe_source(source, keyword=keyword)
+        elif providers._source_kind_of(source) in ("cms", "t4"):
+            # 单次“测速”保持低延迟：只测一个关键词；批量“探活”另走
+            # probe_any_source 的多关键词判定。
+            result = await providers.probe_source(
+                str(source.get("api") or ""), keyword=keyword, source=source)
+        else:
+            result = await providers.probe_any_source(
+                source, keywords=(keyword,))
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("source test failed: id=%s", source.get("id"), exc_info=True)
+        runtime = providers._is_runtime_missing(exc)
+        result = {
+            "ok": False, "alive": None if runtime else False,
+            "status": 0, "elapsed_ms": 0, "count": 0, "direct": 0,
+            "sample": "", "error": "",
+            "raw_error": type(exc).__name__ if not runtime else "",
+            "stage": ("runtime" if runtime else
+                      "timeout" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else
+                      "fatal" if isinstance(exc, (ValueError, KeyError)) else "network"),
+            "reason": (f"{providers._source_kind_of(source)} 运行时不可用，未参与判定"
+                       if runtime else
+                       f"探测超时，未影响源配置" if isinstance(exc, (TimeoutError, asyncio.TimeoutError)) else
+                       f"配置错误，未影响源配置" if isinstance(exc, (ValueError, KeyError)) else
+                       f"网络层不可达，未影响源配置"),
+        }
+    # 适配器有些只返回 ok/error，不返回 alive/reason。这里统一归一化，
+    # 避免管理台把原始异常类名（例如 RuntimeError）直接展示给用户。
+    if isinstance(result, dict):
+        result = dict(result)
+        if "alive" not in result:
+            if result.get("site_error"):
+                result["alive"] = False
+            elif result.get("ok") is True:
+                result["alive"] = True
+            else:
+                result["alive"] = None
+        if not result.get("reason"):
+            err = str(result.get("error") or "").strip()
+            if result.get("alive") is True:
+                result["reason"] = "接口可访问"
+            elif result.get("alive") is False and result.get("site_error"):
+                result["reason"] = f"站点响应异常：{err or '接口错误'}"
+            elif err:
+                result["reason"] = f"探测未完成：{err}"
+                if not result.get("stage"):
+                    result["stage"] = ("runtime" if "运行时不可用" in err else
+                                       "fatal" if "配置错误" in err else
+                                       "network" if "网络层失败" in err else "probe")
+            else:
+                result["reason"] = "探测未得到有效结论"
+                result.setdefault("stage", "unknown")
+    return {**result, "id": source.get("id"), "name": source.get("name", ""),
+            "enabled": bool(source.get("enabled")),
+            "builtin": bool(source.get("builtin")),
+            "state": ("alive" if result.get("alive") is True else
+                      "dead" if result.get("alive") is False else
+                      "runtime-missing" if "运行时不可用" in str(result.get("reason") or "")
+                      else "unknown")}
 
 
 @admin_router.post("/v/api/ext/source/test-all")
 async def ext_source_test_all(request: Request):
     """并发探测全部源，返回 [{id,name,...result}]。"""
+    global _source_batch_kind
     from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    sem = asyncio.Semaphore(4)  # 有界并发（移植上游 beta.4，B10）
+    if _source_batch_lock.locked():
+        return JSONResponse({"code": 409, "msg": f"{_source_batch_kind or '批量任务'}正在运行"},
+                            status_code=409)
+    async with _source_batch_lock:
+        _source_batch_kind = "全部测速"
+        sem = asyncio.Semaphore(4)
 
-    async def one(s):
-        async with sem:
-            r = await providers.probe_source(s["api"], source=s)
-            # >>> PRIVATE:DDUO
-            if features.DDUO and s.get("xsrc"):
-                r = await providers.dduo_probe_source(s)
-            # <<< PRIVATE:DDUO
-            r.update(id=s["id"], name=s["name"], enabled=bool(s.get("enabled")),
-                     builtin=bool(s.get("builtin")))
-            return r
-    results = await asyncio.gather(*[one(s) for s in config.all_sources()],
-                                   return_exceptions=True)
-    out = [r for r in results if isinstance(r, dict)]
+        async def one(s):
+            async with sem:
+                try:
+                    return await asyncio.wait_for(_test_source_one(s), timeout=12)
+                except asyncio.TimeoutError:
+                    return {"id": s.get("id"), "name": s.get("name", ""),
+                            "alive": None, "state": "unknown", "ok": False,
+                            "elapsed_ms": 12000, "count": 0, "stage": "timeout",
+                            "error": "TimeoutError",
+                            "reason": "探测超时，未影响源配置"}
+                except Exception as exc:  # noqa: BLE001
+                    _log.debug("source test-all one failed: id=%s", s.get("id"),
+                               exc_info=True)
+                    return {"id": s.get("id"), "name": s.get("name", ""),
+                            "alive": None, "state": "unknown", "ok": False,
+                            "elapsed_ms": 0, "count": 0,
+                            "stage": ("runtime" if providers._is_runtime_missing(exc)
+                                      else "network"),
+                            "error": "",
+                            "reason": ("运行时不可用，未参与判定"
+                                       if providers._is_runtime_missing(exc)
+                                       else "网络层不可达，未定论")}
+        try:
+            out = await asyncio.gather(*[one(s) for s in config.all_sources()])
+        finally:
+            _source_batch_kind = ""
     return {"code": 0, "msg": "", "data": out}
 
 
@@ -1532,6 +1661,7 @@ async def ext_source_health_check(request: Request):
                 r = {"alive": None if net else False, "ok": not net, "status": 0,
                      "elapsed_ms": 0, "count": 0, "sample": "",
                      "error": type(exc).__name__, "hit": "", "tried": [],
+                     "stage": "network" if net else "probe",
                      "reason": ("网络层失败，未定论" if net
                                 else f"探测异常：{type(exc).__name__}")}
             sk = sourcehealth.source_key_of(s.get("id"), s) or s.get("id", "")
@@ -1600,6 +1730,10 @@ async def ext_source_probe_start(request: Request):
     """启动可取消的 CMS 源批量探活（默认并发 4，实时进度）。"""
     from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     import source_probe as _probe
+    global _source_batch_kind
+    if _source_batch_lock.locked():
+        return JSONResponse({"code": 409, "msg": f"{_source_batch_kind or '批量任务'}正在运行"},
+                            status_code=409)
     try:
         body = await request.json()
     except Exception:
@@ -1620,9 +1754,24 @@ async def ext_source_probe_start(request: Request):
             return
         config.remove_source(sid)
 
-    return {"code": 0, "msg": "", "data": await _probe.start(
-        targets, concurrency=concurrency, limit=0,
-        disable_sink=_disable)}
+    await _source_batch_lock.acquire()
+    _source_batch_kind = "批量探活"
+    try:
+        result = await _probe.start(targets, concurrency=concurrency, limit=0,
+                                    disable_sink=_disable)
+    except Exception:
+        _source_batch_kind = ""
+        _source_batch_lock.release()
+        raise
+    async def release_when_done():
+        try:
+            await _probe.wait()
+        finally:
+            if _source_batch_lock.locked():
+                _source_batch_lock.release()
+            _source_batch_kind = ""
+    asyncio.create_task(release_when_done())
+    return {"code": 0, "msg": "", "data": result}
 
 
 @admin_router.get("/v/api/ext/source/probe/status")
@@ -1711,7 +1860,7 @@ async def ext_source_import_file(request: Request):
                     pass
         else:
             skipped += 1
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     if added:
         _schedule_routes_refresh()
     return {"code": 0, "msg": "", "data": {"added": added, "skipped": skipped,
@@ -1737,7 +1886,7 @@ async def ext_source_update(request: Request):
         return JSONResponse({"code": 500, "msg": str(exc)}, status_code=500)
     if not ok:
         return JSONResponse({"code": 400, "msg": info}, status_code=400)
-    _search_cache.clear(); _AGG_CACHE.clear()
+    _clear_search_caches()
     _schedule_routes_refresh()
     return {"code": 0, "msg": "ok", "data": {"id": info}}
 
@@ -1823,7 +1972,7 @@ async def ext_import_tvbox(request: Request):
             break
     t4_report = config.import_t4_sources(t4_candidates)
     if added_names or t4_report["added"]:
-        _search_cache.clear(); _AGG_CACHE.clear()
+        _clear_search_caches()
         if standalone:
             _schedule_routes_refresh()
         else:
@@ -1985,7 +2134,7 @@ async def ext_import_subscription(request: Request):
 
     if cms_added or t4_report["added"] \
             or (drpy_report and drpy_report.get("added")):
-        _search_cache.clear(); _AGG_CACHE.clear()
+        _clear_search_caches()
         _schedule_routes_refresh()
 
     # 订阅登记（移植上游 beta.3，B8）：url 导入成功后记入刷新调度，失败保留旧源；

@@ -33,7 +33,7 @@ GOOD = {"id": "good-src", "name": "Good",
 DEAD = {"id": "dead-src", "name": "Dead",
         "api": "https://dead.test/api.php/provide/vod/at/json", "enabled": True}
 
-RACE_FASTEST_SHA256 = "7035805c9d5021d3442a1116e92c2e6b8c4e6e0c236adbf06d22e82e14d2190a"
+RACE_FASTEST_SHA256 = "69f174795c656a6cb3daf3689278ef76b246e5f05fa91871482a30fe78c6f062"
 
 
 def _title(vod_id, name, src, play_url, year="2024"):
@@ -215,10 +215,10 @@ class GapsPlayTests(unittest.IsolatedAsyncioTestCase):
         sourcehealth.record("dead-src", True, 0.5)
         self.assertFalse(sourcehealth.is_dead("dead-src"))  # 成功一次即复活
 
-    def test_stream_breaker_trips_after_5_failures(self):
+    def test_stream_breaker_trips_after_3_failures(self):
         # 取流级（level="stream"，上游 v0.2.70）：4 次不触发，第 5 次才熔断。
         self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
-        for _ in range(4):
+        for _ in range(2):
             sourcehealth.record("dead-src", False, 1.0, level="stream")
         self.assertFalse(sourcehealth.is_dead("dead-src", level="stream"))
         sourcehealth.record("dead-src", False, 1.0, level="stream")

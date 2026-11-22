@@ -1653,6 +1653,9 @@ def _live_record(request: Request, status: int, path: str) -> None:
             note = {403: "源站鉴权拒绝", 404: "无此片源/线路",
                     500: "服务端错误", 502: "上游抓取失败",
                     503: "暂无可播片源", 504: "上游超时"}.get(status, "请求失败")
+        err_note = getattr(request.state, "live_error_note", "")
+        if err_note:
+            note = f"{note}（{err_note}）" if note else err_note
         livemod.record(request.headers.get("user-agent", ""), ip,
                        request.method, path, _diagnostic_query(request), status,
                        origin, title=title, stage=stage, note=note)
@@ -1757,8 +1760,17 @@ async def forward_upstream(request: Request) -> Response:
         r = await client.request(request.method, url, headers=headers, content=body)
     except Exception as exc:
         _log.debug("forward_upstream failed", exc_info=True)
+        try:
+            request.state.live_error_note = f"官方透传失败 · {type(exc).__name__}"
+        except Exception:
+            pass
         return JSONResponse({"code": -1, "msg": f"upstream {type(exc).__name__}", "data": None},
                             status_code=502)
+    if r.status_code >= 400:
+        try:
+            request.state.live_error_note = f"官方上游 HTTP {r.status_code}"
+        except Exception:
+            pass
     resp_headers = _safe_response_headers(r.headers)
     return Response(content=r.content, status_code=r.status_code,
                     headers=resp_headers,
@@ -1792,6 +1804,10 @@ async def forward_upstream_streaming(request: Request) -> Response:
         up = await client.send(req, stream=True)
     except Exception as exc:
         _log.debug("forward_upstream_streaming failed", exc_info=True)
+        try:
+            request.state.live_error_note = f"官方透传流失败 · {type(exc).__name__}"
+        except Exception:
+            pass
         return JSONResponse({"code": -1, "msg": f"upstream {type(exc).__name__}",
                              "data": None}, status_code=502)
 
@@ -6269,6 +6285,13 @@ async def direct_proxy(mg: str, request: Request):
         req = ext_client(request).build_request("GET", src_url, headers=fwd)
         r = await ext_client(request).send(req, stream=True)
     except Exception as exc:
+        try:
+            from hls_race import _record_stream_failure, _url_shape
+            _record_stream_failure(target)
+            request.state.live_error_note = \
+                f"直链请求失败 · {type(exc).__name__} · {_url_shape(src_url)}"
+        except Exception:
+            pass
         # 直链连接失败：记忆坏线并自动换线重试一次
         if _autofail_on():
             _mark_line_bad(target)
@@ -6300,8 +6323,27 @@ async def direct_proxy(mg: str, request: Request):
         else:
             return _direct_to_placeholder(mg, request)
     # 上游明确 4xx/5xx（文件被删/鉴权失败）：记忆坏线，换线重定向重试
+    if r.status_code >= 400:
+        try:
+            from hls_race import _record_stream_failure, _url_shape
+            _record_stream_failure(target)
+            request.state.live_error_note = (
+                f"直链HTTP{r.status_code} · {_url_shape(src_url)} · "
+                f"{sourcehealth.source_key_of(target.get('line'), target)}"
+            )[:120]
+        except Exception:
+            pass
     if r.status_code >= 400 and _autofail_on():
         await r.aclose()
+        try:
+            from hls_race import _record_stream_failure, _url_shape
+            _record_stream_failure(target)
+            request.state.live_error_note = (
+                f"直链HTTP{r.status_code} · {_url_shape(src_url)} · "
+                f"{sourcehealth.source_key_of(target.get('line'), target)}"
+            )[:120]
+        except Exception:
+            pass
         _mark_line_bad(target)
         alt = await _find_playable(target, request, skip_current=True)
         if alt is not None:
@@ -6813,7 +6855,7 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
                             kind=seeded.get("kind"))
         return seeded
     # 全网回源别名：内置线路全死、已按片名找到别的可播记录时，原 mg 改指新记录
-    alt_og = _MEDIA_REDIRECT.get(mg)
+    alt_og = _media_redirect_get(mg)
     if alt_og:
         try:
             index = int(request.query_params.get("index", "0"))
@@ -6849,7 +6891,7 @@ def _pick_episode(mg: str, request: Request) -> dict | None:
                             ep_guid=target.get("ep_guid", ""), kind=target.get("kind"))
         return target
     # 兼容：未在索引中的旧 mg，退回标题解析；也支持秒进时登记的待绑定榜单片
-    og = _MEDIA_REDIRECT.get(mg) or store.online_guid_by_media(mg) \
+    og = _media_redirect_get(mg) or store.online_guid_by_media(mg) \
         or _PENDING_MEDIA_CHART.get(mg)
     if not og:
         return None
@@ -7075,7 +7117,7 @@ def _safe_index(picked: dict) -> int:
 # 302/下发，从不校验死活，播放器一直报错；坏线也不会被记忆，退出重放仍黏在该线。
 # 方案：①坏线短时记忆 ②起播/取流前并行探测同集各候选线路，自动切到首个可用线路。
 # P2 拆分：HLS 播放链路与线路竞速：探活、复活、竞速、播放列表、HLS 路由。已移入 proxy/hls_race.py；以下重导出（对外 import 名称不变）。
-from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _dduo_strip_referer, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _inject_hls_start, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _skip_adjusted_duration, _skip_seconds, _source_health_enabled, _trim_playlist, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
+from hls_race import _DURATION_MAX_SECONDS, _DURATION_PROBE_TIMEOUT, _EXTINF_RE, _GROUP_CN, _HLS_LONG_URL, _HLS_REG, _HLS_REG_MAX, _HLS_REG_TTL, _LINE_BAD, _LINE_BAD_TTL, _LINE_FAST, _LINE_FAST_TTL, _LINE_SPEED, _MAIN_SERVE_BG_FAILS, _MAIN_SERVE_FUT, _MEDIA_REDIRECT, _NOT_HLS, _PH_DIR, _PH_SEG_DUR, _PH_SEG_TS, _PH_WIN, _PLAYLIST_CACHE, _PLAYLIST_FUT, _PLAYLIST_TTL, _PROBE_MAX_CANDIDATES, _PROBE_RANGE, _PROBE_TIMEOUT, _PROVIDER_CN, _RACE_CONCURRENCY, _RESURRECT_FAIL, _RESURRECT_FAIL_TTL, _RESURRECT_FUT, _SEG_OK_CACHE, _SEG_OK_TTL, _SPEED_GOOD, _SPEED_PRIOR, _attach_play_duration, _autofail_on, _build_playlist_body, _cached_playlist_seconds, _cors_preflight, _decode_tok, _direct_to_placeholder, _domain_heal_enabled, _dduo_strip_referer, _ensure_playable, _episode_candidates, _episode_key, _fastest_on, _fetch_playlist, _find_playable, _first_variant, _fixed_line_direct_on, _friendly_line, _get_playlist_cached, _hls_reg_get, _hls_reg_put, _http_head_ok, _inject_hls_start, _is_media_playlist, _is_slow_line, _line_bad_key, _line_display_name, _line_is_bad, _line_score, _line_speed, _main_serve_fut_done, _main_slow_budget, _mark_line_bad, _media_redirect_get, _MEDIA_REDIRECT_TS, _MID_SWITCH_FAILS, _MID_SWITCH_FAIL_TTL, _MID_SWITCH_MAX_FAILS, _maybe_mid_switch, _mid_switch_failures, _mid_switch_note_fail, _mid_switch_note_ok, _mid_switch_on, _ordered_candidates, _placeholder_master_response, _placeholder_playlist_response, _placeholder_ts_response, _pick_mid_switch_target, _play_duration_for, _playlist_cache_key, _playlist_total_seconds, _probe_latency, _probe_target, _race_candidates, _remember_episode_duration, _remember_fast, _remember_speed, _resolve_if_needed, _resurrect_start, _resurrect_worker, _skip_adjusted_duration, _skip_seconds, _source_health_enabled, _trim_playlist, _try_stream_segment, _verify_rewritten_first_seg, _warm_playlist, _zero_race_on, hls_compact, hls_cors_preflight, hls_main, hls_preset, hls_seg, placeholder_ts, remembered_fast_line, trusted_predicted_target, hls_router
 app.router.routes.extend(hls_router.routes)
 
 
@@ -7246,6 +7288,24 @@ def _schedule_browse_probe(rows, request) -> None:
         _log.debug("browse probe schedule failed", exc_info=True)
 
 
+def _health_penalty(cand: dict) -> float:
+    """竞速胜出健康罚时（秒）：同延迟优先健康源。
+
+    刚失败过的源即便这次探活偶然快，也不该立刻抢回起播——那会让用户
+    反复撞上抖动的站。等级 0~3 对应 0 / 0.15 / 0.30 / 0.50 秒罚时，
+    只影响胜者挑选，不改变探活真假判定与坏线记忆。
+    """
+    try:
+        sk = sourcehealth.source_key_of(cand.get("line"), cand)
+        grade = sourcehealth.display_grade(sk) if sk else None
+        if grade is None:
+            return 0.0
+        return (0.0, 0.15, 0.30, 0.50)[min(int(grade), 3)]
+    except Exception:
+        _log.debug("_health_penalty failed", exc_info=True)
+        return 0.0
+
+
 async def _race_fastest(picked: dict, request: Request) -> dict | None:
     """并行竞速探测候选线路；先成功者胜（默认高质量线给小幅领先优势）。
 
@@ -7339,7 +7399,8 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
 
     def eff(item):
         c, lat = item
-        return lat - (prefer if default and c["line"] == default else 0.0)
+        return (lat + _health_penalty(c)
+                - (prefer if default and c["line"] == default else 0.0))
 
     winner, wlat = min(ok, key=eff)
     return await finish(winner, wlat, len(ok))
