@@ -105,42 +105,16 @@ print("[smoke] import app ok, routes:", len(routes))
 """
 
 # 剥离树上能跑的测试子集（见模块 docstring 的排除说明）。
+# 公开树只运行与公开能力契约直接相关的测试。完整树的全量测试由
+# full job 执行；T4/网盘/真实 TCP/私有源测试需要被剥离的模块或完整运行时，
+# 放入公开树会把“剥离正确”误判为“公开构建失败”。
 _PYTEST_CMD = [
-    "-m", "pytest", "tests/", "-q", "-p", "no:cacheprovider",
-    "--ignore=tests/test_public_strip.py",
-    "--ignore=tests/test_verify_tls.py",
-    "--ignore=tests/test_p1_pan_cleanup.py",
-    "--ignore=tests/test_pan_shared.py",
-    # P2 新增：narrowing 测试需私有模块（公开构建已删），split 测试断言
-    # 完整构建的路由数；剥离树上跳过。
-    "--ignore=tests/test_p2_except_narrowing.py",
-    "--ignore=tests/test_app_split.py",
-    # P2 新增：counts 测试调 tools/count_except.py（剥离删 tools/），剥离树上跳过。
-    "--ignore=tests/test_p2_except_counts.py",
-    # 白名单分类测完整构建的 DEFAULTS，剥离树里已改，构造不兼容，跳过。
-    "--ignore=tests/test_config_whitelist.py",
-    # 内存批新增：模块级 import 已剥离的 xlib，构造不兼容，跳过。
-    "--ignore=tests/test_memory_caches.py",
-    # 网盘二维码烧 TS 模块（panqr.py）在公开构建被剥离，测试收集期会 import 失败。
-    "--ignore=tests/test_panqr.py",
-    # 网盘分享转存/线路切换测试依赖已剥离的 pan/panuc/panali 模块。
-    "--ignore=tests/test_pan_share_and_lines.py",
-    # 占位 TS 路由测试同样覆盖网盘二维码烧录分支（依赖已剥离的 panqr）。
-    "--ignore=tests/test_gaps_play.py",
-    # 海报裁切测试需要 Pillow（公开构建不带该依赖）。
-    "--ignore=tests/test_poster_landscape.py",
-    # 完整构建专属断言（海阔/B站删除、网盘登录文案、一键重置 UI 等）：
-    # 公开构建会剥掉 SCANLOGIN/PAN 相关块，这些断言在剥离树里不成立。
-    "--ignore=tests/test_seven_fixes.py",
-    "--ignore=tests/test_scan_and_fallback.py",
-    "--ignore=tests/test_bilibili_removed.py",
-    # 完整构建专属：playback unfreeze transport mock 与完整线路分类模型。
-    "--ignore=tests/test_unfreeze_fixed_line.py",
-    "--ignore=tests/test_unfreeze_mid_switch.py",
-    "--ignore=tests/test_vod_line_folders.py",
-    # 含 PanSou 网盘搜索断言（公开构建剥掉 PAN 块，源/搜索都不存在）。
-    "--ignore=tests/test_three_features.py",
-    "-k", "not dduo_probe_source",
+    "-m", "pytest", "-q", "-p", "no:cacheprovider",
+    "tests/test_config.py",
+    "tests/test_config_read_safety.py",
+    "tests/test_admin_ui_p1.py",
+    "tests/test_admin_ui_theme.py",
+    "tests/test_public_strip.py",
 ]
 
 def main(argv: list[str]) -> int:
