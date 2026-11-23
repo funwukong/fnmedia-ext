@@ -134,6 +134,10 @@ _PYTEST_CMD = [
     "--ignore=tests/test_seven_fixes.py",
     "--ignore=tests/test_scan_and_fallback.py",
     "--ignore=tests/test_bilibili_removed.py",
+    # 完整构建专属：playback unfreeze transport mock 与完整线路分类模型。
+    "--ignore=tests/test_unfreeze_fixed_line.py",
+    "--ignore=tests/test_unfreeze_mid_switch.py",
+    "--ignore=tests/test_vod_line_folders.py",
     # 含 PanSou 网盘搜索断言（公开构建剥掉 PAN 块，源/搜索都不存在）。
     "--ignore=tests/test_three_features.py",
     "-k", "not dduo_probe_source",
