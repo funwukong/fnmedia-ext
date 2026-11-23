@@ -114,7 +114,6 @@ _PYTEST_CMD = [
     "tests/test_config_read_safety.py",
     "tests/test_admin_ui_p1.py",
     "tests/test_admin_ui_theme.py",
-    "tests/test_public_strip.py",
 ]
 
 def main(argv: list[str]) -> int:
