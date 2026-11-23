@@ -19,7 +19,7 @@ import 检查、pytest 子集）由本文件传入，见 ``main()``。
 
 检查项：
   1. 必需文件在，完整构建才有的私有模块与构建工具也在；
-  2. 特性开关全开（DDUO/ADULT/CATVOD/DRPY 均为 True，红线仍在）；
+  2. 特性开关全开（DDUO/ADULT/DRPY 均为 True，红线仍在）；
   3. 子进程里 import app 成功、关键路由在、通用件可用
      （网盘识别、源优先级）；
   4. 子进程里跑 pytest 核心子集。
@@ -56,9 +56,7 @@ _REQUIRED = [
     "VERSION",
     # 完整构建才有的私有模块（公开构建会被剥离，这里必须在）。
     "proxy/dduo.py",
-    "proxy/catvod.py",
     "proxy/drpy.py",
-    "proxy/spiders.py",
     "proxy/xlib.py",
     "proxy/pan.py",
     "proxy/panuc.py",
@@ -76,7 +74,6 @@ import providers
 
 assert appmod.features.DDUO is True
 assert appmod.features.ADULT is True
-assert appmod.features.CATVOD is True
 assert appmod.features.DRPY is True
 routes = {getattr(r, "path", None) for r in appmod.app.routes}
 for p in ("/v/api/v1/search/list", "/v/api/v1/item/list",

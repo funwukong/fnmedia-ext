@@ -523,6 +523,29 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("admin_token", payload["config"])
         self.assertNotIn("test-only-token-123", r.text)
 
+    async def test_extension_service_switch_defaults_on_and_bypasses_plugin_when_off(self):
+        self.assertIs(self.config.get()["extension_enabled"], True)
+        off = await self.client.post("/v/api/ext/config", json={
+            "extension_enabled": False})
+        self.assertEqual(off.status_code, 200, off.text)
+        self.assertIs(self.config.get()["extension_enabled"], False)
+
+        # Admin remains reachable; client-facing search bypasses plugin logic.
+        status = await self.client.get("/v/api/ext/status")
+        self.assertEqual(status.status_code, 200)
+        search = await self.client.get("/v/api/v1/search/list", params={"q": "本地片"})
+        self.assertEqual(search.status_code, 200)
+        self.assertEqual(search.json()["data"][0]["guid"], "local-1")
+
+        with patch.object(appmod.catalog, "refresh_routes", new=AsyncMock(return_value={})) as routes, \
+                patch.object(appmod.chart_cache, "refresh", new=AsyncMock(return_value={})) as charts:
+            on = await self.client.post("/v/api/ext/config", json={
+                "extension_enabled": True})
+        self.assertEqual(on.status_code, 200, on.text)
+        self.assertIs(self.config.get()["extension_enabled"], True)
+        routes.assert_awaited_once()
+        charts.assert_awaited_once_with(force=True)
+
     async def test_admin_page_returns_html(self):
         r = await self.client.get("/v/online-admin")
         self.assertEqual(r.status_code, 200)

@@ -17,19 +17,23 @@ const adminTheme = (() => {
   const key = 'fnmedia-ext.admin.theme.v1';
   const presets = {
     indigo: '#4f46e5', blue: '#2563eb', teal: '#0f766e',
-    rose: '#be185d', amber: '#b45309', slate: '#475569'
+    rose: '#be185d', amber: '#b45309', slate: '#475569',
+    appleSky: '#007aff', appleMidnight: '#5ac8fa', appleSunset: '#ff6b35',
+    appleForest: '#34c759', appleLavender: '#af52de',
+    harmonyAurora: '#27c7b8', harmonySky: '#009db5', harmonyDream: '#8158d8'
   };
-  const defaults = {mode: 'system', palette: 'indigo', custom: '#4f46e5'};
+  const defaults = {mode: 'system', palette: 'indigo', custom: '#4f46e5', family: 'classic'};
   const system = window.matchMedia('(prefers-color-scheme: dark)');
   const root = document.documentElement;
   const validHex = value => typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value);
   const normalize = value => {
-    const {mode, palette, custom} = value || {};
+    const {mode, palette, custom, family} = value || {};
     return {
       mode: ['system', 'light', 'dark'].includes(mode) ? mode : defaults.mode,
       palette: typeof palette === 'string' && (palette === 'custom' ||
         Object.prototype.hasOwnProperty.call(presets, palette)) ? palette : defaults.palette,
-      custom: validHex(custom) ? custom.toLowerCase() : defaults.custom
+      custom: validHex(custom) ? custom.toLowerCase() : defaults.custom,
+      family: ['classic', 'apple', 'harmony'].includes(family) ? family : defaults.family
     };
   };
   const decode = text => {
@@ -66,6 +70,7 @@ const adminTheme = (() => {
     }
     const style = root.style;
     root.dataset.theme = dark ? 'dark' : 'light';
+    root.dataset.themeFamily = state.family;
     style.setProperty('--accent-fill', accent);
     style.setProperty('--accent-on', contrast(base, white) >= contrast(base, black) ? '#fff' : '#000');
     style.setProperty('--accent', `rgb(${ink.join(',')})`);
@@ -123,6 +128,14 @@ const adminTheme = (() => {
   --err:#ffacb3;--err-soft:#412731;--info:#a5c5ff;--violet:#c8b3ff;
   --shadow:0 2px 5px #0003;--overlay:#04060ab8;
 }
+/* Optional Apple/HarmonyOS-inspired glass treatments use the current mode palette. */
+:root[data-theme-family=apple]{--radius:19px;--shadow:0 14px 38px #1d3e6818, inset 0 1px 0 #ffffff76}
+:root[data-theme-family=harmony]{--radius:22px;--shadow:0 18px 44px #0b4b5c20, inset 0 1px 0 #ffffff80}
+:root[data-theme-family=apple] .card,:root[data-theme-family=harmony] .card,
+:root[data-theme-family=apple] .sidebar,:root[data-theme-family=harmony] .sidebar{
+  backdrop-filter:blur(18px) saturate(135%);-webkit-backdrop-filter:blur(18px) saturate(135%)}
+:root[data-theme-family=apple] .page-head,:root[data-theme-family=harmony] .page-head{
+  background:linear-gradient(118deg,var(--accent-soft),var(--card) 68%)}
 *{box-sizing:border-box}
 html,body{margin:0;padding:0}
 body{font:15px/1.6 system-ui,-apple-system,"PingFang SC","Microsoft YaHei","Noto Sans CJK SC",sans-serif;
@@ -407,6 +420,13 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   <h2 class="page-title" id="title-overview" tabindex="-1">概览</h2>
         <p class="page-desc">在飞牛原生搜索与媒体库中注入在线影视，点击直接调用飞牛原生播放器。</p>
       </header>
+
+      <div class="card">
+        <div class="card-title">fnmedia-ext 服务</div>
+        <label class="switch-row"><input type="checkbox" id="extensionEnabled" onchange="saveExtensionEnabled()"/>
+          <span>启用 fnmedia-ext 服务<span class="sub">关闭后影视请求由飞牛官方服务处理，管理页仍可用；重新开启会重载资源站路由与热门榜单。</span></span></label>
+        <div class="hint" id="extensionEnabledMsg"></div>
+      </div>
 
       <div class="card">
         <div class="card-title">虚拟媒体库</div>
@@ -1073,6 +1093,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   </div>
   <p class="hint" id="themeHelp">外观即时生效，偏好仅保存在当前浏览器。</p>
   <fieldset>
+    <legend>界面风格</legend>
+    <div class="theme-options">
+      <label><input type="radio" name="themeFamily" value="classic" checked>经典</label>
+      <label><input type="radio" name="themeFamily" value="apple">Apple Glass</label>
+      <label><input type="radio" name="themeFamily" value="harmony">HarmonyOS</label>
+    </div>
+  </fieldset>
+  <fieldset>
     <legend>显示模式</legend>
     <div class="theme-options">
       <label><input type="radio" name="themeMode" value="system" checked>跟随系统</label>
@@ -1089,6 +1117,14 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
       <button type="button" class="theme-swatch" data-palette="rose" aria-pressed="false">玫红</button>
       <button type="button" class="theme-swatch" data-palette="amber" aria-pressed="false">琥珀</button>
       <button type="button" class="theme-swatch" data-palette="slate" aria-pressed="false">岩灰</button>
+      <button type="button" class="theme-swatch" data-palette="appleSky" aria-pressed="false">清透蓝</button>
+      <button type="button" class="theme-swatch" data-palette="appleMidnight" aria-pressed="false">深空黑</button>
+      <button type="button" class="theme-swatch" data-palette="appleSunset" aria-pressed="false">日落橙</button>
+      <button type="button" class="theme-swatch" data-palette="appleForest" aria-pressed="false">森林绿</button>
+      <button type="button" class="theme-swatch" data-palette="appleLavender" aria-pressed="false">星光紫</button>
+      <button type="button" class="theme-swatch" data-palette="harmonyAurora" aria-pressed="false">鸿蒙星耀</button>
+      <button type="button" class="theme-swatch" data-palette="harmonySky" aria-pressed="false">鸿蒙晴空</button>
+      <button type="button" class="theme-swatch" data-palette="harmonyDream" aria-pressed="false">鸿蒙绮境</button>
     </div>
     <form class="theme-custom" id="themeCustom" novalidate>
       <div><label for="themeColor">选色</label><input type="color" id="themeColor" value="#4f46e5"></div>
@@ -1132,6 +1168,7 @@ const themeTrigger = $("themeTrigger");
 const themeHex = $("themeHex");
 const themeColor = $("themeColor");
 const themeModes = $$('[name="themeMode"]');
+const themeFamilies = $$('[name="themeFamily"]');
 const themeSwatches = $$("#themeSwatches [data-palette]");
 const menuTrigger = $("menuTrigger");
 const mainNav = $("nav");
@@ -1141,8 +1178,9 @@ function clearThemeError(){
   $("themeError").textContent = "";
 }
 function syncTheme(){
-  const {mode, palette, custom} = adminTheme.get();
+  const {mode, palette, custom, family} = adminTheme.get();
   themeModes.forEach(input => {input.checked = input.value === mode;});
+  themeFamilies.forEach(input => {input.checked = input.value === family;});
   themeSwatches.forEach(button => button.setAttribute("aria-pressed", String(button.dataset.palette === palette)));
   themeColor.value = themeHex.value = custom;
   $("themeSelection").textContent = palette === "custom" ? "当前：自定义 " + custom : "当前：" +
@@ -1154,6 +1192,7 @@ adminTheme.subscribe(saved => {
   $("themeStatus").textContent = saved ? "外观已更新。" : "外观已应用，但当前浏览器无法保存偏好。";
 });
 themeModes.forEach(input => input.addEventListener("change", () => adminTheme.set({mode: input.value})));
+themeFamilies.forEach(input => input.addEventListener("change", () => adminTheme.set({family: input.value})));
 themeSwatches.forEach(button => {
   const palette = button.dataset.palette;
   button.style.setProperty("--swatch", adminTheme.presets[palette]);
@@ -2708,7 +2747,22 @@ async function loadPanCacheCfg(){
 async function loadStatus(){
   STATUS=await jget("/v/api/ext/status");
   CFG=STATUS.config;
+  if($("extensionEnabled"))$("extensionEnabled").checked=CFG.extension_enabled!==false;
   PRIO=STATUS.source_priority||{};
+}
+async function saveExtensionEnabled(){
+  const control=$("extensionEnabled"),msg=$("extensionEnabledMsg"),enabled=control.checked;
+  control.disabled=true;
+  try{
+    const r=await jpost("/v/api/ext/config",{extension_enabled:enabled});
+    if(r.code!==0)throw new Error(r.msg||"保存失败");
+    if(CFG)CFG.extension_enabled=enabled;
+    msg.textContent=enabled?"服务已开启，正在重新载入资源站路由与榜单。":"服务已关闭，影视请求已恢复官方处理。";
+    toast(enabled?"fnmedia-ext 已开启":"fnmedia-ext 已关闭");
+  }catch(e){
+    control.checked=!enabled;msg.textContent="设置失败："+e.message;
+    toast("服务开关保存失败","fail");
+  }finally{control.disabled=false;}
 }
 async function init(){
   // 首个请求若在插件重启窗口内发出可能一直挂起（旧版无超时、无重试，

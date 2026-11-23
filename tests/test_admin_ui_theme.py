@@ -25,7 +25,7 @@ Object.defineProperty(window, 'localStorage', {get(){
   return {getItem:k=>store.get(k), setItem:(k,v)=>store.set(k,v), removeItem:k=>store.delete(k)};
 }});
 ''' + bootstrap + r'''
-assert.deepEqual(adminTheme.get(), {mode:'light', palette:'custom', custom:'#ffff00'});
+assert.deepEqual(adminTheme.get(), {mode:'light', palette:'custom', custom:'#ffff00', family:'classic'});
 assert.equal(root.dataset.theme, 'light');
 assert.equal(root.style.get('--accent-on'), '#000');
 assert.equal(root.style.get('--accent-fill'), '#ffff00');
@@ -46,7 +46,7 @@ system.change();
 assert.equal(root.dataset.theme, 'dark');
 store.set(key, JSON.stringify({mode:'invalid', palette:['teal'], custom:'not a color'}));
 window.storage({key});
-assert.deepEqual(adminTheme.get(), {mode:'system', palette:'indigo', custom:'#4f46e5'});
+assert.deepEqual(adminTheme.get(), {mode:'system', palette:'indigo', custom:'#4f46e5', family:'classic'});
 store.set(key, '{broken');
 window.storage({key});
 assert.equal(root.style.get('--accent-fill'), '#4f46e5');
@@ -89,3 +89,20 @@ for(const [mode,surfaces] of Object.entries({
   }
 }
 ''')
+
+
+def test_harmony_theme_presets_are_available_and_accessible():
+    src = _src()
+    for palette in ("appleSky", "appleMidnight", "appleSunset", "appleForest",
+                    "appleLavender", "harmonyAurora", "harmonySky", "harmonyDream"):
+        assert f'data-palette="{palette}"' in src
+        assert palette in src.split("const presets = {", 1)[1].split("};", 1)[0]
+    assert 'name="themeFamily" value="apple"' in src
+    assert 'name="themeFamily" value="harmony"' in src
+
+
+def test_extension_switch_is_present_on_overview():
+    src = _src()
+    assert 'id="extensionEnabled" onchange="saveExtensionEnabled()"' in src
+    assert 'id="extensionEnabledMsg"' in src
+    assert 'CFG.extension_enabled!==false' in src

@@ -939,8 +939,7 @@ class Catalog:
 
         供二级线路墙对“海量库冷片”（非 chart、尚未 remember 进 store）按需
         落库使用；找不到返回 None（调用方再走搜索绑定或返回空）。
-        上游原样（bf16a3b）；fork 适配：fork 的 _page_cache 值是 (ts, briefs)
-        二元组，上游是 (ts, briefs, ttl) 三元组，这里按二元组解包。
+        _page_cache 同时兼容早期 (ts, briefs) 与当前 (ts, briefs, ttl) 记录。
         """
         if not guid:
             return None
@@ -949,7 +948,8 @@ class Catalog:
                 for b in briefs:
                     if b.get("guid") == guid:
                         return b
-            for _ts, briefs in list(self._page_cache.values()):
+            for entry in list(self._page_cache.values()):
+                briefs = entry[1]
                 for b in briefs:
                     if b.get("guid") == guid:
                         return b

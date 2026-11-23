@@ -830,9 +830,10 @@ async def ext_reset_config():
 
 @admin_router.post("/v/api/ext/config")
 async def ext_set_config(request: Request):
-    from app import HOT_DEFAULT_TITLE, _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    from app import HOT_DEFAULT_TITLE, _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, chart_cache, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     body = await request.json()
     allowed = {
+        "extension_enabled",
         "max_per_keyword", "filter_junk", "junk_keywords", "online_first",
         "hot_library_enabled", "hot_library_title", "hot_limit",
         "hot_per_source", "hot_pages_per_source", "hot_refresh_interval",
@@ -861,6 +862,8 @@ async def ext_set_config(request: Request):
     allowed.add("pan_lib_enabled")
     # <<< PRIVATE:CATVOD
     patch = {k: v for k, v in body.items() if k in allowed}
+    if "extension_enabled" in patch:
+        patch["extension_enabled"] = bool(patch["extension_enabled"])
     if "prewarm_mode" in patch:
         # 只允许两种预热方式，非法值回退默认 realtime（方案A）
         patch["prewarm_mode"] = "persist" if str(patch["prewarm_mode"]) == "persist" else "realtime"
@@ -913,6 +916,8 @@ async def ext_set_config(request: Request):
         patch["t4_library_enabled"] = bool(patch["t4_library_enabled"])
     if "welfare_library_enabled" in patch:
         patch["welfare_library_enabled"] = bool(patch["welfare_library_enabled"])
+    if "extension_enabled" in patch:
+        patch["extension_enabled"] = bool(patch["extension_enabled"])
     if "prefer_quality_source" in patch:
         patch["prefer_quality_source"] = bool(patch["prefer_quality_source"])
     if "line_fastest" in patch:
@@ -962,6 +967,15 @@ async def ext_set_config(request: Request):
         patch["sources"] = list(cur.values())
     config.save(patch)
     _search_cache.clear(); _AGG_CACHE.clear()
+    if patch.get("extension_enabled") is True:
+        try:
+            catalog.reset()
+            await asyncio.wait_for(
+                catalog.refresh_routes(config.enabled_sources()), timeout=90)
+            await asyncio.wait_for(
+                chart_cache.refresh(force=True), timeout=chartmod.REFRESH_TIMEOUT)
+        except Exception:
+            _log.info("extension data reload incomplete", exc_info=True)
     # 方案B 开关切换：即时启用/停用冠军线记忆持久化
     if "prewarm_mode" in patch:
         try:

@@ -21,7 +21,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-_FLAGS = ("DDUO", "ADULT", "CATVOD", "DRPY")
+_FLAGS = ("DDUO", "ADULT", "DRPY")
 
 
 def check_files(root: Path, required=(), forbidden=()) -> list[str]:

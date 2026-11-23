@@ -95,7 +95,11 @@ fi
 # 构建戳：让运行中的包能在管理页自报身份（所有构建同为 v0.2.39 时，
 # 否则用户无法区分新旧包，也就无法确认一次升级到底生没生效）。
 BUILD_SHA="$(cd "${REPO_ROOT}" && git rev-parse --short HEAD 2>/dev/null || echo nogit)"
-BUILD_TIME="$(date '+%Y-%m-%d %H:%M')"
+if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+  BUILD_TIME="$(date -u -d "@${SOURCE_DATE_EPOCH}" '+%Y-%m-%d %H:%M' 2>/dev/null || date -u '+%Y-%m-%d %H:%M')"
+else
+  BUILD_TIME="$(date '+%Y-%m-%d %H:%M')"
+fi
 BUILD_DIRTY="$(cd "${REPO_ROOT}" && git status --porcelain 2>/dev/null | head -1 | grep -q . && echo True || echo False)"
 printf '"""构建期生成：管理页自报构建身份用（勿手改）。"""\nBUILD_TIME = %s\nBUILD_SHA = %s\nBUILD_DIRTY = %s\nBUILD_LABEL = f"v%s {BUILD_TIME} {BUILD_SHA}"\n' \
   "'${BUILD_TIME}'" "'${BUILD_SHA}'" "${BUILD_DIRTY}" "${VERSION}" \

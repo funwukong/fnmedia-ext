@@ -39,6 +39,7 @@ import time
 from pathlib import Path
 
 APPNAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9\-_\.]*[a-zA-Z0-9]$")
+REPRODUCIBLE_MTIME = int(os.environ.get("SOURCE_DATE_EPOCH", "0") or 0)
 REQUIRED_MANIFEST = (
     "appname", "version", "display_name", "desc",
     "platform", "source", "maintainer", "maintainer_url",
@@ -86,7 +87,7 @@ def _dirinfo(name: str) -> tarfile.TarInfo:
     ti.size = 0
     ti.uid = ti.gid = 0
     ti.uname = ti.gname = "runner"
-    ti.mtime = int(time.time())
+    ti.mtime = REPRODUCIBLE_MTIME
     # TarInfo.tobuf() 只在 name 不以 '/' 结尾时才补，但 DIRTYPE 下
     # tarfile 会对 ti.name 做处理；这里直接固定住 buf 里的名字。
     return ti
@@ -96,7 +97,7 @@ def _tar_filter(ti: tarfile.TarInfo) -> tarfile.TarInfo:
     """统一元数据，保证可复现构建 + 避免把宿主 uid/gid 带进去。"""
     ti.uid = ti.gid = 0
     ti.uname = ti.gname = "runner"
-    ti.mtime = int(ti.mtime) if ti.mtime else int(time.time())
+    ti.mtime = REPRODUCIBLE_MTIME
     return ti
 
 
@@ -124,9 +125,8 @@ def build_app_tgz(stage: Path) -> bytes:
             rel = p.relative_to(src).as_posix()
             members.append((p, f"{dst_name}/{rel}" if rel != "." else dst_name))
 
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", compresslevel=9,
-                      format=tarfile.GNU_FORMAT) as tar:
+    tar_buf = io.BytesIO()
+    with tarfile.open(fileobj=tar_buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
         # 目录条目不带尾斜杠：对齐 fnpack（Go archive/tar 的 ustar 输出）
         for path, arcname in members:
             if path.is_dir():
@@ -135,12 +135,16 @@ def build_app_tgz(stage: Path) -> bytes:
                 ti.mode = 0o755
                 ti.uid = ti.gid = 0
                 ti.uname = ti.gname = "runner"
-                ti.mtime = int(path.stat().st_mtime)
+                ti.mtime = REPRODUCIBLE_MTIME
                 tar.addfile(ti)
             else:
                 tar.add(str(path), arcname=arcname, recursive=False,
                         filter=_tar_filter)
-    return buf.getvalue()
+    compressed = io.BytesIO()
+    with gzip.GzipFile(fileobj=compressed, mode="wb", compresslevel=9,
+                       mtime=0) as gz:
+        gz.write(tar_buf.getvalue())
+    return compressed.getvalue()
 
 
 def check_app_tgz(blob: bytes) -> None:
@@ -188,7 +192,7 @@ def build_fpk(stage: Path, manifest_text: str, out_path: Path) -> Path:
             ti.mode = mode
             ti.uid = ti.gid = 0
             ti.uname = ti.gname = "runner"
-            ti.mtime = int(time.time())
+            ti.mtime = REPRODUCIBLE_MTIME
             tar.addfile(ti, io.BytesIO(data))
 
         def add_tree(src: Path, arcname: str) -> None:

@@ -1468,6 +1468,16 @@ def _diagnostic_query(request: Request) -> str:
 @app.middleware("http")
 async def _access(request: Request, call_next):
     started = time.monotonic()
+    # Keep the management surface available while disabled so the extension can
+    # be turned back on; all client-facing requests fall through to fnOS.
+    _path = request.url.path
+    if (not bool(config.read("extension_enabled", True))
+            and _path != "/v/online-admin"
+            and not _path.startswith("/v/api/ext/")
+            and _path != "/_ext/healthz"):
+        if _path.startswith(("/v/media/", "/online/")):
+            return await forward_upstream_streaming(request)
+        return await forward_upstream(request)
     # 在线播放历史按飞牛账号分区（issue #5）：为本次请求设置当前用户上下文。
     # fnusers 带 30s 缓存，识别失败/无 token 落到全局分区，行为同旧版。
     # 前缀在上游四项之外另加 fork 自有读历史的两条路由（stream/list 续播、

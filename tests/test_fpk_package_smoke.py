@@ -2,11 +2,22 @@
 import gzip
 import hashlib
 import io
+import os
 import subprocess
 import tarfile
 from pathlib import Path
+import pytest
 
 REPO = Path(__file__).resolve().parents[1]
+
+
+def test_packager_has_fixed_archive_mtime():
+    import sys
+    sys.path.insert(0, str(REPO / "packaging" / "fpk"))
+    import fpkpack
+
+    info = fpkpack._dirinfo("cmd")
+    assert info.mtime == fpkpack.REPRODUCIBLE_MTIME
 
 
 def _build_fpk(tmp_path):
@@ -29,6 +40,7 @@ def _build_fpk(tmp_path):
     return package, outer_members, app_members, manifest
 
 
+@pytest.mark.skipif(os.name == "nt", reason="FPK shell packaging requires POSIX path semantics")
 def test_fpk_archive_contents_and_integrity(tmp_path):
     package, outer, app, manifest = _build_fpk(tmp_path)
     assert package.stat().st_size > 0

@@ -24,9 +24,10 @@ import config as config_mod
 
 ADMIN_API = Path(__file__).resolve().parent.parent / "proxy" / "admin_api.py"
 
-# ---------------- 分类表（调查组核实，79 键全量：74 + 跳过片头/片尾 4 键 + 绑定等待 1 键） ----------------
+# ---------------- 配置键分类：管理 API 可写/专用/只读键 ----------------
 
 WHITELIST = {
+    "extension_enabled",
     "max_per_keyword", "filter_junk", "junk_keywords", "online_first",
     "hot_library_enabled", "hot_library_title", "hot_limit",
     "hot_per_source", "hot_pages_per_source", "hot_refresh_interval",
@@ -142,7 +143,7 @@ def test_defaults_fully_classified():
     keys = set(config_mod.DEFAULTS)
     # 79 → 77：2026-11-12 upstream-merge 去 guard，删 guard_zone_enabled /
     # guard_native_enabled 两项默认配置。
-    assert len(keys) == 89
+    assert len(keys) == 90
     assert WHITELIST & DEDICATED == set()
     assert WHITELIST & NOT_WRITABLE == set()
     assert DEDICATED & NOT_WRITABLE == set()

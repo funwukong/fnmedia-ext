@@ -187,6 +187,7 @@ JUNK_KEYWORDS = [
 
 DEFAULTS = {
     "config_version": CONFIG_VERSION,
+    "extension_enabled": True,
     "sources": [dict(s) for s in DEFAULT_SOURCES],
     # 被删除的内置源 id（自定义源删除时直接从 sources 移除）
     "removed_ids": [],
