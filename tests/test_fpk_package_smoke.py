@@ -20,6 +20,30 @@ def test_packager_has_fixed_archive_mtime():
     assert info.mtime == fpkpack.REPRODUCIBLE_MTIME
 
 
+def test_packager_rejects_host_temp_paths():
+    """临时目录/盘符路径必须被拒，避免测试产物混进 app.tgz。"""
+    import sys
+    sys.path.insert(0, str(REPO / "packaging" / "fpk"))
+    import fpkpack
+
+    bad_names = (
+        "repo/C:UsersxuAppDataLocalTemppytest-of-xupytest-1dist/app.tgz",
+        "repo/C?UsersxuAppDataLocalTempfnmedia-v122-final-stage/app/repo",
+        "repo/Users/x/AppDataLocalTemp/x.py",
+        "repo/pytest-of-xu/pytest-1/app",
+        "/abs/path",
+        "repo/../escape",
+        "repo//double",
+    )
+    for name in bad_names:
+        with pytest.raises(fpkpack.PackError):
+            fpkpack._validate_member_name(name)
+
+    for name in ("repo/proxy/app.py", "ui/config", "cmd/main",
+                 "repo/tests/test_x.py"):
+        fpkpack._validate_member_name(name)   # 不抛异常
+
+
 def _build_fpk(tmp_path):
     output = tmp_path / "dist"
     proc = subprocess.run(

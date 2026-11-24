@@ -79,6 +79,32 @@ def validate_manifest(mf: dict) -> None:
         raise PackError(f"appname 非法（只允许字母数字与 -_. ，且首尾为字母数字）: {name!r}")
 
 
+# 归档成员名里绝不能出现的片段：绝对路径、目录穿越、盘符，
+# 以及 Windows 临时目录被 rsync 同步进来后的压平形态
+# （如 C?UsersxuAppDataLocalTemppytest-of-xu...）。
+_BAD_MEMBER_FRAGMENTS = ("AppDataLocalTemp", "pytest-of-", "\\Users\\")
+
+
+def _validate_member_name(name: str) -> None:
+    """拒绝不可移植/不安全的归档路径，避免临时目录污染分发包。
+
+    拒绝：绝对路径、`..` 穿越、空段、盘符（含 `:`）、Windows 临时目录
+    压平形态（`C?Users...`、`*AppDataLocalTemp*`）。命中即中止打包。
+    """
+    normalized = (name or "").replace("\\", "/")
+    parts = normalized.split("/")
+    bad = (
+        not normalized
+        or normalized.startswith("/")
+        or any(part in {"", ".", ".."} for part in parts)
+        or any(":" in part for part in parts)
+        or "?" in normalized
+        or any(frag in normalized for frag in _BAD_MEMBER_FRAGMENTS)
+    )
+    if bad:
+        raise PackError(f"不安全或不可移植的归档路径: {name!r}")
+
+
 def _dirinfo(name: str) -> tarfile.TarInfo:
     """构造目录条目，名字不带尾斜杠（对齐 fnpack 的输出）。"""
     ti = tarfile.TarInfo(name)
@@ -123,7 +149,9 @@ def build_app_tgz(stage: Path) -> bytes:
             continue
         for p in sorted(src.rglob("*")):
             rel = p.relative_to(src).as_posix()
-            members.append((p, f"{dst_name}/{rel}" if rel != "." else dst_name))
+            arcname = f"{dst_name}/{rel}" if rel != "." else dst_name
+            _validate_member_name(arcname)
+            members.append((p, arcname))
 
     tar_buf = io.BytesIO()
     with tarfile.open(fileobj=tar_buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
@@ -187,6 +215,7 @@ def build_fpk(stage: Path, manifest_text: str, out_path: Path) -> Path:
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w", format=tarfile.GNU_FORMAT) as tar:
         def add_bytes(name: str, data: bytes, mode: int = 0o644) -> None:
+            _validate_member_name(name)
             ti = tarfile.TarInfo(name)
             ti.size = len(data)
             ti.mode = mode
@@ -196,6 +225,7 @@ def build_fpk(stage: Path, manifest_text: str, out_path: Path) -> Path:
             tar.addfile(ti, io.BytesIO(data))
 
         def add_tree(src: Path, arcname: str) -> None:
+            _validate_member_name(arcname)
             # 目录自身也要有条目（官方包里 cmd/ config/ wizard/ 都单独占一行）。
             # 注意 TarInfo(name) 在 type=DIRTYPE 时会自动补尾斜杠，而 fnpack
             # 输出的名字**不带**尾斜杠，故用 _dirinfo 手工构造。
@@ -203,6 +233,7 @@ def build_fpk(stage: Path, manifest_text: str, out_path: Path) -> Path:
             for p in sorted(src.rglob("*")):
                 rel = p.relative_to(src).as_posix()
                 name = f"{arcname}/{rel}"
+                _validate_member_name(name)
                 if p.is_dir():
                     tar.addfile(_dirinfo(name))
                 else:

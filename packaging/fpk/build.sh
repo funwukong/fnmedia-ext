@@ -56,6 +56,10 @@ rsync -a --delete \
   --exclude='/FORUM_RELEASE_*.md' \
   --exclude='/RELEASING.md' \
   --exclude='*.apk' \
+  --exclude='C:Users*' \
+  --exclude='C?Users*' \
+  --exclude='*AppDataLocalTemp*' \
+  --exclude='pytest-of-*' \
   "${REPO_ROOT}/" "${STAGE}/app/repo/"
 
 # FPK no longer ships the removed CSP/JVM or Android runner. Keep the
