@@ -72,7 +72,6 @@ _STRIPPED = [
     "proxy/assets/" + _D + "tv.wasm",
     "proxy/assets" + "/cat" + "vod",
     "proxy/assets" + "/dr" + "py",
-    "proxy/assets" + "/" + _H,
     "proxy/assets/guard/" + "guard.jar",
     "proxy/assets" + "/spid" + "ers",
     "proxy/_vendor",
