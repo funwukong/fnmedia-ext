@@ -1294,14 +1294,14 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     from app import _fetch_playlist, _resolve_if_needed, _seg_url, _self_url, b64e, ext_client  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     was_redirect = bool(picked.get("redirect"))
     await _resolve_if_needed(picked, request)
-    # 解析规则可能在海阔侧刷新 Referer/Cookie/User-Agent；必须读取更新后的 headers。
+    # 解析规则可能在部分源侧刷新 Referer/Cookie/User-Agent；必须读取更新后的 headers。
     headers = dict(picked.get("headers") or {})
     src_url = _self_url(picked["url"])
     # 解析后若发现其实是 mp4 直链（wrapper 预判为 HLS 时的兜底），交由调用方 302
     if not re.search(r"\.m3u8(\?|$)", src_url, re.I) \
             and re.search(r"\.mp4(\?|$)", src_url, re.I):
         return _NOT_HLS, None
-    # 无后缀直链（如海阔 pan.wo.cn /openapi/download?fid=…、cmecloud 裸
+    # 无后缀直链（如部分源 pan.wo.cn /openapi/download?fid=…、cmecloud 裸
     # 对象 key）：后缀判不出 mp4，Range 探一次上游；判为媒体直链即回
     # _NOT_HLS 走 302 到 direct，探不到按原逻辑继续取清单。网盘线
     # （picked["pan"]）已有取后判分支，不参与探测。
@@ -1314,7 +1314,7 @@ async def _build_playlist_body(mg: str, picked: dict, request: Request):
     # 判为非 HLS 交调用方 302 到 direct；转码档则返回正常清单。
     if text is not None and picked.get("pan") and not _is_media_playlist(text):
         return _NOT_HLS, None
-    # 无后缀地址（海阔/B 站 API 播放接口常见）：取回来的既不是清单也不是空，
+    # 无后缀地址（部分源/B 站 API 播放接口常见）：取回来的既不是清单也不是空，
     # 说明是媒体直链（mp4/fmp4），交调用方 302 到 direct，否则会把二进制
     # 当清单塞给播放器，表现为一直转圈。
     if text is not None and not _is_media_playlist(text) \
@@ -2665,8 +2665,7 @@ async def hls_seg(mg: str, request: Request):
     # >>> PRIVATE:DDUO
     if _dduo_strip_referer(picked):
         # 多多解出的真实 CDN 鉴权直链：带外站 Referer 会 403
-        # （海阔 pick 跳过：规则给的 Referer 是分片鉴权的一部分。）
-        fwd.pop("Referer", None)
+                fwd.pop("Referer", None)
     # <<< PRIVATE:DDUO
     if "range" in request.headers and request.query_params.get("dec") != "1":
         fwd["Range"] = request.headers["range"]

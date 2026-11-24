@@ -1256,7 +1256,7 @@ async function switchPage(page){
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
-  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}try{if(typeof loadHaikuoMgmt==="function")loadHaikuoMgmt();}catch(e){}}
+  if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
   // >>> PRIVATE:SCANLOGIN
   if(page==="scanlogin"){try{await refreshPanScan();}catch(e){}try{await loadPansouCfg();}catch(e){}}

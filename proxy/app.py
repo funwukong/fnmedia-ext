@@ -6214,8 +6214,7 @@ async def direct_proxy(mg: str, request: Request):
     # >>> PRIVATE:DDUO
     if _dduo_strip_referer(target):
         # 多多解出的 CDN 直链：外站 Referer 会 403
-        # （海阔 pick 跳过：规则给的 Referer 是分片鉴权的一部分。）
-        fwd.pop("Referer", None)
+                fwd.pop("Referer", None)
     # <<< PRIVATE:DDUO
     if request.headers.get("range"):
         fwd["Range"] = request.headers["range"]
@@ -7362,7 +7361,7 @@ def _poster_fetch_headers(url: str) -> dict:
     return headers
 
 
-# 海阔规则海报常带 HikerView 后缀：url@Referer=https://站/@User-Agent=UA
+# 部分源规则海报常带 HikerView 后缀：url@Referer=https://站/@User-Agent=UA
 # 或 url@headers={"Referer": "..."}。只认已知键开头的 @Key= 标记——图地址
 # 本身也可能含 @（如 userinfo），不能按第一个 @ 一刀切。
 _POSTER_SUFFIX_RE = re.compile(r"@(Referer|User-Agent|Cookie|headers)=")
@@ -7455,7 +7454,7 @@ async def _poster_upstream_get(request: Request, url: str,
                                extra_headers: dict | None = None):
     """带重试抓一张上游海报；返回 httpx 响应，网络失败返回 None。
 
-    extra_headers：海报地址 @ 后缀里解析出的请求头（如海阔规则的
+    extra_headers：海报地址 @ 后缀里解析出的请求头（如部分源规则的
     @Referer=），优先于默认头；403 重试时若已带显式 Referer，不再用
     图床自身 origin 覆盖。
 
@@ -7534,7 +7533,7 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
         return _poster_fallback()
     if not u.startswith("http"):
         return _poster_fallback()
-    # 海阔规则海报可带 @Referer=/@headers= 后缀：拆出来当抓图请求头，
+    # 部分源规则海报可带 @Referer=/@headers= 后缀：拆出来当抓图请求头，
     # 干净地址进缓存与抓取（同一张图不同后缀不再重复缓存）。
     u, _poster_extra = _split_poster_suffix(u)
     want_badge = bool(pan_label) or health_grade is not None

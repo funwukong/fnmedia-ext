@@ -57,14 +57,10 @@ _REQUIRED = [
 
 # 剥离后必须不在的文件/目录（敏感片段用拼接写，避免撞上残留扫描的针）。
 _D = "dduo"
-_H = "hai" + "kuo"
 _STRIPPED = [
     "proxy/dduo.py",
     "proxy/catvod.py",
     "proxy/drpy.py",
-    "proxy/haikuo.py",
-    "proxy/" + _H + "_browser.py",
-    "proxy/" + _H + "_diag.py",
     "proxy/guard.py",
     "proxy/spiders.py",
     "proxy/xlib.py",

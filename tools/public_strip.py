@@ -45,10 +45,6 @@ DROP_FILES = {
     "proxy/xlib.py",
    "proxy/assets/drpy",
    "proxy/drpy.py",
-   "proxy/assets/haikuo",
-   "proxy/haikuo.py",
-   "proxy/haikuo_browser.py",
-   "proxy/haikuo_diag.py",
    "proxy/pan.py",          # 第三方网盘（夸克）扫码登录/转存/直链，私有
    "proxy/panuc.py",
    "proxy/panali.py",       # 第三方网盘（阿里云盘开放平台）登录/转存/取链，私有        # 第三方网盘（UC）扫码登录/转存/直链，私有
@@ -607,9 +603,9 @@ def main(root: str) -> int:
             for needle in ("dduotv.wasm", "import dduo", "wasmtime",
                            "多多影视",
                            "import catvod", "import xlib", "import drpy",
-                           "import guard", "import spiders", "import haikuo",
+                           "import guard", "import spiders",
                            "assets/drpy/drpy2.min.js",
-                           "/assets/catvod", "/assets/drpy", "/assets/haikuo",
+                           "/assets/catvod", "/assets/drpy",
                            "/assets/spiders",
                            "AListSh", "spider-runner", "runner_client",
                            "FNM_RUNNER_URL"):

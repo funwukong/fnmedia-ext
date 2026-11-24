@@ -99,6 +99,214 @@ BUILTIN_AD_RULES = {
 _AD_HOST_SUFFIXES = tuple(dict.fromkeys(BUILTIN_AD_RULES["host_suffixes"]))
 
 
+# 内置片源规则（原 fnmedia-ad-rules.json 已并入源码）：按 m3u8 host 匹配，
+# 命中后整块删除广告；durations 已折算为纯时长 regex 条目。
+BUILTIN_SOURCE_RULES: tuple[dict, ...] = (
+    {
+        "name": '磁力广告',
+        "hosts": ('magnet',),
+        "regex": (
+            '更多',
+            '社 區',
+            'x u u',
+            '社 区',
+            '有趣',
+            '有 趣',
+            '英皇体育',
+            '全中文AV在线',
+            '澳门皇冠赌场',
+            '哥哥快来',
+            '美女荷官',
+            '裸聊',
+            '新片首发',
+            'UUE29',
+        ),
+    },
+    {
+        "name": 'ff/非凡',
+        "hosts": ('vip.ffzy', 'hd.ffzy', 'ffzy', 'super.ffzy', 'cachem3u8.2s0'),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.400000,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.666667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXTINF.*?\\s+.*?1171(057).*?\\.ts',
+            '#EXTINF.*?\\s+.*?6d7b(077).*?\\.ts',
+            '#EXTINF.*?\\s+.*?6718a(403).*?\\.ts',
+            '14.45',
+            '17.99',
+            '20.52',
+            '25.0666',
+            '25.08',
+            '25.1',
+            '25.1999',
+        ),
+    },
+    {
+        "name": '看影网',
+        "hosts": ('fentvoss',),
+        "regex": (
+            '24.88',
+            '29.08',
+            '29.28',
+            '30.08',
+            '36.8',
+            '38.12',
+            '38.68',
+            '38.8',
+            '40.68',
+            '44.0',
+        ),
+    },
+    {
+        "name": 'lz/量子',
+        "hosts": ('vip.lz', 'hd.lz', 'v.cdnlz', 'yzzy1.play', 'v.cdnlz1', '.cdnlz'),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:7\\.166667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXTINF.*?\\s+.*?08646.*?\\.ts',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF.*?6\\.667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXTINF.*?\\s+.*?48234.*?\\.ts',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF.*?7\\.067,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '17.19',
+            '18.5333',
+            '18.6666',
+            '19.52',
+            '19.63',
+        ),
+    },
+    {
+        "name": 'sn/索尼',
+        "hosts": ('suonizy',),
+        "regex": (
+            '#EXTINF.*?\\s+.*?original.*?\\.ts\\s+',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:1\\.000000,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXTINF.*?\\s+.*?p1ayer.*?\\.ts',
+            '#EXTINF.*?\\s+.*?\\/video\\/original.*?\\.ts',
+            '15.1666',
+            '15.2666',
+            '15.266667',
+            '16.3333',
+        ),
+    },
+    {
+        "name": 'kk/快看',
+        "hosts": ('kuaikan',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*((?!#EXT-X-DISCONTINUITY)[\\s\\S])*?#EXT-X-KEY:METHOD((?!#EXT-X-DISCONTINUITY)[\\s\\S])*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-KEY:METHOD=NONE\\r*\\n*#EXTINF:5,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-KEY:METHOD=NONE\\r*\\n*#EXTINF:2\\.4,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-KEY:METHOD=NONE\\r*\\n*#EXTINF:1\\.467,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '5.0',
+            '20.123',
+            '20.167',
+        ),
+    },
+    {
+        "name": '1080zyk',
+        "hosts": ('-playback', 'yzzy.play', 'cdn.yzzy', 'yzzy-dy'),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.666667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.633333,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '16.45',
+            '16.46',
+            '16.63',
+            '17.66',
+        ),
+    },
+    {
+        "name": 'dytt',
+        "hosts": ('dytt-hot',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:1\\.800000,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:3\\.600000,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.566667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:5\\.700,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:3\\.900,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+        ),
+    },
+    {
+        "name": 'hwk/海外看',
+        "hosts": ('haiwaikan',),
+        "regex": (
+            '8.1748',
+            '10.0099',
+            '10.3333',
+            '10.85',
+            '16.0599',
+        ),
+    },
+    {
+        "name": 'ryplay',
+        "hosts": ('cdn.ryplay',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:6\\.633333,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:8\\.333333,[\\s\\S].*?\\.ts',
+            '#EXTINF:2\\.933333,[\\s\\S].*?\\.ts',
+        ),
+    },
+    {
+        "name": 'yqk',
+        "hosts": ('yqk',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*((?!#EXT-X-DISCONTINUITY)[\\s\\S])*?#EXT-X-CUE-OUT((?!#EXT-X-DISCONTINUITY)[\\s\\S])*?#EXT-X-CUE-IN',
+            '15.1666',
+            '18.4',
+        ),
+    },
+    {
+        "name": 'ikun',
+        "hosts": ('bfikuncdn',),
+        "regex": (
+            '#EXTINF.*?\\s+.*?XR8pDxQk.*?\\.ts',
+            '#EXTINF.*?\\s+.*?p5XQill8.*?\\.ts',
+        ),
+    },
+    {
+        "name": 'bf/暴风',
+        "hosts": ('bfzy', 'bfbfvip', 'bfengbf'),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:3,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+            '#EXTINF.*?\\s+.*?adjump.*?\\.ts',
+        ),
+    },
+    {
+        "name": 'yqk',
+        "hosts": ('yqk88',),
+        "regex": (
+            '15.1666',
+            '18.4',
+        ),
+    },
+    {
+        "name": 'xx',
+        "hosts": ('aws.ulivetv.net',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:8,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+        ),
+    },
+    {
+        "name": '555DM',
+        "hosts": ('cqxfjz',),
+        "regex": (
+            '10.56',
+        ),
+    },
+    {
+        "name": '黑木耳hmr',
+        "hosts": ('hmrvideo',),
+        "regex": (
+            '#EXT-X-DISCONTINUITY\\r*\\n*#EXTINF:3\\.366667,[\\s\\S]*?#EXT-X-DISCONTINUITY',
+        ),
+    },
+    {
+        "name": 'leshiyun',
+        "hosts": ('leshiyuncdn',),
+        "regex": (
+            '15.92',
+        ),
+    },
+)
+
+
+
 def _is_ad_host(host: str) -> bool:
     """host 是否属于广告投放域：整段相等，或以 "." 分隔的后缀命中。"""
     h = (host or "").strip().lower()
@@ -159,15 +367,62 @@ def _save_rules(rules: list[dict]) -> None:
     tmp.replace(_RULES_FILE)
 
 
+def builtin_rules() -> list[dict]:
+    """源码内置的片源规则（原 fnmedia-ad-rules.json 数据）。
+
+    返回标准结构 ``[{name, hosts:[], regex:[]}]``；调用方不需关心它是
+    元组常量还是磁盘 JSON。
+    """
+    out: list[dict] = []
+    for g in BUILTIN_SOURCE_RULES:
+        hosts = [str(h).strip().lower() for h in (g.get("hosts") or []) if str(h).strip()]
+        regex = [str(x) for x in (g.get("regex") or []) if str(x).strip()]
+        if not regex:
+            continue
+        out.append({"name": str(g.get("name") or ""), "hosts": hosts, "regex": regex})
+    return out
+
+
+def effective_rules() -> list[dict]:
+    """内置规则 + 本地（订阅导入/管理页写入）规则，按 (hosts, regex) 去重。
+
+    内置规则先入列，因此同名 host 的本地规则不会覆盖内置广告清理；两者
+    是并集关系（多一条规则只会多删广告块，安全护栏仍会兜底）。
+    """
+    merged: list[dict] = []
+    seen: set[tuple] = set()
+
+    def _sig(g: dict) -> tuple:
+        return (tuple(sorted(g.get("hosts") or [])), tuple(g.get("regex") or []))
+
+    for g in builtin_rules() + _load_rules():
+        if not isinstance(g, dict):
+            continue
+        hosts = [str(h).strip().lower() for h in (g.get("hosts") or []) if str(h).strip()]
+        regex = [str(x) for x in (g.get("regex") or []) if str(x).strip()]
+        if not regex:
+            continue
+        item = {"name": str(g.get("name") or ""), "hosts": hosts, "regex": regex}
+        sig = _sig(item)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        merged.append(item)
+    return merged
+
+
 def stats() -> dict:
     with _lock:
-        rules = _load_rules()
+        local = _load_rules()
+        rules = effective_rules()
     hosts = set()
     n_regex = 0
     for r in rules:
         hosts.update(r.get("hosts") or [])
         n_regex += len(r.get("regex") or [])
     return {"enabled": enabled(), "rule_groups": len(rules),
+            "builtin_groups": len(builtin_rules()),
+            "local_groups": len(local),
             "hosts": sorted(hosts), "regex_count": n_regex}
 
 
@@ -240,11 +495,20 @@ def _host_matches(hosts: list[str], media_url: str) -> bool:
 
 
 def _rules_for(media_url: str) -> list[str]:
+    """命中当前 m3u8 host 的全部规则正则（内置 + 本地，去重合并）。
+
+    ``_load_rules`` 只读本地文件；内置规则现在直接编译进源码，因此这里
+    必须走 ``effective_rules``，否则删除外部规则文件后内置广告清理会失效。
+    """
     pat: list[str] = []
+    seen: set[str] = set()
     with _lock:
-        for g in _load_rules():
+        for g in effective_rules():
             if _host_matches(g.get("hosts") or [], media_url):
-                pat.extend(g.get("regex") or [])
+                for x in (g.get("regex") or []):
+                    if x not in seen:
+                        seen.add(x)
+                        pat.append(x)
     return pat
 
 
