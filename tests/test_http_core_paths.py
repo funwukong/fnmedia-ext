@@ -577,7 +577,35 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 200)
         self.assertIn("text/html", r.headers.get("content-type", ""))
         self.assertIn("fnmedia-ext 管理台", r.text)
-        self.assertIn("no-store", r.headers.get("cache-control", ""))
+        # 不再 no-store：改为可协商缓存，配 ETag 走 304
+        self.assertIn("no-cache", r.headers.get("cache-control", ""))
+        self.assertNotIn("no-store", r.headers.get("cache-control", ""))
+        self.assertTrue(r.headers.get("etag", "").startswith('"'))
+
+    async def test_admin_page_supports_gzip_and_etag_304(self):
+        """管理页 ~170KB：应支持 gzip 压缩与 ETag 协商（重复打开不再全量下载）。"""
+        plain = await self.client.get("/v/online-admin")
+        raw = plain.content
+        self.assertGreater(len(raw), 100_000)
+        etag = plain.headers["etag"]
+
+        # 预压缩字节的体积收益（httpx 会自动解码响应体，故直接查预压缩产物）
+        _etag, gz_bytes = __import__("admin_api")._admin_page_assets()
+        self.assertLess(len(gz_bytes), len(raw) * 0.5,
+                        f"gzip 后 {len(gz_bytes)} 应远小于原始 {len(raw)}")
+        self.assertEqual(__import__("gzip").decompress(gz_bytes), raw)
+
+        gz = await self.client.get("/v/online-admin",
+                                   headers={"Accept-Encoding": "gzip"})
+        self.assertEqual(gz.status_code, 200)
+        self.assertEqual(gz.headers.get("content-encoding"), "gzip")
+        self.assertIn("Accept-Encoding", gz.headers.get("vary", ""))
+        self.assertEqual(gz.content, raw)   # httpx 已自动解码
+
+        revalidated = await self.client.get("/v/online-admin",
+                                           headers={"If-None-Match": etag})
+        self.assertEqual(revalidated.status_code, 304)
+        self.assertEqual(revalidated.content, b"")
 
 
 if __name__ == "__main__":

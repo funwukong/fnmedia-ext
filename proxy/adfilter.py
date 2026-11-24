@@ -348,7 +348,16 @@ def set_enabled(on: bool) -> None:
     _cfg.config.save({_ENABLE_KEY: bool(on)})
 
 
-def _load_rules() -> list[dict]:
+# 本地规则的 (path, (mtime_ns, size), rules) 缓存。
+# 播放清单过滤是热路径：每次取 m3u8 都会经 _rules_for -> effective_rules ->
+# _load_rules。导入过订阅规则的用户此前每个清单请求都要 read_text + json.loads
+# 一次；现在只做一次 stat，文件没变就直接用内存副本。
+# 写入走 _save_rules 会清缓存，因此管理页改规则后立即生效。
+_LOCAL_RULES_CACHE: tuple | None = None
+
+
+def _load_rules_uncached() -> list[dict]:
+    """从磁盘读本地规则（不做缓存）；异常语义与旧实现一致。"""
     try:
         if _RULES_FILE.exists():
             r = json.loads(_RULES_FILE.read_text(encoding="utf-8"))
@@ -359,12 +368,41 @@ def _load_rules() -> list[dict]:
     return []
 
 
+def _load_rules() -> list[dict]:
+    """读本地（订阅导入/管理页写入）规则，按文件 mtime+size 缓存。
+
+    返回**新的列表**（元素为原 dict），调用方可安全 append 而不会污染缓存。
+    没有 stat() 的注入型假 Path（测试用）直接走未缓存路径，语义不变。
+    """
+    global _LOCAL_RULES_CACHE
+    try:
+        st = _RULES_FILE.stat()
+    except FileNotFoundError:
+        _LOCAL_RULES_CACHE = None
+        return []
+    except (OSError, ValueError):
+        _log.debug("_load_rules failed", exc_info=True)
+        return []
+    except AttributeError:
+        # 假 Path（只有 exists/read_text）：不缓存，保持旧行为
+        return _load_rules_uncached()
+    key = (st.st_mtime_ns, st.st_size)
+    cache = _LOCAL_RULES_CACHE
+    if cache is not None and cache[0] is _RULES_FILE and cache[1] == key:
+        return list(cache[2])
+    rules = _load_rules_uncached()
+    _LOCAL_RULES_CACHE = (_RULES_FILE, key, list(rules))
+    return list(rules)
+
+
 def _save_rules(rules: list[dict]) -> None:
+    global _LOCAL_RULES_CACHE
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
     tmp = _RULES_FILE.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(rules, ensure_ascii=False, indent=1),
                    encoding="utf-8")
     tmp.replace(_RULES_FILE)
+    _LOCAL_RULES_CACHE = None   # 写后失效，下次读重新 stat
 
 
 def builtin_rules() -> list[dict]:

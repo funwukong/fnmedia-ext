@@ -8,6 +8,7 @@ import json
 import os
 import re
 import threading
+import time as _time
 from pathlib import Path
 
 import features
@@ -26,6 +27,9 @@ _log = get_logger("config")
 
 _STATE = Path(__file__).resolve().parent.parent / "state" / "config.json"
 _LOCK = threading.RLock()
+# maybe_reload 的 stat 节流窗口（秒）：热路径每次请求都会触发一次配置
+# 新鲜度检查，state 在机械盘/网络卷时 stat 开销可感知。
+_STAT_CHECK_INTERVAL = 1.0
 
 # 配置版本号：升级时按版本做迁移（见 Config.load）。
 # v2：多用户可见性默认改 fail-closed（acl_default_visible/acl_default_online
@@ -407,6 +411,7 @@ class Config:
     def __init__(self):
         self._cfg: dict = {}
         self._mtime = 0
+        self._last_stat_check = 0.0
         self.load()
 
 
@@ -568,6 +573,17 @@ class Config:
                     pass
 
     def maybe_reload(self):
+        """文件 mtime 变化时重载配置；同一秒内最多 stat 一次（节流）。
+
+        热路径（搜索/媒体库每次请求都会经 enabled_sources/all_sources）此前
+        每个请求都要 stat 一次；state 落在机械盘或网络卷时这层开销可感知。
+        节流 1 秒：手动改 config.json 最多延迟 1 秒生效；管理页写入走
+        save()（直接更新内存 + 落盘），不受节流影响。
+        """
+        now = _time.monotonic()
+        if now - self._last_stat_check < _STAT_CHECK_INTERVAL:
+            return
+        self._last_stat_check = now
         try:
             mt = _STATE.stat().st_mtime
         except FileNotFoundError:

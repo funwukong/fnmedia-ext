@@ -18,6 +18,8 @@ from t4_browser import LIB_TITLE as T4_LIB_TITLE
 import admin_auth as admin_authmod
 import asyncio
 import base64
+import gzip
+import hashlib
 import os
 from catalog import catalog
 import catalog as catalogmod
@@ -2022,15 +2024,46 @@ async def ext_adfilter_replace_rules(request: Request):
     return {"code": 0, "msg": "", "data": {"groups": n}}
 
 
+# ---- 管理页响应优化：预压缩 + ETag/304 --------------------------------------
+# 管理页是一份 ~172KB 的内联 HTML（编译期常量，不含任何令牌/会话数据）。
+# 原先每打开一次都完整下载 172KB 且 Cache-Control: no-store 让浏览器永不缓存。
+# 现改为：
+#   1) 首次请求时用 gzip 压一次并缓存字节（172KB → ~49KB，-71%），
+#      之后每请求直接返回缓存字节，无额外 CPU；
+#   2) 用内容摘要做 ETag，Cache-Control 改成 no-cache（每次协商校验）：
+#      内容没变就直接 304，浏览器不发响应体；
+#   3) Vary: Accept-Encoding，避免压缩/未压缩版本被中间层串味。
+_ADMIN_ETAG: str | None = None
+_ADMIN_GZIP: bytes | None = None
+
+
+def _admin_page_assets() -> tuple[str, bytes]:
+    """返回 (ETag, gzip 字节)；两者按 ADMIN_HTML 内容算一次后缓存。"""
+    global _ADMIN_ETAG, _ADMIN_GZIP
+    from admin_ui import ADMIN_HTML
+    if _ADMIN_ETAG is None:
+        raw = ADMIN_HTML.encode("utf-8")
+        _ADMIN_ETAG = '"' + hashlib.md5(raw).hexdigest() + '"'
+        _ADMIN_GZIP = gzip.compress(raw, 9)
+    return _ADMIN_ETAG, _ADMIN_GZIP or b""
+
+
 @admin_router.get("/v/online-admin")
-async def admin_page():
+async def admin_page(request: Request):
     from app import app  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     from admin_ui import ADMIN_HTML
-    return Response(
-        ADMIN_HTML,
-        media_type="text/html; charset=utf-8",
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate",
-                 "Pragma": "no-cache", "Expires": "0"})
+    etag, gz = _admin_page_assets()
+    headers = {"Cache-Control": "no-cache", "ETag": etag,
+               "Vary": "Accept-Encoding"}
+    # 协商缓存：内容未变（同一构建）直接 304，不传响应体。
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    if "gzip" in request.headers.get("accept-encoding", "").lower():
+        headers["Content-Encoding"] = "gzip"
+        return Response(gz, media_type="text/html; charset=utf-8",
+                        headers=headers)
+    return Response(ADMIN_HTML, media_type="text/html; charset=utf-8",
+                    headers=headers)
 
 
 
