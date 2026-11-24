@@ -1581,7 +1581,7 @@ async function copyDiagnosis(){
     toast("诊断信息已复制，可直接粘贴反馈");
   }catch(e){toast("复制失败："+e,"fail");}
 }
-function startLivePoll(){ if(LIVE_TIMER)return; LIVE_TIMER=setInterval(loadLive,3000); loadLive(); }
+function startLivePoll(){ if(LIVE_TIMER)return; LIVE_TIMER=setInterval(loadLive,5000); loadLive(); }
 function stopLivePoll(){ if(LIVE_TIMER){clearInterval(LIVE_TIMER);LIVE_TIMER=null;} }
 
 async function loadRuntimeDiagnostics(){
@@ -2100,7 +2100,7 @@ async function sourceProbeStart(){
     await jpost("/v/api/ext/source/probe/start",{concurrency:4});
     $("srcProbeCancelBtn").style.display="";$("srcProbeProgress").style.display="";
     if(SRC_PROBE_TIMER)clearInterval(SRC_PROBE_TIMER);
-    SRC_PROBE_TIMER=setInterval(sourceProbePoll,700);await sourceProbePoll();
+    SRC_PROBE_TIMER=setInterval(sourceProbePoll,1000);await sourceProbePoll();
   }catch(e){toast("启动探活失败："+e.message,"fail");}
 }
 async function sourceProbePoll(){

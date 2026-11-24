@@ -19,6 +19,7 @@ import json
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -541,10 +542,35 @@ class HttpCorePathsTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(appmod.chart_cache, "refresh", new=AsyncMock(return_value={})) as charts:
             on = await self.client.post("/v/api/ext/config", json={
                 "extension_enabled": True})
-        self.assertEqual(on.status_code, 200, on.text)
-        self.assertIs(self.config.get()["extension_enabled"], True)
+            # 网络刷新已移到后台任务：本次请求只做内存 reset 并立即返回。
+            self.assertEqual(on.status_code, 200, on.text)
+            self.assertIs(self.config.get()["extension_enabled"], True)
+            # 让后台任务获得调度机会后再断言（避免依赖具体时序）
+            for _ in range(20):
+                if routes.await_count and charts.await_count:
+                    break
+                await asyncio.sleep(0)
         routes.assert_awaited_once()
         charts.assert_awaited_once_with(force=True)
+
+    async def test_extension_enable_does_not_block_on_network_reload(self):
+        """开启服务不得同步等待路由/榜单刷新（否则管理页挂起两分半后误报失败）。"""
+        slow_routes = AsyncMock(return_value={})
+
+        async def _slow_refresh(_sources):
+            await asyncio.sleep(5)   # 模拟慢源深翻
+            return {}
+
+        slow_routes.side_effect = _slow_refresh
+        with patch.object(appmod.catalog, "refresh_routes", new=slow_routes), \
+                patch.object(appmod.chart_cache, "refresh", new=AsyncMock(return_value={})):
+            started = time.monotonic()
+            on = await self.client.post("/v/api/ext/config", json={
+                "extension_enabled": True})
+            elapsed = time.monotonic() - started
+        self.assertEqual(on.status_code, 200, on.text)
+        self.assertLess(elapsed, 2.0,
+                        f"开启接口被网络刷新阻塞了 {elapsed:.1f}s，应改为后台任务")
 
     async def test_admin_page_returns_html(self):
         r = await self.client.get("/v/online-admin")

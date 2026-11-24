@@ -321,12 +321,14 @@ CHART_LIB_GUIDS: dict[str, str] = {
 CHART_GUID_CAT = {g: c for c, g in CHART_LIB_GUIDS.items()}
 # chart guid -> 已解析（挂载到 store）的可播放 brief
 _chart_resolved: dict[str, dict] = {}
+_CHART_RESOLVED_MAX = 400  # 榜单每轮条目有限；跨轮累积时淘汰最旧（store 仍有落库）
 _chart_resolving: dict[str, asyncio.Future] = {}
 # 秒进播放页时，榜单片可能尚未绑定；暂记 media_guid -> chart guid，
 # 让播放页内的 stream/play/HLS 请求能找到同一个后台绑定任务，而不是漏给官方后端。
 _PENDING_MEDIA_CHART: dict[str, str] = {}
 # 已确认暂无可播源的榜单片：短时间内不要反复全网搜索（TTL 10 分钟）。
 _CHART_FAILED_TS: dict[str, float] = {}
+_CHART_FAILED_MAX = 400  # 失败标记条数上限：淘汰最旧（成功时已逐条 pop）
 _CHART_FAILED_TTL = 10 * 60
 
 # 海量分类片库（方案 C：按资源站分类深翻，每类数千部，无限滚动）。
@@ -749,13 +751,13 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
                 bound["chart"] = {"title": item["title"], "cat": item["cat"],
                                   "cover": item.get("cover", ""),
                                   "rating": item.get("rating", 0)}
-                _chart_resolved[guid] = bound
+                _bounded_put(_chart_resolved, guid, bound, _CHART_RESOLVED_MAX)
                 store.remember_merged([bound])
                 _persist_chart_binding(guid, bound)
                 _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
                 _CHART_FAILED_TS.pop(guid, None)
             else:
-                _CHART_FAILED_TS[guid] = time.time()
+                _bounded_put(_CHART_FAILED_TS, guid, time.time(), _CHART_FAILED_MAX)
             fut.set_result(best)
         except Exception:
             _log.debug("work failed", exc_info=True)
@@ -1449,12 +1451,20 @@ for _noisy in ("httpx", "httpcore", "httpcore.http11", "httpcore.connection",
 # 保留心跳，慢请求（>=1s）与错误（>=400）每次都记 info，保证异常可观测。
 _ACCESS_SLOW_MS = 1000
 _LOG_SAMPLE: dict[str, int] = {}
+_LOG_SAMPLE_MAX = 1000  # 兜底上限：key 数量实际有限，防异常路径无限增长
+
+
+def _bounded_put(d: dict, key, value, cap: int) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap（分摊 O(1)，见 hls_race 同名函数）。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
 
 
 def _sampled_log(key: str, every: int = 100) -> bool:
     """该 key 的第 every 次调用返回 True（其余时间调用方记 debug）。"""
     n = _LOG_SAMPLE.get(key, 0) + 1
-    _LOG_SAMPLE[key] = n
+    _bounded_put(_LOG_SAMPLE, key, n, _LOG_SAMPLE_MAX)
     return n % every == 0
 
 

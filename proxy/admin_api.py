@@ -968,14 +968,32 @@ async def ext_set_config(request: Request):
     config.save(patch)
     _search_cache.clear(); _AGG_CACHE.clear()
     if patch.get("extension_enabled") is True:
+        # 开启后要重建分类路由并刷新榜单，两者都是网络操作（单次最长 90s/60s）。
+        # 不能放在请求路径里同步等待：管理页按钮会挂到两分半、超时后前端误判失败。
+        # 这里只做微秒级的内存清理，网络刷新交给后台任务（与 _schedule_routes_refresh 同款）。
         try:
             catalog.reset()
-            await asyncio.wait_for(
-                catalog.refresh_routes(config.enabled_sources()), timeout=90)
-            await asyncio.wait_for(
-                chart_cache.refresh(force=True), timeout=chartmod.REFRESH_TIMEOUT)
         except Exception:
-            _log.info("extension data reload incomplete", exc_info=True)
+            _log.debug("extension reset failed", exc_info=True)
+
+        async def _reload_extension_data() -> None:
+            try:
+                await asyncio.wait_for(
+                    catalog.refresh_routes(config.enabled_sources()), timeout=90)
+            except Exception:
+                _log.info("extension routes reload incomplete", exc_info=True)
+            try:
+                await asyncio.wait_for(
+                    chart_cache.refresh(force=True),
+                    timeout=chartmod.REFRESH_TIMEOUT)
+            except Exception:
+                _log.info("extension charts reload incomplete", exc_info=True)
+            _log.info("extension data reload finished")
+
+        try:
+            asyncio.create_task(_reload_extension_data())
+        except Exception:
+            _log.debug("extension reload schedule failed", exc_info=True)
     # 方案B 开关切换：即时启用/停用冠军线记忆持久化
     if "prewarm_mode" in patch:
         try:

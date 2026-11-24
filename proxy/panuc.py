@@ -270,10 +270,6 @@ def account_info_safe() -> dict:
             "saved_ts": st.get("saved_ts", 0)}
 
 
-# 进行中的扫码会话：token -> httpx.Client（保留申请二维码时下发的 _UP_* cookie）
-_QR_SESSIONS: dict[str, "httpx.Client"] = {}
-
-
 def _cookie_header(c: "httpx.Client") -> str:
     return "; ".join(f"{k}={v}" for k, v in c.cookies.items())
 

@@ -1882,6 +1882,7 @@ _MAIN_SERVE_FUT: dict[str, asyncio.Future] = {}
 # 超时后等待者已拿到占位、引用丢弃，异常若无人取回只在 fut 被 GC 时打一条
 # "Future exception was never retrieved"；done 回调取回后记在这里。
 _MAIN_SERVE_BG_FAILS: dict[str, int] = {}
+_MAIN_SERVE_BG_FAILS_MAX = 2000  # 失败计数键上限：淘汰最旧（计数非关键数据）
 
 
 def _main_serve_fut_done(bk: str, fut: asyncio.Future):
@@ -1898,7 +1899,9 @@ def _main_serve_fut_done(bk: str, fut: asyncio.Future):
         if not done.cancelled():
             exc = done.exception()
             if exc is not None:
-                _MAIN_SERVE_BG_FAILS[bk] = _MAIN_SERVE_BG_FAILS.get(bk, 0) + 1
+                _bounded_put(_MAIN_SERVE_BG_FAILS, bk,
+                             _MAIN_SERVE_BG_FAILS.get(bk, 0) + 1,
+                             _MAIN_SERVE_BG_FAILS_MAX)
                 _log.warning("慢线后台取流失败 %s: %s", bk, exc, exc_info=exc)
         if _MAIN_SERVE_FUT.get(bk) is fut:
             _MAIN_SERVE_FUT.pop(bk, None)

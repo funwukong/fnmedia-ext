@@ -116,6 +116,16 @@ def _xlib_season_guid(show_guid: str) -> str:
 
 # 集 guid -> (show_guid,index) 内存映射（详情/播放流程内复用）
 _XLIB_EP_MAP: dict[str, tuple[str, int]] = {}
+# 两张映射条数上限：超限淘汰最旧；淘汰后的集播放走 _xlib_recover_media
+# 兜底（电影/纪录片可反解；剧集正常播放必经详情会重新登记）。
+_XLIB_MAP_MAX = 20000
+
+
+def _bounded_put(d: dict, key, value, cap: int) -> None:
+    """有界写：dict 按插入序淘汰最旧条目至 cap（分摊 O(1)，见 hls_race 同名函数）。"""
+    d[key] = value
+    while len(d) > cap:
+        d.pop(next(iter(d)), None)
 # 播放 media_guid（md5 派生）-> (show_guid,index)。App/TV 原生播放器走
 # /media/range/<media_guid>，store 查不到小雅条目会兜底透传官方而报“文件不存在”，
 # 故在生成播放信息时登记，供 media_range 反查并 302 到小雅直链。
@@ -125,7 +135,7 @@ _XLIB_MEDIA_MAP: dict[str, tuple[str, int]] = {}
 def _xlib_register_media(src_guid: str, show_guid: str, index: int) -> tuple[str, str]:
     """登记 src_guid（集 guid 或影片 guid）对应的小雅目标，返回 (media_guid,video_guid)。"""
     mg, vg = media_guid(src_guid), video_guid(src_guid)
-    _XLIB_MEDIA_MAP[mg] = (show_guid, index)
+    _bounded_put(_XLIB_MEDIA_MAP, mg, (show_guid, index), _XLIB_MAP_MAX)
     return mg, vg
 
 
@@ -160,7 +170,7 @@ def _xlib_recover_media(mg: str) -> tuple[str, int] | None:
     剧集因集 guid 动态生成、无落盘，仍需先打开详情建立映射（正常播放必经详情）。"""
     sg = _xlib_recovery_index().get(mg)
     if sg:
-        _XLIB_MEDIA_MAP[mg] = (sg, 0)
+        _bounded_put(_XLIB_MEDIA_MAP, mg, (sg, 0), _XLIB_MAP_MAX)
         return sg, 0
     return None
 
