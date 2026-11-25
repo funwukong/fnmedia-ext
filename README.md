@@ -6,7 +6,11 @@
 
 本仓库基座取自 [yujian0815/fnmedia-ext](https://github.com/yujian0815/fnmedia-ext)，
 功能架构与优化参考 [cjm2004/fnmedia-ext-turbo](https://github.com/cjm2004/fnmedia-ext-turbo)，
-在其基础上整合、修复并扩展（详见下方「本次更新」与 [CHANGELOG.md](./CHANGELOG.md)）。声明见 [声明.md](./声明.md)。
+在其基础上整合、修复并扩展（详见下方「本次更新」与 [CHANGELOG.md](./CHANGELOG.md)）。
+声明见 [声明.md](./声明.md)。
+本人毫无编程基础，全是用大白话改的，也是根据AI提示优化，所以才会出现版本混乱。
+有好什么的建议还请issues！
+
 
 > 点播源会随时间失效，因此本扩展**不做转存/STRM 落库**——即刷即播、即搜即播；源不可用时可在管理页删除或替换。
 >
