@@ -59,7 +59,8 @@ class HlsRegTests(unittest.TestCase):
     def test_byte_cap_evicts_oldest(self):
         # 3 条各 ~1000 字节的注册表，上限 2500：第三条写入后最旧一条被淘汰，
         # 总字节 <= 上限（修复前：只按 4000 条数上限，三条全留）。
-        with patch.object(hracemod, "_HLS_REG_MAX_BYTES", 2500):
+        with patch.object(hracemod, "_cache_budget_bytes",
+                          lambda key, fallback: 2500):
             r1 = hracemod._hls_reg_put(["u" * 1000])
             r2 = hracemod._hls_reg_put(["v" * 1000])
             r3 = hracemod._hls_reg_put(["w" * 1000])
@@ -79,7 +80,8 @@ class HlsRegTests(unittest.TestCase):
     def test_single_huge_entry_kept_but_old_evicted(self):
         # 单条本身超限时保留该条（不清空整表，上限由单条大小兜底），
         # 但旧条目仍被淘汰：总量不超过“上限 + 单条大小”。
-        with patch.object(hracemod, "_HLS_REG_MAX_BYTES", 2500):
+        with patch.object(hracemod, "_cache_budget_bytes",
+                          lambda key, fallback: 2500):
             r1 = hracemod._hls_reg_put(["a" * 1000])
             r2 = hracemod._hls_reg_put(["b" * 5000])
             self.assertEqual(hracemod._hls_reg_get(r1, 0), "")
@@ -95,14 +97,14 @@ class PlaylistCacheTtlTests(unittest.IsolatedAsyncioTestCase):
     def test_cached_playlist_seconds_expired_returns_zero_and_pops(self):
         picked = {"online_guid": "g1", "line": "L", "index": 0}
         key = hracemod._playlist_cache_key(picked)
-        hracemod._PLAYLIST_CACHE[key] = (time.time() - 121, FAKE_M3U8)
+        hracemod._PLAYLIST_CACHE[key] = (time.monotonic() - 121, FAKE_M3U8)
         self.assertEqual(hracemod._cached_playlist_seconds(picked), 0)
         self.assertNotIn(key, hracemod._PLAYLIST_CACHE)
 
     def test_cached_playlist_seconds_fresh(self):
         picked = {"online_guid": "g1", "line": "L", "index": 0}
         key = hracemod._playlist_cache_key(picked)
-        hracemod._PLAYLIST_CACHE[key] = (time.time(), FAKE_M3U8)
+        hracemod._PLAYLIST_CACHE[key] = (time.monotonic(), FAKE_M3U8)
         self.assertEqual(hracemod._cached_playlist_seconds(picked), 30)
         self.assertIn(key, hracemod._PLAYLIST_CACHE)
 
@@ -111,7 +113,7 @@ class PlaylistCacheTtlTests(unittest.IsolatedAsyncioTestCase):
                 "url": "https://x.test/a.m3u8", "m3u8": True,
                 "headers": {"User-Agent": "Mozilla/5.0"}, "title": "T"}
         key = hracemod._playlist_cache_key(cand)
-        hracemod._PLAYLIST_CACHE[key] = (time.time() - 121, FAKE_M3U8)
+        hracemod._PLAYLIST_CACHE[key] = (time.monotonic() - 121, FAKE_M3U8)
         request = SimpleNamespace(state=SimpleNamespace(_play_mg=""))
 
         async def _fake_fetch(request, url, headers):
@@ -159,7 +161,8 @@ class AggCacheTests(unittest.IsolatedAsyncioTestCase):
         # 两条各 ~1.6KB 的聚合结果，上限 2500B：第二条写入后第一条被淘汰
         # （修复前：800 条数上限内两条全留，最坏可达 897MB）。
         p1, p2 = self._patch_agg()
-        with p1, p2, patch.object(appmod, "_AGG_CACHE_MAX_BYTES", 2500):
+        with p1, p2, patch("config.cache_budget_bytes",
+                           lambda key: 2500):
             await appmod._aggregate_briefs("kw1")
             await appmod._aggregate_briefs("kw2")
             keys = list(appmod._AGG_CACHE)
@@ -223,12 +226,12 @@ class LineSpeedTests(unittest.TestCase):
         hracemod._LINE_SPEED.update(self._saved)
 
     def test_expired_returns_zero_and_pops(self):
-        hracemod._LINE_SPEED["slow"] = (500.0, time.time() - 3700)
+        hracemod._LINE_SPEED["slow"] = (500.0, time.monotonic() - 3700)
         self.assertEqual(hracemod._line_speed({"line": "slow"}), 0.0)
         self.assertNotIn("slow", hracemod._LINE_SPEED)
 
     def test_fresh_kept(self):
-        hracemod._LINE_SPEED["fast"] = (800.0, time.time())
+        hracemod._LINE_SPEED["fast"] = (800.0, time.monotonic())
         self.assertEqual(hracemod._line_speed({"line": "fast"}), 800.0)
         self.assertIn("fast", hracemod._LINE_SPEED)
 
@@ -445,3 +448,51 @@ class ChartbindTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class V126OptimizationTests(unittest.TestCase):
+    """v1.2.6：清单 TTL 分级 / 聚合字节估算有界 / 缓存预算档位。"""
+
+    def test_playlist_ttl_vod_longer_than_live(self):
+        vod = "#EXTM3U\n#EXTINF:4,\na.ts\n#EXT-X-ENDLIST\n"
+        live = "#EXTM3U\n#EXTINF:4,\na.ts\n"
+        self.assertEqual(hracemod._playlist_ttl_for(vod),
+                         hracemod._PLAYLIST_TTL_VOD)
+        self.assertEqual(hracemod._playlist_ttl_for(live),
+                         hracemod._PLAYLIST_TTL)
+        # 护栏：点播 TTL 必须明显短于分片签名典型有效期（3h），也要长于直播
+        self.assertGreater(hracemod._PLAYLIST_TTL_VOD, hracemod._PLAYLIST_TTL)
+        self.assertLessEqual(hracemod._PLAYLIST_TTL_VOD, 1800.0)
+
+    def test_agg_entry_bytes_bounded(self):
+        # 深链结构：节点数远超上限，估算必须在上限附近快速返回（不遍历全表）
+        deep = {"k": None}
+        cur = deep
+        for i in range(5000):
+            nxt = {"k": str(i) * 100}
+            cur["k"] = nxt
+            cur = nxt
+        got = appmod._agg_entry_bytes(deep)
+        self.assertGreater(got, 0)
+        # 估算不应为 0，也不应是 5000 层全量精确值（那会 > 500_000）
+        self.assertLess(got, 900_000)
+
+    def test_cache_budget_profile_switch(self):
+        import config as cfgmod
+        old = cfgmod.config.read("cache_budget_profile", "standard")
+        try:
+            cfgmod.config.save({"cache_budget_profile": "standard"})
+            std = cfgmod.cache_budget_bytes("agg_cache_mb")
+            cfgmod.config.save({"cache_budget_profile": "low"})
+            low = cfgmod.cache_budget_bytes("agg_cache_mb")
+            self.assertEqual(std, 128 * 1024 * 1024)
+            self.assertEqual(low, 32 * 1024 * 1024)
+            cfgmod.config.save({"cache_budget_profile": "custom",
+                                "agg_cache_mb": 96})
+            self.assertEqual(cfgmod.cache_budget_bytes("agg_cache_mb"),
+                             96 * 1024 * 1024)
+            # 越界夹取
+            self.assertEqual(cfgmod.clamp_cache_budget_mb(1), 8)
+            self.assertEqual(cfgmod.clamp_cache_budget_mb(99999), 2048)
+        finally:
+            cfgmod.config.save({"cache_budget_profile": old})

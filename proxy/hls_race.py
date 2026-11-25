@@ -32,6 +32,28 @@ from playback_target import (is_slow_line as target_is_slow_line,
 
 _log = get_logger("app")  # 与 app._log 同一 logger 对象
 
+
+def _now() -> float:
+    """缓存 TTL 统一用单调钟：墙钟可能被 NTP 回拨，单调钟不受影响。
+
+    只用于本模块的缓存时间戳/TTL 比较；计时（耗时统计）与墙钟语义
+    （placeholder 段号）仍用 time.time()，口径不变。"""
+    return time.monotonic()
+
+
+def _cache_budget_bytes(key: str, fallback: int) -> int:
+    """缓存字节预算：实时读配置（管理页切档位立即生效）。
+
+    config 在本模块是延迟导入（避免与 app.py 循环导入），这里同样延迟导入；
+    任何异常都回落模块常量，保证淘汰循环不会因配置读失败而中断。"""
+    try:
+        import config as _cfg
+        return _cfg.cache_budget_bytes(key)
+    except Exception:
+        _log.debug("_cache_budget_bytes failed", exc_info=True)
+        return fallback
+
+
 # 与 app.ONLINE_PREFIX 同值（路由装饰器在定义时求值，无法经 app 懒取）。
 ONLINE_PREFIX = "/v/media/online"
 
@@ -52,7 +74,7 @@ def _line_bad_key(picked: dict) -> str:
 def _mark_line_bad(picked: dict) -> None:
     if not picked or not picked.get("line"):
         return
-    _LINE_BAD[_line_bad_key(picked)] = time.time()
+    _LINE_BAD[_line_bad_key(picked)] = _now()
     if len(_LINE_BAD) > 1000:
         for k in list(_LINE_BAD)[:500]:
             _LINE_BAD.pop(k, None)
@@ -62,7 +84,7 @@ def _line_is_bad(picked: dict) -> bool:
     ts = _LINE_BAD.get(_line_bad_key(picked))
     if ts is None:
         return False
-    if time.time() - ts >= _LINE_BAD_TTL:
+    if _now() - ts >= _LINE_BAD_TTL:
         _LINE_BAD.pop(_line_bad_key(picked), None)
         return False
     return True
@@ -215,7 +237,7 @@ async def _probe_latency(cand: dict, request: Request,
         key = _playlist_cache_key(cand)
         cached = _PLAYLIST_CACHE.get(key)
         if cached:
-            if time.time() - cached[0] > _PLAYLIST_TTL:
+            if _now() - cached[0] > _playlist_ttl_for(cached[1]):
                 # 过期清单不上游签名已失效：立即删，不再验活复用
                 _playlist_cache_drop(key)
             else:
@@ -316,7 +338,7 @@ async def _verify_rewritten_first_seg(body: str, request: Request,
         if not u:
             return True
         real = b64d(u)
-        now = time.time()
+        now = _now()
         if _SEG_OK_CACHE.get(real) and now - _SEG_OK_CACHE[real] < _SEG_OK_TTL:
             return True
         headers = dict((picked or {}).get("headers") or
@@ -446,7 +468,7 @@ async def _resurrect_start(picked: dict, mg: str) -> str:
         return "fail"
     if mg and mg in _MEDIA_REDIRECT:
         return "ok"
-    if time.time() - _RESURRECT_FAIL.get(nkey, 0) < _RESURRECT_FAIL_TTL:
+    if _now() - _RESURRECT_FAIL.get(nkey, 0) < _RESURRECT_FAIL_TTL:
         return "fail"
     fut = _RESURRECT_FUT.get(nkey)
     if fut is None:
@@ -544,7 +566,7 @@ async def _resurrect_worker(picked: dict, mg: str, nkey: str) -> bool:
     except Exception:
         _log.debug("_resurrect_worker failed", exc_info=True)
         pass
-    _bounded_put(_RESURRECT_FAIL, nkey, time.time(), _RESURRECT_FAIL_MAX)
+    _bounded_put(_RESURRECT_FAIL, nkey, _now(), _RESURRECT_FAIL_MAX)
     return False
 
 
@@ -569,7 +591,7 @@ def _remember_fast(picked: dict, line: str, latency: float | None = None) -> Non
     """
     if not line:
         return
-    _LINE_FAST[_episode_key(picked)] = (time.time(), line)
+    _LINE_FAST[_episode_key(picked)] = (_now(), line)
     if len(_LINE_FAST) > 1000:
         for k in list(_LINE_FAST)[:500]:
             _LINE_FAST.pop(k, None)
@@ -594,7 +616,7 @@ def remembered_fast_line(picked: dict) -> str | None:
     if not rec:
         return None
     ts, line = rec
-    if time.time() - ts >= _LINE_FAST_TTL:
+    if _now() - ts >= _LINE_FAST_TTL:
         _LINE_FAST.pop(_episode_key(picked), None)
         return None
     if _line_is_bad({**picked, "line": line}):
@@ -639,7 +661,7 @@ def _remember_speed(picked: dict | None, kbps: float) -> None:
     k = str(picked["line"])
     old = _LINE_SPEED.get(k)
     val = kbps if old is None else old[0] * 0.6 + kbps * 0.4
-    _LINE_SPEED[k] = (val, time.time())
+    _LINE_SPEED[k] = (val, _now())
     if len(_LINE_SPEED) > 800:
         for kk in list(_LINE_SPEED)[:400]:
             _LINE_SPEED.pop(kk, None)
@@ -649,7 +671,7 @@ def _line_speed(picked: dict) -> float:
     rec = _LINE_SPEED.get(str(picked.get("line", "")))
     if not rec:
         return 0.0
-    if time.time() - rec[1] > 3600:      # 一小时前的观测不再作数
+    if _now() - rec[1] > 3600:           # 一小时前的观测不再作数
         _LINE_SPEED.pop(str(picked.get("line", "")), None)  # 过期即删，不占位
         return 0.0
     return rec[0]
@@ -700,7 +722,7 @@ def _mid_switch_failures(picked: dict) -> int:
     if not rec:
         return 0
     n, ts = rec
-    if time.time() - ts >= _MID_SWITCH_FAIL_TTL:
+    if _now() - ts >= _MID_SWITCH_FAIL_TTL:
         _MID_SWITCH_FAILS.pop(key, None)
         return 0
     return n
@@ -710,7 +732,7 @@ def _mid_switch_note_fail(picked: dict) -> None:
     """记一次换线失败（换过去的新线取不到清单）。达到上限后不再主动换线。"""
     key = _episode_key(picked)
     n = _mid_switch_failures(picked)
-    _MID_SWITCH_FAILS[key] = (n + 1, time.time())
+    _MID_SWITCH_FAILS[key] = (n + 1, _now())
     if len(_MID_SWITCH_FAILS) > 1000:
         for k in list(_MID_SWITCH_FAILS)[:500]:
             _MID_SWITCH_FAILS.pop(k, None)
@@ -1055,12 +1077,27 @@ async def _resolve_if_needed(picked: dict, request: Request) -> dict:
 # 上游地址带时效签名，TTL 取短；只缓存成功结果。
 _PLAYLIST_CACHE: dict[str, tuple[float, str]] = {}
 _PLAYLIST_TTL = 120.0
+# 点播清单（带 #EXT-X-ENDLIST）内容不可变，缓存可以放长——每次命中省一次
+# 上游抓取与改写。取 10 分钟而非 30+：分片 URL 多带时效签名，缓存窗必须
+# 明显短于签名有效期，宁可多抓一次也不能把过期清单塞给播放器。
+# 直播清单（无 ENDLIST）仍用 120 秒。
+_PLAYLIST_TTL_VOD = 600.0
 _PLAYLIST_MAX_BYTES = 64 * 1024 * 1024  # 64MB：改写后清单单条可达 1MB+，
 # 600 条数上限最坏 ~600MB；字节上限兜底，超限删最旧（清单可重新抓取生成）。
 _PLAYLIST_SIZE: dict[str, int] = {}     # key -> 该条字节数（len(body)）
 _PLAYLIST_BYTES = 0                     # 当前总量（运行值）
 # 单飞：同一「集+线路」只允许一次在途抓取，预热与真正取 main 共用同一个 Future
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
+
+
+def _playlist_ttl_for(body) -> float:
+    """按清单类型返回缓存 TTL：点播（ENDLIST）长、直播/未知短。
+
+    只看 #EXT-X-ENDLIST 这一个结构特征——它由源站写在媒体清单尾部，
+    比按 URL 猜点播/直播可靠。"""
+    if isinstance(body, str) and "#EXT-X-ENDLIST" in body:
+        return _PLAYLIST_TTL_VOD
+    return _PLAYLIST_TTL
 
 
 def _playlist_cache_drop(key: str) -> None:
@@ -1086,15 +1123,16 @@ def _playlist_cache_put(key: str, body: str) -> None:
     """有界写播放列表缓存：条数 600 + 字节 64MB 双上限，超限删最旧条目
     （dict 按插入序，最旧在队首；单条超限时保留该条，不清空整表）。"""
     global _PLAYLIST_BYTES
-    _PLAYLIST_CACHE[key] = (time.time(), body)
+    _PLAYLIST_CACHE[key] = (_now(), body)
     if key in _PLAYLIST_SIZE:
         _PLAYLIST_BYTES -= _PLAYLIST_SIZE[key]
     _PLAYLIST_SIZE[key] = len(body) if isinstance(body, str) else 0
     _PLAYLIST_BYTES += _PLAYLIST_SIZE[key]
     if len(_PLAYLIST_SIZE) != len(_PLAYLIST_CACHE):
         _rebuild_playlist_bytes()
+    _budget = _cache_budget_bytes("playlist_cache_mb", _PLAYLIST_MAX_BYTES)
     while (len(_PLAYLIST_CACHE) > 600
-           or _PLAYLIST_BYTES > _PLAYLIST_MAX_BYTES) \
+           or _PLAYLIST_BYTES > _budget) \
             and len(_PLAYLIST_CACHE) > 1:
         _playlist_cache_drop(next(iter(_PLAYLIST_CACHE)))
 
@@ -1137,7 +1175,7 @@ def _hls_reg_put(urls: list[str]) -> str:
     global _HLS_REG_BYTES
     import secrets
     rid = secrets.token_hex(6)
-    _HLS_REG[rid] = (time.time(), urls)
+    _HLS_REG[rid] = (_now(), urls)
     if len(_HLS_REG_SIZE) != len(_HLS_REG):
         _rebuild_hls_reg_bytes()  # 外部直接改过注册表：重建记账（含新条）
     else:
@@ -1145,8 +1183,9 @@ def _hls_reg_put(urls: list[str]) -> str:
         _HLS_REG_SIZE[rid] = size
         _HLS_REG_BYTES += size
     # 按插入序（≈时间序）删最旧，不做全表排序；单条超限时保留该条
+    _budget = _cache_budget_bytes("hls_reg_cache_mb", _HLS_REG_MAX_BYTES)
     while (len(_HLS_REG) > _HLS_REG_MAX
-           or _HLS_REG_BYTES > _HLS_REG_MAX_BYTES) \
+           or _HLS_REG_BYTES > _budget) \
             and len(_HLS_REG) > 1:
         _hls_reg_drop(next(iter(_HLS_REG)))
     return rid
@@ -1157,7 +1196,7 @@ def _hls_reg_get(rid: str, i: int) -> str:
     if not ent:
         return ""
     ts, urls = ent
-    if time.time() - ts > _HLS_REG_TTL:
+    if _now() - ts > _HLS_REG_TTL:
         _hls_reg_drop(rid)
         return ""
     return urls[i] if 0 <= i < len(urls) else ""
@@ -1460,15 +1499,15 @@ async def _get_playlist_cached(mg: str, picked: dict, request: Request):
     若该集/线路已有在途抓取（点击时预热启动），直接等同一个结果，不重复请求上游。"""
     from app import _build_playlist_body  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     key = _playlist_cache_key(picked)
-    now = time.time()
+    now = _now()
     hit = _PLAYLIST_CACHE.get(key)
     if hit:
-        if now - hit[0] < _PLAYLIST_TTL:
+        if now - hit[0] < _playlist_ttl_for(hit[1]):
             return hit[1]
         _playlist_cache_drop(key)
     fut = _PLAYLIST_FUT.get(key)
     if fut is None:
-        fut = asyncio.get_event_loop().create_future()
+        fut = asyncio.get_running_loop().create_future()
         _PLAYLIST_FUT[key] = fut
 
         async def produce():
@@ -1497,7 +1536,7 @@ def _warm_playlist(mg: str, picked: dict, request: Request) -> None:
         return
     key = _playlist_cache_key(picked)
     hit = _PLAYLIST_CACHE.get(key)
-    if hit and time.time() - hit[0] < _PLAYLIST_TTL:
+    if hit and _now() - hit[0] < _playlist_ttl_for(hit[1]):
         return
     if key in _PLAYLIST_FUT:
         return  # 已在途
@@ -1548,7 +1587,7 @@ def _cached_playlist_seconds(picked: dict) -> int:
         return 0
     if not hit:
         return 0
-    if time.time() - hit[0] > _PLAYLIST_TTL:
+    if _now() - hit[0] > _playlist_ttl_for(hit[1]):
         _playlist_cache_drop(key)
         return 0
     body = hit[1]
@@ -2621,6 +2660,60 @@ def _direct_to_placeholder(mg: str, request: Request) -> RedirectResponse:
         headers={"Cache-Control": "no-store", "X-fnmedia-Placeholder": "1"})
 
 
+# ---- 分片 CDN 直连绕行（v1.2.8）----
+# 满足全部条件才 302：开关开 + host 命中白名单 + 非加密分片 + 该线路不需要
+# 服务端补任何请求头（Referer/Cookie/UA）。任何一条不满足就照旧代理——
+# 各 CDN 对 302/Range/防盗链行为不一致，宁可多走服务器也不能让播放断掉。
+def _seg_direct_enabled() -> bool:
+    try:
+        from app import config
+        return bool(config.read("seg_direct_enabled", False))
+    except Exception:
+        _log.debug("_seg_direct_enabled failed", exc_info=True)
+        return False
+
+
+def _seg_direct_hosts() -> tuple[str, ...]:
+    try:
+        from app import config
+        raw = config.read("seg_direct_hosts", []) or []
+        if isinstance(raw, str):
+            raw = [x for x in raw.replace("\n", ",").split(",")]
+        out = []
+        for item in raw:
+            h = str(item or "").strip().lower().lstrip(".")
+            if h and "/" not in h:
+                out.append(h)
+        return tuple(dict.fromkeys(out))
+    except Exception:
+        _log.debug("_seg_direct_hosts failed", exc_info=True)
+        return ()
+
+
+def _seg_direct_ok(src_url: str, picked_headers: dict, request: Request) -> bool:
+    """分片能否直接 302 到 CDN（不经过本服务转发）。"""
+    try:
+        if not _seg_direct_enabled():
+            return False
+        if request.query_params.get("dec") == "1":
+            return False  # 加密分片必须服务端解密
+        hosts = _seg_direct_hosts()
+        if not hosts:
+            return False
+        host = urllib.parse.urlsplit(src_url).netloc.lower().split(":", 1)[0]
+        if not any(host == h or host.endswith("." + h) for h in hosts):
+            return False
+        # 只需要 Range（播放器自己会带）；其余头说明源站要 Referer/Cookie，
+        # 302 后客户端不会补，必然 403。
+        for key in (picked_headers or {}):
+            if str(key).lower() != "range":
+                return False
+        return True
+    except Exception:
+        _log.debug("_seg_direct_ok failed", exc_info=True)
+        return False
+
+
 @hls_router.get(f"{ONLINE_PREFIX}/{{mg}}/seg")
 async def hls_seg(mg: str, request: Request):
     from app import _RETRY_STATUS, _await_pending_chart, _chart_key_open, _denied_lib_response, _is_pansou_line_name, _online_target_viewable, _pick_episode, _safe_response_headers, _try_stream_segment, _viewer_ctx, app, b64d, chart_guid_by_media, ext_get_retry  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -2672,6 +2765,18 @@ async def hls_seg(mg: str, request: Request):
     # <<< PRIVATE:DDUO
     if "range" in request.headers and request.query_params.get("dec") != "1":
         fwd["Range"] = request.headers["range"]
+    # 分片 CDN 直连绕行：白名单内、无需服务端补头的普通分片直接 302，
+    # 服务器不转发字节。网盘/T4/多多鉴权线一律不走（它们依赖服务端补头）。
+    if (request.query_params.get("dec") != "1"
+            and not (picked or {}).get("pan")
+            and not (picked or {}).get("t4")
+            and not _dduo_strip_referer(picked)
+            and _seg_direct_ok(src_url, headers, request)):
+        return RedirectResponse(
+            src_url, status_code=302,
+            headers={"Cache-Control": "no-store",
+                     "Access-Control-Allow-Origin": "*",
+                     "X-fnmedia-Seg-Direct": "1"})
     # 起播速度优先：普通分片走流式直通（见 _try_stream_segment）。
     # 加密分片 dec=1 由本服务解密、Range 请求要按字节回传，两者仍走整段缓冲老路径。
     if request.query_params.get("dec") != "1":

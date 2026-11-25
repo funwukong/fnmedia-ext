@@ -31,7 +31,7 @@ def test_type4_collected_not_skipped():
 
 
 def test_admin_ui_renders_t4_section():
-    ui = open(os.path.join(os.path.dirname(__file__), "..", "proxy", "admin_ui.py"),
+    ui = open(os.path.join(os.path.dirname(__file__), "..", "proxy", "assets", "admin.html"),
               encoding="utf-8").read()
     assert "T4 远程源" in ui
     assert "d.t4" in ui

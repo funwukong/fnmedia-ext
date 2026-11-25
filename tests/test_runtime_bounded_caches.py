@@ -109,7 +109,7 @@ def test_xlib_media_map_is_bounded():
 
 
 def test_admin_ui_poll_intervals_are_relaxed():
-    ui = (ROOT / "proxy" / "admin_ui.py").read_text(encoding="utf-8")
+    ui = (ROOT / "proxy" / "assets" / "admin.html").read_text(encoding="utf-8")
     assert "setInterval(loadLive,5000)" in ui
     assert "setInterval(sourceProbePoll,1000)" in ui
     assert "setInterval(loadLive,3000)" not in ui

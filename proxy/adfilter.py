@@ -76,6 +76,8 @@ _AD_URL_HINTS = tuple(dict.fromkeys(
         "/adjump", "/advideo", "redtraffic", "guanggao", "/gg/",
         "/adevent", "/vast", "openx", "/insertad",
     )))
+# 预编译关键字联合正则：一次 search 代替 23 次子串扫描（8000 分片实测省一半）。
+_AD_URL_HINTS_RE = re.compile("|".join(re.escape(k) for k in _AD_URL_HINTS))
 # 广告投放域名后缀（仅 host 后缀匹配，不扫整个 URL）。这些是纯广告投放
 # 域（Google Ad Manager/AdSense、AppNexus、The Trade Desk、PubMatic、
 # Criteo、Moat、Amazon Ads、腾讯广点通、阿里 Tanx），正片分片不可能
@@ -307,12 +309,18 @@ BUILTIN_SOURCE_RULES: tuple[dict, ...] = (
 
 
 
+# 预编译：host 后缀比较交给 str.endswith(tuple)（C 层循环），比
+# Python 层 any(h == s or h.endswith("." + s) ...) 快一个量级。
+_AD_HOST_SUFFIX_SET = frozenset(s.lower() for s in _AD_HOST_SUFFIXES)
+_AD_HOST_DOT_SUFFIXES = tuple("." + s for s in _AD_HOST_SUFFIX_SET)
+
+
 def _is_ad_host(host: str) -> bool:
     """host 是否属于广告投放域：整段相等，或以 "." 分隔的后缀命中。"""
     h = (host or "").strip().lower()
     if not h:
         return False
-    return any(h == s or h.endswith("." + s) for s in _AD_HOST_SUFFIXES)
+    return h in _AD_HOST_SUFFIX_SET or h.endswith(_AD_HOST_DOT_SUFFIXES)
 
 
 # SCTE-35 / 标准广告插播标记。注意 #EXT-X-DATERANGE 不在此列：只有带
@@ -327,6 +335,8 @@ _CUE_IN = ("#EXT-X-CUE-IN",)
 _DATERANGE_AD_MARKERS = ("SCTE35-OUT", "SCTE35-CMD", "CUE-OUT",
                          'CLASS="COM.APPLE.HLS.INTERSTITIAL"')
 _DATERANGE_END_MARKERS = ("SCTE35-IN",)
+_DATERANGE_END_RE = re.compile("|".join(map(re.escape, _DATERANGE_END_MARKERS)))
+_DATERANGE_AD_RE = re.compile("|".join(map(re.escape, _DATERANGE_AD_MARKERS)))
 _CUE_SKIP_TAGS = ("#EXT-X-ASSET", "#EXT-X-CUE", "#EXT-X-SCTE35",
                   "#EXT-OATCLS-SCTE35")
 # 纯时长：匹配 5.480000 这类数字（允许整数/小数）
@@ -594,9 +604,13 @@ def _drop_segments_by_duration(text: str, durations: set[float],
     return "\n".join(out)
 
 
-def _apply_heuristic(text: str) -> tuple[str, int]:
-    """不依赖订阅规则的通用清理。返回 (新文本, 删除分片数)。"""
-    lines = text.splitlines()
+def _apply_heuristic(text: str, lines=None) -> tuple[str, int]:
+    """不依赖订阅规则的通用清理。返回 (新文本, 删除分片数)。
+
+    lines 可传入调用方已拆好的行数组（省一次全文 splitlines）；不传则自行拆分。
+    """
+    if lines is None:
+        lines = text.splitlines()
     out: list[str] = []
     i = 0
     n = len(lines)
@@ -613,15 +627,25 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
         ln = lines[i]
         s = ln.strip()
 
+        # 快路径：分片 URL 行（非标签）。清单里一半以上是这种行，直接跳过
+        # 后面 4~5 次标签 startswith 判定；广告区间内仍按原语义吞掉。
+        if s and not s.startswith("#"):
+            if in_cue:
+                i += 1
+            else:
+                out.append(ln)
+                i += 1
+            continue
+
         # DATERANGE 单独处理：只有带广告标记的才开/关区间，普通 DATERANGE
         #（章节、定时元数据）原样保留，不进广告区间。
         if s.startswith("#EXT-X-DATERANGE"):
             up = s.upper()
-            if any(m in up for m in _DATERANGE_END_MARKERS):
+            if _DATERANGE_END_RE.search(up):
                 in_cue = False
                 i += 1
                 continue
-            if any(m in up for m in _DATERANGE_AD_MARKERS):
+            if _DATERANGE_AD_RE.search(up):
                 in_cue = True
                 i += 1
                 continue
@@ -630,15 +654,15 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
             continue
 
         # SCTE-35 广告区间
-        if any(s.startswith(t) for t in _CUE_OUT):
+        if s.startswith(_CUE_OUT):
             in_cue = True
             i += 1
             continue
-        if any(s.startswith(t) for t in _CUE_IN):
+        if s.startswith(_CUE_IN):
             in_cue = False
             i += 1
             continue
-        if any(s.startswith(t) for t in _CUE_SKIP_TAGS):
+        if s.startswith(_CUE_SKIP_TAGS):
             i += 1
             continue
         if in_cue:
@@ -655,7 +679,7 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
             j = next_url_index(i + 1)
             if j < n:
                 url = lines[j].strip().lower()
-                if any(k in url for k in _AD_URL_HINTS) or \
+                if _AD_URL_HINTS_RE.search(url) or \
                         _is_ad_host(_host_of(url)):
                     removed += 1
                     # 连带紧邻的 DISCONTINUITY 由后续孤立标签清理
@@ -674,13 +698,18 @@ def _apply_heuristic(text: str) -> tuple[str, int]:
     return "\n".join(cleaned), removed
 
 
-def _segment_url_count(text: str) -> int:
+def _segment_url_count_lines(lines) -> int:
+    """行数组版分片计数（供已拆好行的地方复用，避免重复 splitlines）。"""
     c = 0
-    for ln in text.splitlines():
+    for ln in lines:
         s = ln.strip()
         if s and not s.startswith("#"):
             c += 1
     return c
+
+
+def _segment_url_count(text: str) -> int:
+    return _segment_url_count_lines(text.splitlines())
 
 
 # ---- 播放时动态检测（OK影视 Pro 式：当下分析分片序列识别广告段） ----------
@@ -692,12 +721,75 @@ def _dynamic_enabled() -> bool:
         return True
 
 
+# _host_of 的进程内 LRU：一份清单里几千个分片通常只属于 1~3 个 host，
+# 逐个 urlsplit 是启发式过滤的主要开销（实测 8000 分片 113ms）。
+# 只做字符串切分就够——分片 URL 都是 http(s)://host/path?query 形态。
+_HOST_CACHE_MAX = 2048
+_host_cache: dict[str, str] = {}
+_host_cache_lock = threading.Lock()
+# 同一份清单的分片几乎全同源：记住"上次的 scheme://host 前缀"，
+# 后续分片一次 startswith 命中，不进锁、不查字典。
+_host_last_prefix = ""
+_host_last_host = ""
+
+
 def _host_of(url: str) -> str:
+    """取 URL 的 host（小写、去端口）。带进程内缓存，热路径零 urlsplit。"""
+    global _host_last_prefix, _host_last_host
+    s = (url or "").strip()
+    if not s:
+        return ""
+    if _host_last_prefix and s.startswith(_host_last_prefix):
+        return _host_last_host
+    hit = _host_cache.get(s)
+    if hit is not None:
+        return hit
+    host = ""
     try:
-        return urlsplit(url.strip()).netloc.lower().split(":", 1)[0]
+        # 与 urlsplit(...).netloc 同语义：只有带 "//" 的绝对/协议相对地址
+        # 才有 host；相对路径（main1_0.ts 这类）返回 "" —— 否则它们的
+        # "文件名" 会被当成 host，动态检测的「CDN 域名切换」信号全线误判。
+        i = s.find("//")
+        if i < 0:
+            return ""
+        head = s[:i]
+        if head and not (head.endswith(":")
+                          and head[:-1].replace("+", "").replace("-", "")
+                          .replace(".", "").isalnum()):
+            return ""
+        rest = s[i + 2:]
+        # 去掉 userinfo（user:pass@host）
+        at = rest.find("@")
+        slash = rest.find("/")
+        if at >= 0 and (slash < 0 or at < slash):
+            rest = rest[at + 1:]
+        for sep in ("/", "?", "#"):
+            j = rest.find(sep)
+            if j >= 0:
+                rest = rest[:j]
+        host = rest.split(":", 1)[0].lower()
     except Exception:
         _log.debug("_host_of failed", exc_info=True)
         return ""
+    with _host_cache_lock:
+        if len(_host_cache) >= _HOST_CACHE_MAX:
+            # 满了清一半（不是全清，避免抖动期全部重算）
+            for _k in list(_host_cache)[:len(_host_cache) // 2]:
+                _host_cache.pop(_k, None)
+        _host_cache[s] = host
+    if host:
+        # scheme://host 前缀：同源分片走上面的快路径
+        _host_last_prefix = s[:s.find(host) + len(host)]
+        _host_last_host = host
+    return host
+
+
+def _reset_host_cache() -> None:
+    global _host_last_prefix, _host_last_host
+    with _host_cache_lock:
+        _host_cache.clear()
+    _host_last_prefix = ""
+    _host_last_host = ""
 
 
 def _ad_like_duration(total: float) -> bool:
@@ -792,7 +884,7 @@ def _detect_ad_blocks(text: str) -> tuple[str, int]:
         hosts = {_host_of(segs[idx][1]) for idx in blk if _host_of(segs[idx][1])}
         url_blob = " ".join(segs[idx][1] for idx in blk).lower()
         is_lead = pre_duration < 60.0 and k < main_blk
-        has_kw = any(kw in url_blob for kw in _AD_URL_HINTS)
+        has_kw = bool(_AD_URL_HINTS_RE.search(url_blob))
         # 广告投放域名：整块分片 host 切到广告域，与关键字同等强信号
         has_ad_host = any(_is_ad_host(h) for h in hosts)
 
@@ -979,28 +1071,35 @@ def filter_hls(text: str | None, media_url: str = "",
         if "#EXT-X-STREAM-INF" in text:
             return text, 0  # 主清单不分片
 
-        before = _segment_url_count(text)
+        # 行数组只拆一次：计数与启发式共用（host 正则改写过 text 时失效重建）。
+        lines = text.splitlines()
+        before = _segment_url_count_lines(lines)
 
         # 1) 订阅 host 规则（TVBox rules）
         if media_url:
             patterns = _rules_for(media_url)
             if patterns:
                 text = _apply_host_regex(text, patterns)
+                lines = text.splitlines()  # 文本已变，行数组作废
 
         # 2) 通用启发式（SCTE35/关键字/广告域名）
         if use_heuristic:
-            text, _removed_h = _apply_heuristic(text)
+            text, _removed_h = _apply_heuristic(text, lines=lines)
+            lines = None  # 返回新文本，旧行数组不再代表当前内容
         # 3) 播放时动态检测（无 rules 时按分段+时长+CDN 识别广告段）
-        if _dynamic_enabled() and _segment_url_count(text) >= 8:
-            text, _removed_dyn = _detect_ad_blocks(text)
+        if _dynamic_enabled():
+            # 计数只在上面的层确实改过文本时才重扫
+            cur_cnt = before if lines is not None else _segment_url_count(text)
+            if cur_cnt >= 8:
+                text, _removed_dyn = _detect_ad_blocks(text)
 
         after = _segment_url_count(text)
         # before-after 即实际删除数（各层各自的计数不再另加，否则同一批
         # 分片会被重复计入）。
         removed = max(0, before - after)
 
-        # 安全护栏：媒体分片被清空说明规则误伤，回退
-        if before > 0 and _segment_url_count(text) == 0:
+        # 安全护栏：媒体分片被清空说明规则误伤，回退（复用 after，不再重扫）
+        if before > 0 and after == 0:
             return original, 0
         # 剥离后修正序号标签（前导删除才动 MEDIA-SEQUENCE）
         return _fix_sequence_tags(original, text), removed
@@ -1054,7 +1153,7 @@ def _sps_cache_get(url: str):
         if not ent:
             return None
         prof, ts = ent
-        if time.time() - ts > _SPS_CACHE_TTL:
+        if time.monotonic() - ts > _SPS_CACHE_TTL:
             _sps_cache.pop(url, None)
             return None
         return prof
@@ -1068,7 +1167,7 @@ def _sps_cache_put(url: str, prof: dict) -> None:
             # 满了删最旧一半而非全清：避免全清后所有分片指纹同时重探抖动
             for _old in list(_sps_cache)[:len(_sps_cache) // 2]:
                 _sps_cache.pop(_old, None)
-        _sps_cache[url] = (prof, time.time())
+        _sps_cache[url] = (prof, time.monotonic())
 
 
 def _analyze_blocks(text: str):

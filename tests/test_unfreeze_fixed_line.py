@@ -230,7 +230,7 @@ class FixedLineDirectConfigEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 def test_admin_ui_has_fixed_line_toggle():
-    ui = Path(__file__).resolve().parent.parent / "proxy" / "admin_ui.py"
+    ui = Path(__file__).resolve().parent.parent / "proxy" / "assets" / "admin.html"
     src = ui.read_text(encoding="utf-8")
     assert 'id="fixedLineDirect"' in src
     assert 'fixed_line_direct:$("fixedLineDirect").checked' in src

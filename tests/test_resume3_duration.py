@@ -292,7 +292,7 @@ class DurationTests(unittest.IsolatedAsyncioTestCase):
     async def test_stream_list_playlist_probe_and_cache(self):
         key = appmod._playlist_cache_key(
             {"online_guid": "og-tv-nodur", "line": LINE, "index": 0})
-        appmod._PLAYLIST_CACHE[key] = (time.time(), FAKE_M3U8)
+        appmod._PLAYLIST_CACHE[key] = (time.monotonic(), FAKE_M3U8)
         sl = await self.stream_list(self.nodur_eps[0])
         vs = sl.get("video_streams") or []
         self.assertTrue(vs, sl)

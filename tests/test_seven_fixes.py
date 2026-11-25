@@ -57,7 +57,7 @@ class HaikuoRemovedTests(unittest.TestCase):
         self.assertNotIn("_HAIKUO_GUID", src)
 
     def test_admin_ui_entry_removed(self):
-        src = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        src = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
         self.assertNotIn("/v/api/ext/haikuo/", src)
 
 
@@ -92,7 +92,7 @@ class WordingTests(unittest.TestCase):
     """4/5) 文案对齐用户给定的提示语。"""
 
     def setUp(self):
-        self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
 
     def test_nav_renamed(self):
         self.assertRegex(self.ui,
@@ -133,7 +133,7 @@ class ResetAllTests(unittest.TestCase):
         self.assertIn('"/v/api/ext/config/reset"', src)
 
     def test_ui_button_exists(self):
-        ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
         self.assertIn("resetAll()", ui)
         self.assertIn("一键重置", ui)
 
@@ -142,7 +142,7 @@ class CacheListTests(unittest.TestCase):
     """7) 已缓存条目：默认缩放适配 + 显示更多。"""
 
     def setUp(self):
-        self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
 
     def test_container_has_scroll(self):
         self.assertIn("cache-wrap", self.ui)

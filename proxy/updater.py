@@ -56,6 +56,7 @@ PERIOD = 6 * 3600
 DOWNLOAD_TIMEOUT = 180
 
 _LOCK = threading.Lock()
+_INSTALL_FUT: "asyncio.Future | None" = None  # 在途安装任务（失败可见）
 _STATE: dict = {
     "last_check": 0.0,
     "last_error": "",
@@ -330,8 +331,27 @@ async def start_update() -> dict:
         _STATE["progress"] = "正在下载安装包…"
     _persist()
 
-    asyncio.get_event_loop().run_in_executor(
+    # 持有 Future + done 回调：executor 里的异常（线程崩溃/回调丢失）不再静默，
+    # 失败会落到 last_error 并把状态置 error，管理页可见。
+    global _INSTALL_FUT
+    loop = asyncio.get_running_loop()
+    _INSTALL_FUT = loop.run_in_executor(
         None, lambda: _blocking_install(info, None))
+
+    def _install_done(fut: "asyncio.Future") -> None:
+        try:
+            exc = fut.exception()
+        except asyncio.CancelledError:
+            return
+        if exc is not None:
+            _log.debug("_INSTALL_FUT raised", exc_info=exc)
+            with _LOCK:
+                if _STATE.get("status") != "error":
+                    _STATE.update(status="error",
+                                  progress=f"更新任务异常退出：{exc}",
+                                  last_error=str(exc))
+
+    _INSTALL_FUT.add_done_callback(_install_done)
     return {"code": 0, "msg": "已开始下载并安装更新", "data": _view()}
 
 

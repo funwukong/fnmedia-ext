@@ -205,7 +205,7 @@ class Diag3Tests(unittest.IsolatedAsyncioTestCase):
         # 无 CMS 时长：playlist EXTINF 探测到的时长也应进 info 事件。
         key = appmod._playlist_cache_key(
             {"online_guid": "og-nodur", "line": LZI, "index": 0})
-        appmod._PLAYLIST_CACHE[key] = (time.time(), FAKE_M3U8)
+        appmod._PLAYLIST_CACHE[key] = (time.monotonic(), FAKE_M3U8)
         info = await self.play_info(self.nodur_eps[0])
         self.assertEqual(info.get("duration"), FAKE_M3U8_SECONDS)
         _, infos = await self.events("info")

@@ -480,7 +480,7 @@ class XiaoyaLibrary:
         fut = self._transfer_fut.get(path)
         if fut is not None and not fut.done():
             return await fut
-        fut = asyncio.get_event_loop().create_future()
+        fut = asyncio.get_running_loop().create_future()
         self._transfer_fut[path] = fut
         try:
             url: Optional[str] = None

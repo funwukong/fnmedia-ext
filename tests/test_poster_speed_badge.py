@@ -83,7 +83,7 @@ def _switch_on(monkeypatch):
 
 
 def _seed(line, kbps, age=0.0):
-    appmod._LINE_SPEED[line] = (float(kbps), time.time() - age)
+    appmod._LINE_SPEED[line] = (float(kbps), time.monotonic() - age)
 
 
 # ---------- 取值与格式化 ----------

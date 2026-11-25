@@ -33,7 +33,7 @@ class BilibiliFullyRemovedTests(unittest.TestCase):
                 self.assertNotIn(token, src, f"{py.name}: {token}")
 
     def test_no_admin_ui_references(self):
-        src = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        src = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
         for token in ("startBiliQr", "biliQr", "/v/api/ext/bilibili/",
                       "BILI_POLL_TIMER", "loadBiliStatus"):
             self.assertNotIn(token, src, token)
@@ -64,7 +64,7 @@ class CommonEnhancementsKeptTests(unittest.TestCase):
     def setUp(self):
         self.app = (PROXY / "app.py").read_text(encoding="utf-8")
         self.hls = (PROXY / "hls_race.py").read_text(encoding="utf-8")
-        self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
         self.api = (PROXY / "admin_api.py").read_text(encoding="utf-8")
         self.cfg = (PROXY / "config.py").read_text(encoding="utf-8")
 

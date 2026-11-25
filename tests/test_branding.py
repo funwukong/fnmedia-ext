@@ -26,7 +26,7 @@ def test_manifest_maintainer_is_own():
 
 
 def test_about_page_names_own_author():
-    ui = open(os.path.join(ROOT, "proxy", "admin_ui.py"),
+    ui = open(os.path.join(ROOT, "proxy", "assets", "admin.html"),
               encoding="utf-8").read()
     start = ui.find('id="page-about"')
     end = ui.find('</section>', start)

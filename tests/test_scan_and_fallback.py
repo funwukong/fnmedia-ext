@@ -20,7 +20,7 @@ class ScanLoginUiTests(unittest.TestCase):
     """扫码登录入口：聚合第三方网盘 + B 站，位于导入订阅下方。"""
 
     def setUp(self):
-        self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
 
     def test_nav_entry_exists_and_after_import(self):
         self.assertIn('data-page="scanlogin"', self.ui)

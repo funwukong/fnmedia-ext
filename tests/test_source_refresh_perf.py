@@ -278,7 +278,7 @@ def test_stream_load_handles_corrupt_entry(tmp_path, monkeypatch):
 
 def test_render_uses_event_delegation():
     """资源站列表必须走事件委托，不得每行 addEventListener。"""
-    ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+    ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
     assert "function bindSrcDelegate()" in ui
     assert "tb.dataset.bound" in ui
     # 旧的 per-row 绑定循环必须已删除
@@ -287,7 +287,7 @@ def test_render_uses_event_delegation():
 
 def test_render_is_chunked():
     """首屏同步 + 余量 requestAnimationFrame 分批，且有代数防串。"""
-    ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+    ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
     i = ui.index("function renderSources()")
     seg = ui[i:i + 4000]
     assert "SRC_CHUNK" in seg
@@ -297,7 +297,7 @@ def test_render_is_chunked():
 
 def test_refresh_button_wired():
     """页面必须有刷新按钮，且绑定到 source/refresh。"""
-    ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+    ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
     assert 'id="srcRefreshBtn"' in ui
     assert "async function refreshSources()" in ui
     assert "/v/api/ext/source/refresh" in ui

@@ -196,6 +196,43 @@ async def ext_cache_status(request: Request):
     return {"code": 0, "data": _cache_sizes()}
 
 
+def _memory_cache_status() -> dict:
+    """四类内存缓存的实时占用/预算（管理页「内存缓存」卡）。"""
+    out = {"profile": str(cfgmod.config.read("cache_budget_profile", "standard")
+                          or "standard"),
+           "budgets_mb": {}, "usage": {}}
+    for k in cfgmod.CACHE_BUDGET_KEYS:
+        out["budgets_mb"][k] = cfgmod.cache_budget_mb(k)
+    try:
+        import hls_race as _hls  # noqa: E402 延迟导入：避免循环导入
+        import app as _app       # noqa: E402,F401
+        out["usage"]["agg_cache_mb"] = round(
+            _app._AGG_BYTES_TOTAL / (1024 * 1024), 2)
+        out["usage"]["playlist_cache_mb"] = round(
+            _hls._PLAYLIST_BYTES / (1024 * 1024), 2)
+        out["usage"]["hls_reg_cache_mb"] = round(
+            _hls._HLS_REG_BYTES / (1024 * 1024), 2)
+        out["usage"]["poster_cache_mb"] = round(
+            _app._POSTER_OK_BYTES / (1024 * 1024), 2)
+    except Exception:
+        _log.debug("_memory_cache_status failed", exc_info=True)
+    # 进程 RSS（Linux）：给用户一个"整机现在吃了多少"的参照
+    try:
+        with open("/proc/self/status", encoding="utf-8") as fh:
+            for line in fh:
+                if line.startswith("VmRSS:"):
+                    out["rss_mb"] = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except Exception:
+        _log.debug("_memory_cache_status rss failed", exc_info=True)
+    return out
+
+
+@admin_router.get("/v/api/ext/cache/memory")
+async def ext_cache_memory(request: Request):
+    return {"code": 0, "msg": "", "data": _memory_cache_status()}
+
+
 @admin_router.post("/v/api/ext/cache/clear")
 async def ext_cache_clear(request: Request):
     """一键清除指定缓存。targets: search/charts/catalog/titles/health 的子集；
@@ -508,8 +545,11 @@ async def ext_source_heal(request: Request):
             r = c.get(url, headers={"User-Agent": "Mozilla/5.0"})
             return r.status_code, r.text
 
-    healed = domain_heal_mod.heal(src["api"], ext=body.get("ext", ""),
-                                  backups=backups, fetch=_fetch)
+    # fetch 是同步 httpx.Client（单个候选最长阻塞 12s、候选可多个）。
+    # 必须放线程池跑，否则整个事件循环被卡住，期间所有请求（包括播放）停摆。
+    healed = await asyncio.to_thread(
+        domain_heal_mod.heal, src["api"], ext=body.get("ext", ""),
+        backups=backups, fetch=_fetch)
     return {"code": 0, "msg": "", "data": healed}
 
 
@@ -830,6 +870,22 @@ async def ext_reset_config():
     return JSONResponse({"code": 0, "msg": "", "data": {"reset": True}})
 
 
+# 管理页回显用的配置键（只读标量，不含令牌/来源等敏感项）
+_CONFIG_ECHO_KEYS = (
+    "cache_budget_profile", "agg_cache_mb", "playlist_cache_mb",
+    "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
+)
+
+
+@admin_router.get("/v/api/ext/config")
+async def ext_get_config(request: Request):
+    """读管理页回显用的配置（只回只读标量键）。"""
+    from app import config  # noqa: E402,F401 延迟导入：避免循环导入
+    cfg = config.get() or {}
+    return {"code": 0, "msg": "", "data": {
+        k: cfg.get(k) for k in _CONFIG_ECHO_KEYS if k in cfg}}
+
+
 @admin_router.post("/v/api/ext/config")
 async def ext_set_config(request: Request):
     from app import HOT_DEFAULT_TITLE, _AGG_CACHE, _schedule_routes_refresh, _search_cache, app, chart_cache, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -849,6 +905,7 @@ async def ext_set_config(request: Request):
         "mid_playback_switch",  # 播放中静默换线开关（默认开）
         "browse_probe",  # 浏览时探活开关（默认开，关掉恢复旧行为）
         "poster_speed_badge",  # 海报速度角标开关（默认开）
+        "seg_direct_enabled", "seg_direct_hosts",  # 分片 CDN 直连绕行
         "skip_intro_enabled", "skip_intro_seconds",  # 跳过片头（默认关/0）
         "skip_outro_enabled", "skip_outro_seconds",  # 跳过片尾（默认关/0）
         "main_ready_budget",  # 慢线起播预算（秒），实时读取，改后即时生效
@@ -859,6 +916,9 @@ async def ext_set_config(request: Request):
         "pansou_enabled", "pansou_url", "pansou_cloud_types",
         "pansou_src", "pansou_timeout", "pansou_limit",
         "update_proxy",
+        # 内存缓存预算（v1.2.6）：档位 + 四个 MB 键，改后实时生效
+        "cache_budget_profile", "agg_cache_mb", "playlist_cache_mb",
+        "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
     }
     # >>> PRIVATE:CATVOD
     allowed.add("pan_lib_enabled")
@@ -903,6 +963,36 @@ async def ext_set_config(request: Request):
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
+    if "seg_direct_enabled" in patch:
+        patch["seg_direct_enabled"] = bool(patch["seg_direct_enabled"])
+    if "seg_direct_hosts" in patch:
+        _raw = patch["seg_direct_hosts"]
+        if isinstance(_raw, str):
+            _raw = _raw.replace("\n", ",").split(",")
+        _hosts = []
+        for _it in (_raw or []):
+            _h = str(_it or "").strip().lower().lstrip(".")
+            if _h and "/" not in _h and _h not in _hosts:
+                _hosts.append(_h[:120])
+        patch["seg_direct_hosts"] = _hosts[:64]
+    if "cache_budget_profile" in patch:
+        # 只允许三档；非法值回落 standard（保持旧版容量，不会突然缩水）
+        _profile = str(patch["cache_budget_profile"] or "").strip().lower()
+        patch["cache_budget_profile"] = (
+            _profile if _profile in cfgmod.CACHE_BUDGET_PROFILES
+            or _profile == "custom" else "standard")
+    for _mb_key in cfgmod.CACHE_BUDGET_KEYS:
+        if _mb_key in patch:
+            patch[_mb_key] = cfgmod.clamp_cache_budget_mb(
+                patch[_mb_key],
+                cfgmod.CACHE_BUDGET_PROFILES["standard"][_mb_key])
+    if "poster_disk_cache_mb" in patch:
+        try:
+            # 0 = 关闭磁盘缓存；上限 4096MB
+            patch["poster_disk_cache_mb"] = max(
+                0, min(4096, int(float(patch["poster_disk_cache_mb"]))))
+        except (TypeError, ValueError):
+            patch.pop("poster_disk_cache_mb", None)
     if "pansou_enabled" in patch:
         patch["pansou_enabled"] = bool(patch["pansou_enabled"])
     if "filter_junk" in patch:

@@ -69,6 +69,7 @@ BASELINE_ROUTES = [
     (('GET',), '/v/api/ext/titles-cache'),
     (('POST',), '/v/api/ext/titles-cache/clear'),
     (('GET',), '/v/api/ext/cache'),
+    (('GET',), '/v/api/ext/cache/memory'),
     (('POST',), '/v/api/ext/cache/clear'),
     (('GET',), '/v/api/ext/admin/token'),
     (('POST',), '/v/api/ext/admin/login'),
@@ -101,6 +102,7 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/config/restore-preview'),
     (('POST',), '/v/api/ext/config/restore'),
     (('POST',), '/v/api/ext/config/reset'),
+    (('GET',), '/v/api/ext/config'),
     (('POST',), '/v/api/ext/config'),
     (('POST',), '/v/api/ext/subscription-proxy'),
     (('POST',), '/v/api/ext/junk-keywords'),
@@ -207,7 +209,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 114
+    assert len(admin_api.admin_router.routes) == 116
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable

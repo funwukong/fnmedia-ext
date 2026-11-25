@@ -368,7 +368,7 @@ class PlaylistCacheKeyTests(unittest.TestCase):
 
 def test_admin_ui_has_skip_controls():
     src = (Path(__file__).resolve().parents[1]
-           / "proxy" / "admin_ui.py").read_text(encoding="utf-8")
+           / "proxy" / "assets" / "admin.html").read_text(encoding="utf-8")
     assert 'id="skipIntroEnabled"' in src
     assert 'id="skipIntroSeconds"' in src
     assert 'id="skipOutroEnabled"' in src
@@ -597,7 +597,7 @@ class PlaybackSkipApiTests(unittest.IsolatedAsyncioTestCase):
                           "skip_intro_seconds": 10})
         key = appmod._playlist_cache_key(
             {"online_guid": "og-tv-nodur", "line": LINE, "index": 0})
-        appmod._PLAYLIST_CACHE[key] = (time.time(), FAKE_M3U8_TRIMMED_20)
+        appmod._PLAYLIST_CACHE[key] = (time.monotonic(), FAKE_M3U8_TRIMMED_20)
         info = await self.play_info(self.nodur_eps[0])
         assert info.get("duration") == 20
         assert info.get("skip_intro") == 10

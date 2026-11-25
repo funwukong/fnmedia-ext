@@ -220,6 +220,12 @@ DEFAULTS = {
     # （_LINE_SPEED 指数滑动平均，1 小时过期；无实测值不显示）。
     # 只读已有实测值，角标路径不发任何网络请求。默认开。
     "poster_speed_badge": True,
+    # 分片 CDN 直连绕行（v1.2.8）：对白名单内、且不需要服务端额外请求头的源，
+    # 分片请求直接 302 到 CDN，服务器不再转发字节（省带宽/CPU）。
+    # 默认关：各 CDN 对 302/Range/防盗链行为不一致，需按源逐条开启验证。
+    "seg_direct_enabled": False,
+    # 允许直连的 host 后缀白名单（如 "cdn.example.com"、"example.com" 命中子域）。
+    "seg_direct_hosts": [],
     # 自动选最快线时最多参与竞速的候选线路数（控制起播开销）
     "line_fastest_max": 6,
     # 竞速超时预算（秒）：超时未响应的线路本轮判慢，不阻塞起播
@@ -260,6 +266,16 @@ DEFAULTS = {
     # 启动预热方式：realtime=重启后后台逐部搜源绑定（方案A，默认）；
     # persist=热门片绑定结果落盘，重启直接恢复线路、少重新搜源（方案B）
     "prewarm_mode": "realtime",
+    # ---- 内存缓存预算（运行期实时读取，改档立即生效）----
+    # 档位：standard=标准（旧版行为）、low=低内存（小内存 NAS/容器）、
+    # custom=自定义（用下面四个 _mb 键）。四个键单位均为 MB。
+    "cache_budget_profile": "standard",
+    "agg_cache_mb": 128,        # 搜索聚合结果缓存字节上限
+    "playlist_cache_mb": 64,    # 改写后播放清单缓存字节上限
+    "hls_reg_cache_mb": 64,     # HLS 线路注册表缓存字节上限
+    "poster_cache_mb": 64,      # 成功海报内存 LRU 字节上限
+    # 成功海报磁盘缓存上限（MB）；0 = 关闭磁盘缓存（恢复纯透传行为）
+    "poster_disk_cache_mb": 256,
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。
@@ -1106,3 +1122,55 @@ class Config:
 
 
 config = Config()
+
+
+# ---- 内存缓存预算：档位 → 四个缓存字节上限（MB）----
+CACHE_BUDGET_PROFILES = {
+    "standard": {
+        "agg_cache_mb": 128,
+        "playlist_cache_mb": 64,
+        "hls_reg_cache_mb": 64,
+        "poster_cache_mb": 64,
+    },
+    "low": {
+        "agg_cache_mb": 32,
+        "playlist_cache_mb": 16,
+        "hls_reg_cache_mb": 16,
+        "poster_cache_mb": 16,
+    },
+}
+CACHE_BUDGET_KEYS = ("agg_cache_mb", "playlist_cache_mb",
+                     "hls_reg_cache_mb", "poster_cache_mb")
+# 单键硬边界（MB）：低于 8 会把缓存压成抖动源，高于 2048 没有实际意义。
+CACHE_BUDGET_MIN_MB = 8
+CACHE_BUDGET_MAX_MB = 2048
+
+
+def clamp_cache_budget_mb(raw, default: int = 64) -> int:
+    """把缓存预算值夹取到 [8, 2048] MB；非法值回落默认。"""
+    try:
+        val = int(float(raw))
+    except (TypeError, ValueError):
+        return default
+    return max(CACHE_BUDGET_MIN_MB, min(CACHE_BUDGET_MAX_MB, val))
+
+
+def cache_budget_mb(key: str) -> int:
+    """实时读取某缓存的字节预算（MB）。
+
+    standard/low 档位用预置表；custom 档用同名的 _mb 配置键。
+    未知档位回退 standard。热路径（每个缓存写条目）都会调用，只读标量，
+    走 config.read 的锁内直取路径，不做整份配置深拷贝。"""
+    if key not in CACHE_BUDGET_KEYS:
+        key = "agg_cache_mb"
+    profile = str(config.read("cache_budget_profile", "standard") or "standard")
+    default = CACHE_BUDGET_PROFILES["standard"][key]
+    if profile == "custom":
+        return clamp_cache_budget_mb(config.read(key, default), default)
+    table = CACHE_BUDGET_PROFILES.get(profile) or CACHE_BUDGET_PROFILES["standard"]
+    return int(table.get(key, default))
+
+
+def cache_budget_bytes(key: str) -> int:
+    """同 cache_budget_mb，返回字节数（淘汰循环直接比较用）。"""
+    return cache_budget_mb(key) * 1024 * 1024

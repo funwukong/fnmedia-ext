@@ -99,7 +99,7 @@ def test_pick_faster_line_cooldown_blocks_second_pick():
     # 30 秒内第二次劣化不换线
     assert linepredict.pick_faster_line(OG, 0, CUR) is None
     # 冷却过后可再换
-    linepredict._LAST_SWITCH[EP_KEY] = time.time() - 31.0
+    linepredict._LAST_SWITCH[EP_KEY] = time.monotonic() - 31.0
     assert linepredict.pick_faster_line(OG, 0, CUR) == ALT
 
 
@@ -121,7 +121,7 @@ def test_switch_allowed_and_mark_switched():
     assert linepredict.switch_allowed(OG, 0) is True
     linepredict.mark_switched(OG, 0)
     assert linepredict.switch_allowed(OG, 0) is False
-    linepredict._LAST_SWITCH[EP_KEY] = time.time() - 31.0
+    linepredict._LAST_SWITCH[EP_KEY] = time.monotonic() - 31.0
     assert linepredict.switch_allowed(OG, 0) is True
 
 
@@ -156,7 +156,7 @@ def test_pick_target_falls_back_to_measured_speed(monkeypatch):
     """无他线分片样本时：备选线有实测吞吐达标（≥200 KB/s）→ 换线。"""
     _patch_candidates(monkeypatch)
     _seed_slow_cur()
-    racemod._LINE_SPEED[ALT] = (500.0, time.time())
+    racemod._LINE_SPEED[ALT] = (500.0, time.monotonic())
     out = racemod._pick_mid_switch_target(_picked())
     assert out is not None and out["line"] == ALT
 
@@ -181,7 +181,7 @@ def test_pick_target_respects_cooldown(monkeypatch):
     """换线后 30 秒内第二次劣化不换线（后备路径与样本路径共用冷却）。"""
     _patch_candidates(monkeypatch)
     _seed_slow_cur()
-    racemod._LINE_SPEED[ALT] = (500.0, time.time())
+    racemod._LINE_SPEED[ALT] = (500.0, time.monotonic())
     assert racemod._pick_mid_switch_target(_picked())["line"] == ALT
     assert racemod._pick_mid_switch_target(_picked()) is None
 
@@ -189,7 +189,7 @@ def test_pick_target_respects_cooldown(monkeypatch):
 def test_pick_target_no_switch_when_cur_not_slow(monkeypatch):
     """当前线不慢 → 不换线（无分片历史的首播也不换）。"""
     _patch_candidates(monkeypatch)
-    racemod._LINE_SPEED[ALT] = (500.0, time.time())
+    racemod._LINE_SPEED[ALT] = (500.0, time.monotonic())
     assert racemod._pick_mid_switch_target(_picked()) is None
 
 
@@ -336,7 +336,7 @@ class MidSwitchConfigEndpointTests(unittest.IsolatedAsyncioTestCase):
 
 
 def test_admin_ui_has_mid_switch_toggle():
-    ui = Path(__file__).resolve().parent.parent / "proxy" / "admin_ui.py"
+    ui = Path(__file__).resolve().parent.parent / "proxy" / "assets" / "admin.html"
     src = ui.read_text(encoding="utf-8")
     assert 'id="midPlaybackSwitch"' in src
     assert 'mid_playback_switch:$("midPlaybackSwitch").checked' in src
@@ -462,7 +462,7 @@ class MidSwitchPlaychainTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_auto_refetch_switches_via_measured_speed(self):
         _seed_slow_cur()
-        racemod._LINE_SPEED[ALT] = (500.0, time.time())
+        racemod._LINE_SPEED[ALT] = (500.0, time.monotonic())
         self._enter()
         try:
             resp = await self._get_main({"index": 0, "auto": "1"})

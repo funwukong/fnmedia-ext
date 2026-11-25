@@ -147,7 +147,7 @@ def test_linepredict_config_endpoint_accepts_zero_race(tmp_path, monkeypatch):
 
 def test_admin_ui_has_zero_race_toggle():
     src = (Path(__file__).resolve().parent.parent
-           / "proxy" / "admin_ui.py").read_text(encoding="utf-8")
+           / "proxy" / "assets" / "admin.html").read_text(encoding="utf-8")
     assert "linePredictZeroRace" in src
     assert "zero_race" in src
 
@@ -174,7 +174,7 @@ def test_slow_memory_with_good_throughput_directs(monkeypatch):
     _patch_candidates(monkeypatch, ["预测线", "其他线"])
     calls = _patch_race(monkeypatch)
     linepredict.remember("og|0", "预测线", 2.0)
-    racemod._LINE_SPEED["预测线"] = (250.0, time.time())
+    racemod._LINE_SPEED["预测线"] = (250.0, time.monotonic())
     out = asyncio.run(appmod._ensure_playable(_picked(), None, auto=True))
     assert calls == []
     assert out["line"] == "预测线"
@@ -186,7 +186,7 @@ def test_fast_memory_with_bad_throughput_directs(monkeypatch):
     _patch_candidates(monkeypatch, ["预测线", "其他线"])
     calls = _patch_race(monkeypatch)
     linepredict.remember("og|0", "预测线", 0.2)
-    racemod._LINE_SPEED["预测线"] = (100.0, time.time())
+    racemod._LINE_SPEED["预测线"] = (100.0, time.monotonic())
     out = asyncio.run(appmod._ensure_playable(_picked(), None, auto=True))
     assert calls == []
     assert out["line"] == "预测线"

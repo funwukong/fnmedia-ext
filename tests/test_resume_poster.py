@@ -167,10 +167,19 @@ class ResumeItemTsTests(unittest.IsolatedAsyncioTestCase):
 # 修复 2：海报 429/5xx 重试 + 占位图短缓存 + 成功图内存 LRU
 # =====================================================================
 class PosterRetryCacheTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # 磁盘海报缓存重定向到临时目录：用例间不互相命中、不污染真实 state/
+        self._disk_tmp = tempfile.mkdtemp(prefix="posterdisk-")
+        import poster_proxy
+        self._disk_patcher = patch.object(
+            poster_proxy, "_POSTER_DISK_DIR", Path(self._disk_tmp))
+        self._disk_patcher.start()
+
     def tearDown(self):
         # 内存海报缓存是模块级共享：每个用例后清空，避免互相污染。
-        appmod._POSTER_OK_CACHE.clear()
-        appmod._POSTER_OK_BYTES = 0
+        self._disk_patcher.stop()
+        import poster_proxy
+        poster_proxy.reset_ok_cache()
 
     @staticmethod
     def _resp(status, body=b"\xff\xd8\xff\xe0fake-jpeg",
@@ -263,7 +272,8 @@ class PosterRetryCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(calls), 3)
 
     def test_cache_evicts_oldest_when_over_limits(self):
-        with patch.object(appmod, "_POSTER_OK_MAX_ITEMS", 2):
+        import poster_proxy
+        with patch.object(poster_proxy, "_POSTER_OK_MAX_ITEMS", 2):
             appmod._poster_ok_put("https://a.test/1.jpg", b"x" * 10,
                                   "image/jpeg")
             appmod._poster_ok_put("https://b.test/2.jpg", b"y" * 10,
@@ -274,10 +284,11 @@ class PosterRetryCacheTests(unittest.IsolatedAsyncioTestCase):
                 appmod._poster_ok_get("https://a.test/1.jpg"))
             self.assertIsNotNone(
                 appmod._poster_ok_get("https://c.test/3.jpg"))
-            self.assertEqual(appmod._POSTER_OK_BYTES, 20)
+            self.assertEqual(poster_proxy._POSTER_OK_BYTES, 20)
 
     def test_cache_entry_expires(self):
-        with patch.object(appmod, "_POSTER_OK_TTL", -1):
+        import poster_proxy
+        with patch.object(poster_proxy, "_POSTER_OK_TTL", -1):
             appmod._poster_ok_put("https://a.test/1.jpg", b"x" * 10,
                                   "image/jpeg")
         self.assertIsNone(appmod._poster_ok_get("https://a.test/1.jpg"))

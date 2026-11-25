@@ -36,12 +36,15 @@ import inject
 
 
 @pytest.fixture(autouse=True)
-def _clear_poster_ok_cache():
-    appmod._POSTER_OK_CACHE.clear()
-    appmod._POSTER_OK_BYTES = 0
+def _clear_poster_ok_cache(tmp_path, monkeypatch):
+    import poster_proxy
+    poster_proxy.reset_ok_cache()
+    # 每个用例独立磁盘缓存目录，避免用例间互相命中（也避免污染真实 state/）
+    monkeypatch.setattr(poster_proxy, "_POSTER_DISK_DIR",
+                        tmp_path / "poster_disk")
+    monkeypatch.setattr(poster_proxy, "_poster_disk_gc_last", 0.0)
     yield
-    appmod._POSTER_OK_CACHE.clear()
-    appmod._POSTER_OK_BYTES = 0
+    poster_proxy.reset_ok_cache()
 
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 200
 IMG_URL = "https://p.lztutu.com/upload/vod/20261109-1/c84dc96dbe69397adc85f677d2cb6e51.jpg"
@@ -249,13 +252,58 @@ def test_serve_poster_legacy_sysimg_and_v2_addresses_still_work():
     assert total_calls == 1
 
 
-def test_poster_has_no_disk_cache_or_prefetch():
-    """上游式纯透传：磁盘缓存与后台预热已移除，不应再有这些入口。"""
+def test_poster_has_no_legacy_disk_cache_or_prefetch():
+    """v0.2.42 移除的旧实现（无界磁盘缓存 + 后台预热循环）不得复活。
+
+    v1.2.7 起有**有界**磁盘缓存（_poster_disk_*：只存成功图、7 天 TTL、
+    容量可配、无预热循环），与旧实现不同——这里仍锁死旧入口名，
+    防止有人把旧的无界实现贴回来。
+    """
     for name in ("_poster_cache_read", "_poster_cache_write",
                  "_poster_cache_file", "_poster_cache_gc",
                  "_prefetch_posters", "_prefetch_poster_urls",
                  "_poster_prefetch_loop"):
         assert not hasattr(appmod, name), name
+    # 新版磁盘缓存必须是"有界 + 可关"的。
+    assert hasattr(appmod, "_poster_disk_read")
+    assert hasattr(appmod, "_poster_disk_write")
+    assert callable(appmod._poster_disk_enabled)
+    assert appmod._POSTER_DISK_TTL <= 7 * 24 * 3600.0
+
+
+def test_poster_disk_cache_roundtrip_and_ttl(tmp_path, monkeypatch):
+    """磁盘缓存往返：写完能读回、过期即删、超限按最旧淘汰、0=关闭。"""
+    import os
+    import time as _t
+    import poster_proxy
+    monkeypatch.setattr(poster_proxy, "_POSTER_DISK_DIR", tmp_path)
+    monkeypatch.setattr(poster_proxy, "_poster_disk_gc_last", 0.0)
+    monkeypatch.setattr(appmod.config, "read",
+                        lambda k, d=None: 64 if k == "poster_disk_cache_mb" else d,
+                        raising=False)
+    url = "https://img.test/a.jpg"
+    appmod._poster_disk_write(url, JPEG)
+    for _ in range(50):
+        if appmod._poster_disk_path(url).exists():
+            break
+        _t.sleep(0.02)
+    assert appmod._poster_disk_read(url)[0] == JPEG
+    # 过期：mtime 拨到 7 天前
+    p = appmod._poster_disk_path(url)
+    old = _t.time() - appmod._POSTER_DISK_TTL - 10
+    os.utime(p, (old, old))
+    assert appmod._poster_disk_read(url) is None
+    assert not p.exists()
+
+
+def test_poster_disk_cache_disabled_means_no_read(tmp_path, monkeypatch):
+    import poster_proxy
+    monkeypatch.setattr(poster_proxy, "_POSTER_DISK_DIR", tmp_path)
+    monkeypatch.setattr(appmod.config, "read",
+                        lambda k, d=None: 0 if k == "poster_disk_cache_mb" else d,
+                        raising=False)
+    assert appmod._poster_disk_enabled() is False
+    assert appmod._poster_disk_read("https://img.test/b.jpg") is None
 
 
 def test_serve_online_poster_worst_case_at_most_four_gets():

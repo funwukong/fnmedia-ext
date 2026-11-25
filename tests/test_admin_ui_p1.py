@@ -19,7 +19,7 @@ import tempfile
 import pytest
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-UI = os.path.join(ROOT, "proxy", "admin_ui.py")
+UI = os.path.join(ROOT, "proxy", "assets", "admin.html")
 
 
 def _src() -> str:

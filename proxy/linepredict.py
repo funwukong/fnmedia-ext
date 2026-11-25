@@ -173,7 +173,7 @@ def cur_line_slow(og: str, index: int, cur_line: str) -> float | None:
         cur = _SEG.get(_seg_key(og, index, cur_line))
         if not cur:
             return None
-        if time.time() - cur[0] > _SEG_TTL:
+        if time.monotonic() - cur[0] > _SEG_TTL:
             return None
         return _slow_median_locked(cur[1])
 
@@ -183,7 +183,7 @@ def switch_allowed(og: str, index: int) -> bool:
     if not og:
         return False
     with _SEG_LOCK:
-        return time.time() - _LAST_SWITCH.get(ep_key(og, index), 0) >= _SWITCH_COOLDOWN
+        return time.monotonic() - _LAST_SWITCH.get(ep_key(og, index), 0) >= _SWITCH_COOLDOWN
 
 
 def mark_switched(og: str, index: int) -> None:
@@ -192,7 +192,7 @@ def mark_switched(og: str, index: int) -> None:
     if not og:
         return
     with _SEG_LOCK:
-        _bounded_put(_LAST_SWITCH, ep_key(og, index), time.time(),
+        _bounded_put(_LAST_SWITCH, ep_key(og, index), time.monotonic(),
                      _LAST_SWITCH_MAX)
 
 
@@ -205,7 +205,7 @@ def record_seg(og: str, index: int, line: str, seconds: float) -> None:
     if not og or not line or seconds is None or seconds < 0:
         return
     key = _seg_key(og, index, line)
-    now = time.time()
+    now = time.monotonic()
     with _SEG_LOCK:
         old = _SEG.get(key)
         samples = (old[1] if old else []) + [float(seconds)]
@@ -230,7 +230,7 @@ def pick_faster_line(og: str, index: int, cur_line: str) -> str | None:
     返回应切换到的线路名；否则返回 None。按 集 做切换冷却。"""
     if not og or not cur_line:
         return None
-    now = time.time()
+    now = time.monotonic()
     cool_key = ep_key(og, index)
     with _SEG_LOCK:
         if now - _LAST_SWITCH.get(cool_key, 0) < _SWITCH_COOLDOWN:

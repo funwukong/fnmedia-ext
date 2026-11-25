@@ -27,6 +27,13 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+
+def _monotonic() -> float:
+    """进程内缓存 TTL 统一用单调钟：墙钟可能被 NTP 回拨，单调钟不受影响。
+    只用于缓存时间戳/TTL 比较；对外展示的墙钟时间仍用 time.time()。"""
+    return time.monotonic()
+
+
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import (HTMLResponse, JSONResponse, RedirectResponse,
@@ -184,7 +191,7 @@ def _cached_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
         hash(key)
     except TypeError:
         return _real_getaddrinfo(host, port, family, type, proto, flags)
-    now = time.time()
+    now = _monotonic()
     with _dns_lock:
         hit = _dns_cache.get(key)
         if hit is not None:
@@ -230,12 +237,21 @@ _AGG_BYTES: dict[str, int] = {}  # cache_key -> 该条字节估算
 _AGG_BYTES_TOTAL = 0             # 当前总量（运行值）
 
 
+# 单条聚合结果的估算遍历上限：重 brief 有上万节点，全量遍历是纯 CPU 税。
+# 到达上限即停止并按"已统计的节点数"线性外推——淘汰决策只需要量级正确，
+# 且条数上限 800 已兜住最坏情况。实测典型重 brief 在 3000~6000 节点。
+_AGG_EST_MAX_NODES = 2000
+
+
 def _agg_entry_bytes(result) -> int:
-    """聚合结果的字节估算：字符串按长度、dict 固定 64B、list/tuple 固定 16B、
-    其余标量 16B，迭代遍历不递归。估算只用于淘汰决策，不要求精确。"""
+    """聚合结果的字节估算（有界遍历）：字符串按长度、dict 固定 64B、
+    list/tuple 固定 16B、其余标量 16B；节点数超过 _AGG_EST_MAX_NODES
+    后停止遍历并外推，估算只用于淘汰决策，不要求精确。"""
     total = 0
+    nodes = 0
     stack = [result]
-    while stack:
+    while stack and nodes < _AGG_EST_MAX_NODES:
+        nodes += 1
         o = stack.pop()
         if isinstance(o, str):
             total += len(o)
@@ -248,6 +264,10 @@ def _agg_entry_bytes(result) -> int:
             stack.extend(o)
         else:
             total += 16
+    # 截断时剩余节点数量未知；按"已统计节点均摊字节 × 剩余估算"会需要
+    # 总节点数，这里改用保守外推：已统计字节按剩余待处理栈深放大。
+    if stack:
+        total = int(total * (1 + len(stack) / max(1, nodes)))
     return total
 
 
@@ -276,7 +296,7 @@ def _agg_cache_put(cache_key: str, result: list) -> None:
     dict 按插入序：新条天然在队尾；超限从队首删最旧。单条超限时保留该条。
     淘汰是分摊 O(1)：每条目最多被 pop 一次，写路径不做全表排序/扫描。"""
     global _AGG_BYTES_TOTAL
-    _AGG_CACHE[cache_key] = (time.time(), result)
+    _AGG_CACHE[cache_key] = (_monotonic(), result)
     if cache_key in _AGG_BYTES:
         _AGG_BYTES_TOTAL -= _AGG_BYTES[cache_key]
     s = _agg_entry_bytes(result)
@@ -284,8 +304,10 @@ def _agg_cache_put(cache_key: str, result: list) -> None:
     _AGG_BYTES_TOTAL += s
     if len(_AGG_BYTES) != len(_AGG_CACHE):
         _rebuild_agg_bytes()  # 外部直接改过缓存：重建记账（含本条）
+    # 字节预算实时读配置（管理页切档位立即生效），条数上限仍是硬上限。
+    budget = cfgmod.cache_budget_bytes("agg_cache_mb")
     while (len(_AGG_CACHE) > _AGG_CACHE_MAX
-           or _AGG_BYTES_TOTAL > _AGG_CACHE_MAX_BYTES) \
+           or _AGG_BYTES_TOTAL > budget) \
             and len(_AGG_CACHE) > 1:
         _agg_cache_drop(next(iter(_AGG_CACHE)))
 # 旧名字保留为同一对象的别名（不产生第二层存储）：既有测试、管理端点
@@ -715,12 +737,18 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
     existing = store.get_title_by_guid(guid)
     if existing:
         return None
-    if time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
+    if _monotonic() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
         return None
     fut = _chart_resolving.get(guid)
     if fut is not None:
         return fut
-    fut = asyncio.get_event_loop().create_future()
+    try:
+        fut = asyncio.get_running_loop().create_future()
+    except RuntimeError:
+        # 无事件循环上下文（同步调用方/线程池）：本函数只应服务于异步链路，
+        # 静默放弃后台解析，返回 None 让调用方走同步回退路径。
+        _log.debug("start_resolve_chart: no running loop, skip background resolve")
+        return None
     _chart_resolving[guid] = fut
 
     async def work():
@@ -757,7 +785,7 @@ def start_resolve_chart(guid: str) -> asyncio.Future | None:
                 _PENDING_MEDIA_CHART.pop(media_guid(guid), None)
                 _CHART_FAILED_TS.pop(guid, None)
             else:
-                _bounded_put(_CHART_FAILED_TS, guid, time.time(), _CHART_FAILED_MAX)
+                _bounded_put(_CHART_FAILED_TS, guid, _monotonic(), _CHART_FAILED_MAX)
             fut.set_result(best)
         except Exception:
             _log.debug("work failed", exc_info=True)
@@ -902,13 +930,23 @@ def _start_folder_bind(guid: str) -> asyncio.Future:
     """
     existing = store.get_title_by_guid(guid)
     if existing:
-        f = asyncio.get_event_loop().create_future()
-        f.set_result(existing)
-        return f
+        try:
+            f = asyncio.get_running_loop().create_future()
+            f.set_result(existing)
+            return f
+        except RuntimeError:
+            # 无事件循环上下文：已绑定时直接返回 None，调用方会再查一次 store。
+            _log.debug("_start_folder_bind: no running loop, bound title exists")
+            return None
     fut = _FOLDER_BIND_FUT.get(guid)
     if fut is not None:
         return fut
-    fut = asyncio.get_event_loop().create_future()
+    try:
+        fut = asyncio.get_running_loop().create_future()
+    except RuntimeError:
+        # 无事件循环上下文（同步调用方/线程池）：放弃后台绑定。
+        _log.debug("_start_folder_bind: no running loop, skip background bind")
+        return None
     _FOLDER_BIND_FUT[guid] = fut
 
     async def _work():
@@ -1844,10 +1882,10 @@ async def _aggregate_briefs(keyword: str, maxn: int | None = None,
     cache_key = f"{keyword}\x00{int(bool(fast_only))}\x00{int(bool(include_t4))}"
     if viewer_key:
         cache_key += f"\x00{viewer_key}"
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     _hit = None if refresh else _AGG_CACHE.get(cache_key)
     if _hit:
-        if (time.time() - _hit[0]) < AGG_CACHE_TTL:
+        if (_monotonic() - _hit[0]) < AGG_CACHE_TTL:
             # 真 LRU：命中即移到队尾（pop 后重插，O(1)），下次超限先淘汰别人
             _AGG_CACHE[cache_key] = _AGG_CACHE.pop(cache_key)
             return [dict(b) for b in _hit[1]]
@@ -4444,7 +4482,7 @@ async def item_detail(guid: str, request: Request):
     if chart_cache.is_chart_guid(guid):
         meta = chart_cache.get_guid(guid) or {}
         bound = store.get_title_by_guid(guid)
-        if bound is None and not (time.time() - _CHART_FAILED_TS.get(guid, 0)
+        if bound is None and not (_monotonic() - _CHART_FAILED_TS.get(guid, 0)
                                   < _CHART_FAILED_TTL):
             # 详情接口也不能把用户卡在海报墙：后台搜源 + 极短窗口，超时先返回
             # 可播骨架（play/info/stream/preset 会在播放页内继续等待同一任务）。
@@ -4482,7 +4520,7 @@ async def item_detail(guid: str, request: Request):
                 request, vlibsmod.make_key(vlibsmod.K_CHART, meta.get("cat", "tv"))):
             return JSONResponse({"code": -6, "msg": "此媒体库不存在", "data": None})
         cat = meta.get("cat", "tv")
-        failed = time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL
+        failed = _monotonic() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL
         data = inj._base_item(
             guid=guid,
             type="Movie" if cat == "movie" else "TV",
@@ -4835,7 +4873,7 @@ async def _stream_list_impl(guid: str, request: Request):
         else:
             brief = store.get_title_by_guid(guid)
             if not brief and chart_cache.is_chart_guid(guid):
-                if time.time() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
+                if _monotonic() - _CHART_FAILED_TS.get(guid, 0) < _CHART_FAILED_TTL:
                     return await forward_upstream(request)
                 # P0-3：榜单库本身打不开时连占位线路也不给，直接 -6。
                 if not _chart_key_open(request, guid, _ctx=_viewer_ctx(request)):
@@ -5926,7 +5964,7 @@ async def media_range(mg: str, request: Request):
         # P0-3：榜单库本身打不开时不进 preset，直接 -6（403）。
         if not _chart_key_open(request, chart_g, _ctx=_viewer_ctx(request)):
             return _denied_lib_response(status_code=403)
-        if time.time() - _CHART_FAILED_TS.get(chart_g, 0) < _CHART_FAILED_TTL:
+        if _monotonic() - _CHART_FAILED_TS.get(chart_g, 0) < _CHART_FAILED_TTL:
             return Response("暂无可用在线片源", status_code=503)
         # App 原生播放器也不等待搜索：立刻进入播放器，preset 内部再等待后台匹配
         start_resolve_chart(chart_g)
@@ -7304,161 +7342,17 @@ async def _race_fastest(picked: dict, request: Request) -> dict | None:
 # P2 拆分：本段亦已移入 proxy/hls_race.py（重导出见上）。
 
 
-def _decode_poster_tok(tok: str) -> tuple[str, str, int | None]:
-    """解码海报 token，返回 (图床URL, 网盘名, 健康等级)。
-
-    兼容旧版纯 URL token 与新版 JSON{u,p,h} token。"""
-    raw = _decode_tok(tok)
-    pan_label, grade = "", None
-    url = raw
-    if raw[:1] in ("{", "["):
-        try:
-            j = json.loads(raw)
-            if isinstance(j, dict):
-                url = j.get("u", "")
-                pan_label = str(j.get("p", "") or "")
-                if j.get("h") is not None:
-                    grade = int(j["h"])
-        except Exception:
-            _log.debug("_decode_poster_tok failed", exc_info=True)
-            url = raw
-    return url, pan_label, grade
-
-
-# 海报占位图（JPEG，150x225 渐变 + 播放标）：App/TV 原生图片加载器解不了 SVG，
-# 旧的 SVG fallback 在 App 端会显示为空白；改成光栅 JPEG 后失败时至少能看到占位。
-_POSTER_FALLBACK_JPEG_B64 = (
-    "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"
+# 海报纯逻辑层已拆到 poster_proxy（v1.2.8）：这里显式再导出，保持
+# app.<name> 的既有引用与测试 patch 点不变（路由与抓图仍在下方本模块）。
+from poster_proxy import (  # noqa: E402
+    _POSTER_DISK_DIR, _POSTER_DISK_MAX_BYTES_DEFAULT, _POSTER_DISK_TTL,
+    _POSTER_FALLBACK_JPEG_B64, _POSTER_NETWORK_ERRORS, _POSTER_OK_BYTES,
+    _POSTER_OK_CACHE, _POSTER_OK_MAX_BYTES, _POSTER_OK_MAX_ITEMS,
+    _POSTER_OK_TTL, _POSTER_SUFFIX_RE, _decode_poster_tok, _poster_disk_enabled,
+    _poster_disk_gc, _poster_disk_path, _poster_disk_read, _poster_disk_write,
+    _poster_fallback, _poster_fetch_headers, _poster_ok_drop, _poster_ok_get,
+    _poster_ok_put, _sniff_image, _split_poster_suffix, reset_ok_cache,
 )
-
-
-def _poster_fallback() -> Response:
-    """海报抓取失败时的占位图：返回 JPEG（非 SVG）。
-
-    旧版返回 SVG；浏览器能渲染，但 App/TV 原生图片加载器解不了 SVG，
-    失败时 App 端直接显示空白。JPEG 各端都能解，至少能看到占位图。
-    占位图只给 60 秒缓存（之前是 3600 秒）：首屏并发打垮图床时失败
-    占位图会被 App 缓存一小时、第一页一直蓝着；60 秒后重进就能重试。
-    """
-    try:
-        import base64 as _b64
-        data = _b64.b64decode(_POSTER_FALLBACK_JPEG_B64)
-        if data[:2] == b"\xff\xd8":
-            return Response(data, media_type="image/jpeg",
-                            headers={"Cache-Control": "max-age=60"})
-    except Exception:  # noqa: BLE001
-        _log.debug("_poster_fallback failed", exc_info=True)
-        pass
-    svg = """<svg xmlns="http://www.w3.org/2000/svg" width="300" height="450" viewBox="0 0 300 450">
-  <rect width="300" height="450" fill="#1f6feb"/>
-  <circle cx="150" cy="180" r="58" fill="rgba(255,255,255,.18)"/>
-  <polygon points="132,145 132,215 192,180" fill="#fff" opacity=".92"/>
-  <text x="150" y="285" text-anchor="middle" fill="#fff" font-family="sans-serif"
-    font-size="26" font-weight="700">在线影视</text>
-</svg>"""
-    return Response(svg, media_type="image/svg+xml; charset=utf-8",
-                    headers={"Cache-Control": "max-age=60"})
-
-
-def _poster_fetch_headers(url: str) -> dict:
-    """海报上游抓取请求头：UA + 豆瓣 Referer（其余图床不带 Referer）。"""
-    headers = {"User-Agent": "Mozilla/5.0"}
-    host = urllib.parse.urlsplit(url).netloc.lower()
-    # 豆瓣图床需要带豆瓣 Referer，否则可能 403
-    if host.endswith("doubanio.com") or host.endswith("douban.com") or \
-            host.endswith("doubanio.viki.moe"):
-        headers["Referer"] = "https://movie.douban.com/"
-    return headers
-
-
-# 部分源规则海报常带 HikerView 后缀：url@Referer=https://站/@User-Agent=UA
-# 或 url@headers={"Referer": "..."}。只认已知键开头的 @Key= 标记——图地址
-# 本身也可能含 @（如 userinfo），不能按第一个 @ 一刀切。
-_POSTER_SUFFIX_RE = re.compile(r"@(Referer|User-Agent|Cookie|headers)=")
-
-
-def _split_poster_suffix(url: str) -> tuple[str, dict]:
-    """拆海报地址的 @ 后缀 → (干净图地址, 抓图请求头)。
-
-    @ 之前是真实图地址，@ 之后是抓图时要带的请求头；未知/解析失败的后缀
-    直接丢弃并记日志，不让它污染图地址。无后缀时原样返回。
-    """
-    m = _POSTER_SUFFIX_RE.search(url)
-    if not m:
-        return url, {}
-    base, rest = url[:m.start()], url[m.start():]
-    headers: dict[str, str] = {}
-    for key, val in re.findall(r"@(Referer|User-Agent|Cookie|headers)=([^@]*)", rest):
-        if key == "headers":
-            try:
-                obj = json.loads(val)
-            except ValueError:
-                _log.debug("_split_poster_suffix bad headers json: %s", val[:60])
-                continue
-            if isinstance(obj, dict):
-                for hk, hv in obj.items():
-                    headers[str(hk)] = str(hv)
-        else:
-            headers[key] = val
-    return base, headers
-
-
-# 上游 v1.0.0 _poster_fetch 的网络错误集：直连出现连接级异常时才重试，
-# 正常 HTTP 错误（4xx/5xx）不重试。
-_POSTER_NETWORK_ERRORS = (
-    httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout,
-    httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
-    httpx.PoolTimeout,
-)
-
-
-# 成功海报的内存 LRU 缓存（只缓存 200 且为图片的抓取结果；失败永不入缓存）。
-# 首屏 9–22 张海报并发现抓常把图床打 403/429/超时，失败占位图又被 App 缓存
-# 1 小时；有界内存缓存让重进/换页不再重复抓同一张图。只放内存——7 天磁盘
-# 缓存是在 v0.2.42 移植时有意删掉的，不要复活。
-_POSTER_OK_CACHE: "OrderedDict[str, tuple[float, bytes, str]]" = OrderedDict()
-_POSTER_OK_BYTES = 0
-_POSTER_OK_MAX_ITEMS = 512
-_POSTER_OK_MAX_BYTES = 64 * 1024 * 1024
-_POSTER_OK_TTL = 6 * 3600
-
-
-def _poster_ok_get(url: str):
-    """命中返回 (内容, content-type)，未命中/过期返回 None。"""
-    ent = _POSTER_OK_CACHE.get(url)
-    if ent is None:
-        return None
-    expires, content, ctype = ent
-    if time.monotonic() >= expires:
-        _poster_ok_drop(url)
-        return None
-    _POSTER_OK_CACHE.move_to_end(url)
-    return content, ctype
-
-
-def _poster_ok_drop(url: str):
-    global _POSTER_OK_BYTES
-    ent = _POSTER_OK_CACHE.pop(url, None)
-    if ent is not None:
-        _POSTER_OK_BYTES -= len(ent[1])
-
-
-def _poster_ok_put(url: str, content: bytes, ctype: str):
-    """只缓存成功图：调用方保证 200 且为图片、内容非空。超限时从最久未用
-    起淘汰；单张超总字节上限时放完即被淘汰，等于不缓存。"""
-    global _POSTER_OK_BYTES
-    if not content:
-        return
-    _poster_ok_drop(url)
-    _POSTER_OK_CACHE[url] = (time.monotonic() + _POSTER_OK_TTL,
-                             content, ctype)
-    _POSTER_OK_BYTES += len(content)
-    while (_POSTER_OK_CACHE
-           and (len(_POSTER_OK_CACHE) > _POSTER_OK_MAX_ITEMS
-                or _POSTER_OK_BYTES > _POSTER_OK_MAX_BYTES)):
-        _old_url, (_e, _c, _t) = _POSTER_OK_CACHE.popitem(last=False)
-        _POSTER_OK_BYTES -= len(_c)
-
 
 async def _poster_upstream_get(request: Request, url: str,
                                extra_headers: dict | None = None):
@@ -7552,23 +7446,31 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
     if hit is not None:
         content, ctype = hit
     else:
-        r = await _poster_upstream_get(request, u, _poster_extra)
-        if r is None:
-            _log.warning("海报抓取失败 host=%s：上游无响应", host)
-            return _poster_fallback()
-        ctype = (r.headers.get("content-type") or "").lower()
-        if r.status_code != 200 or not r.content:
-            _log.warning("海报抓取失败 host=%s status=%s", host, r.status_code)
-            return _poster_fallback()
-        sniff = _sniff_image(r.content[:12])
-        if not (ctype.startswith("image/") or sniff):
-            _log.warning("海报抓取失败 host=%s：非图片内容 type=%s",
-                         host, ctype[:40])
-            return _poster_fallback()
-        ctype = ctype if ctype.startswith("image/") else sniff
-        content = r.content
-        # 只缓存成功抓到的图（200 且为图片）；失败永不入缓存。
-        _poster_ok_put(u, content, ctype)
+        # 内存未命中先试磁盘（重启冷启动路径）：命中则回填内存 LRU，不再打图床
+        disk = await asyncio.to_thread(_poster_disk_read, u)
+        if disk is not None:
+            content, ctype = disk
+            _poster_ok_put(u, content, ctype)
+        else:
+            r = await _poster_upstream_get(request, u, _poster_extra)
+            if r is None:
+                _log.warning("海报抓取失败 host=%s：上游无响应", host)
+                return _poster_fallback()
+            ctype = (r.headers.get("content-type") or "").lower()
+            if r.status_code != 200 or not r.content:
+                _log.warning("海报抓取失败 host=%s status=%s", host, r.status_code)
+                return _poster_fallback()
+            sniff = _sniff_image(r.content[:12])
+            if not (ctype.startswith("image/") or sniff):
+                _log.warning("海报抓取失败 host=%s：非图片内容 type=%s",
+                             host, ctype[:40])
+                return _poster_fallback()
+            ctype = ctype if ctype.startswith("image/") else sniff
+            content = r.content
+            # 只缓存成功抓到的图（200 且为图片）；失败永不入缓存。
+            _poster_ok_put(u, content, ctype)
+            # 顺手落盘（重启后不再冷启动打图床）
+            _poster_disk_write(u, content)
 
     # 在海报上烧角标（网盘资源 / 源健康点）。GIF 不动，合成失败回退原图。
     out_bytes, out_type = content, (ctype or "image/jpeg")
@@ -7604,18 +7506,6 @@ async def _serve_online_poster(tok_path: str, request: Request) -> Response:
                     media_type=out_type,
                     headers={"Cache-Control": "max-age=86400",
                              "Access-Control-Allow-Origin": "*"})
-
-
-def _sniff_image(head: bytes) -> str:
-    if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
-        return "image/webp"
-    if head[:8] == bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)):
-        return "image/png"
-    if head[:3] == bytes((0xFF, 0xD8, 0xFF)):
-        return "image/jpeg"
-    if head[:6] in (b"GIF87a", b"GIF89a"):
-        return "image/gif"
-    return ""
 
 
 @app.get("/online/{tok_path:path}")

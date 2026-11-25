@@ -108,7 +108,7 @@ class SourceListNoPagingTests(unittest.TestCase):
     """3) 资源站列表不分页，自适应显示 + 展开全量。"""
 
     def setUp(self):
-        self.ui = (PROXY / "admin_ui.py").read_text(encoding="utf-8")
+        self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
 
     def test_no_paging_controls(self):
         self.assertNotIn("function srcPage(", self.ui)

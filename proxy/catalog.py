@@ -34,6 +34,13 @@ except ImportError:  # 独立运行缺少 fnlog 时退回标准 logging
 
 _log = get_logger("catalog")
 
+
+def _monotonic() -> float:
+    """页缓存 TTL 用单调钟：墙钟可能被 NTP 回拨，单调钟不受影响。
+    只用于内存缓存时间戳；落盘的 _updated/built_at 仍用墙钟。"""
+    return time.monotonic()
+
+
 PAGE_SIZE = 20
 # 每个大类最多可浏览的页数（页数×20=条数）。250 页 ≈ 5000 部。
 MAX_PAGES = 250
@@ -1145,7 +1152,7 @@ class Catalog:
             hit = self._page_cache.get(key)
             if hit:
                 ts, data, ttl = hit
-                if time.time() - ts < ttl:
+                if _monotonic() - ts < ttl:
                     return data
                 self._page_cache.pop(key, None)
             fut = self._inflight.get(key)
@@ -1155,7 +1162,7 @@ class Catalog:
                 fut = None
                 self._inflight.pop(key, None)
         if fut is None:
-            fut = asyncio.get_event_loop().create_future()
+            fut = asyncio.get_running_loop().create_future()
             with self._lock:
                 self._inflight[key] = fut
 
@@ -1169,7 +1176,7 @@ class Catalog:
                             return
                         # 空结果只短缓存，避免慢源一次抖动把该页冻结 10 分钟
                         ttl = EMPTY_TTL if not briefs else PAGE_TTL
-                        self._page_cache[key] = (time.time(), briefs, ttl)
+                        self._page_cache[key] = (_monotonic(), briefs, ttl)
                         # 页缓存总页数上限：按插入序删最旧页（可重新拉取）
                         while len(self._page_cache) > _PAGE_CACHE_MAX:
                             self._page_cache.pop(
@@ -1203,7 +1210,7 @@ class Catalog:
             dense = self._dense.get(self._scope_key(scope, cat)) or []
             pool = list(dense)
             hit = self._page_cache.get((scope, cat, 1))
-            if hit and time.time() - hit[0] < hit[2]:
+            if hit and _monotonic() - hit[0] < hit[2]:
                 for b in hit[1]:
                     if b not in pool:
                         pool.append(b)
