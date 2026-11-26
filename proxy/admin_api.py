@@ -399,6 +399,104 @@ async def ext_config_export(request: Request):
 # ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
+@admin_router.get("/v/api/ext/install-check")
+async def ext_install_check(request: Request):
+    """装机后一次性验收：构建戳、配置/缓存可读、核心路由、后台任务、源健康。
+
+    只读、零网络：全部是进程内状态自检，用于真机安装后确认接管链路完整。
+    """
+    from app import (BUILD_LABEL, _background_task_snapshot, app, config,
+                     store)
+    route_paths = {getattr(route, "path", "") for route in app.routes}
+    required_routes = (
+        "/_ext/healthz", "/v/api/v1/search/list", "/v/api/v1/mediadb/list",
+        "/v/api/v1/play/info", "/v/api/v1/play/play",
+        "/v/api/v1/stream/list", "/v/api/ext/status", "/v/api/ext/live",
+        "/v/api/ext/cache", "/v/api/ext/source-health", "/v/online-admin",
+    )
+    missing = [path for path in required_routes if path not in route_paths]
+    checks = {
+        # 构建戳单独作为“提示项”：源码直跑时没有 build_info.py（值 dev），
+        # 属正常开发场景，不该让整份验收判失败；装包后这里会显示版本+提交+时间。
+        "build_label": {"ok": bool(BUILD_LABEL and BUILD_LABEL != "dev"),
+                        "value": BUILD_LABEL, "advisory": True},
+        "extension_enabled": {"ok": True,
+                              "value": config.read("extension_enabled", True)},
+        "config_readable": {"ok": isinstance(config.get(), dict)},
+        "store_readable": {"ok": isinstance(store._titles, dict),
+                           "cached_titles": len(store._titles)},
+        "sources": {"total": len(config.all_sources()),
+                    "enabled": len(config.enabled_sources())},
+        "required_routes": {"ok": not missing, "missing": missing},
+        "background_tasks": {"running": _background_task_snapshot(
+            getattr(app.state, "background_tasks", set()))},
+        "source_health": {"sources": len(sourcehealth.snapshot())},
+    }
+    passed = all(check.get("ok", True) for name, check in checks.items()
+                 if not check.get("advisory"))
+    return {"ok": passed, "build": BUILD_LABEL,
+            "auth_mode": config.read("admin_auth_mode", "off"),
+            "checks": checks,
+            "client_acceptance": ["首页加载", "搜索", "详情/选集", "起播",
+                                  "拖动进度", "续播"]}
+
+
+def _acceptance_events() -> list[dict]:
+    """本次播放验收会话内的事件（未开始会话时返回空）。"""
+    tag = livemod.acceptance_session()
+    if not tag:
+        return []
+    snapshot = livemod.snapshot()
+    return [event for device in snapshot.get("devices", [])
+            for event in device.get("events", [])
+            if event.get("acceptance_session") == tag]
+
+
+@admin_router.post("/v/api/ext/install-check/acceptance/start")
+async def ext_acceptance_start(request: Request):
+    """开始一次播放验收：清空实时记录并打会话标记，后续事件归入本次验收。"""
+    body = {}
+    try:
+        if request.headers.get("content-type", "").startswith("application/json"):
+            body = await request.json()
+    except Exception:  # noqa: BLE001
+        _log.debug("ext_acceptance_start bad body", exc_info=True)
+    livemod.reset()
+    tag = livemod.start_acceptance_session(str((body or {}).get("tag") or ""))
+    return {"code": 0, "data": {"session": tag, "steps": [
+        "首页加载", "搜索", "详情/选集", "起播", "拖动进度", "续播"]}}
+
+
+@admin_router.post("/v/api/ext/install-check/acceptance/clear")
+async def ext_acceptance_clear(request: Request):
+    """结束验收：清掉会话标记与实时记录。"""
+    livemod.clear_acceptance_session()
+    livemod.reset()
+    return {"code": 0, "data": True}
+
+
+@admin_router.get("/v/api/ext/install-check/report")
+async def ext_acceptance_report(request: Request):
+    """导出验收报告（JSON）：装机自检 + 源健康 + 本次会话播放事件。"""
+    from app import (BUILD_LABEL, _background_task_snapshot, app, config,
+                     store)
+    snapshot = livemod.snapshot()
+    events = _acceptance_events()
+    return {"ok": True, "generated_at": time.time(), "build": BUILD_LABEL,
+            "session": livemod.acceptance_session(),
+            "install": {"auth_mode": config.read("admin_auth_mode", "off"),
+                        "extension_enabled": config.read("extension_enabled", True),
+                        "cached_titles": len(store._titles),
+                        "sources_total": len(config.all_sources()),
+                        "sources_enabled": len(config.enabled_sources()),
+                        "background_tasks": _background_task_snapshot(
+                            getattr(app.state, "background_tasks", set()))},
+            "source_health": sourcehealth.snapshot(),
+            "live": {"devices": snapshot.get("devices", []),
+                     "acceptance_events": events},
+            "steps": ["首页加载", "搜索", "详情/选集", "起播", "拖动进度", "续播"]}
+
+
 @admin_router.get("/v/api/ext/status")
 async def ext_status(request: Request):
     from app import BUILD_LABEL, _background_task_history, _background_task_snapshot, _catalog_poster_metrics, app, chart_cache, config, store  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入

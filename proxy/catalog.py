@@ -326,11 +326,13 @@ def classify(name: str) -> str | None:
         return "shortdrama"
     if any(k in nl for k in _UHD_KW):
         return "uhd"
-    # P2：海外剧先于普通剧集判定。
-    if any(k in n for k in _OVERSEAS_KW):
-        return "overseas"
+    # 动漫词先于海外词：源站常见「Netflix动漫 / 海外动漫」复合类目，
+    # 先判海外会把整类动漫错挂进海外剧集库（真机 2026-11-24 串分类）。
+    # 真人海外剧（海外剧/美剧…）不受影响；「海外剧场」仍走 shortdrama。
     if any(k in n for k in _ANIME_KW):
         return "anime"
+    if any(k in n for k in _OVERSEAS_KW):
+        return "overseas"
     if any(k in n for k in _VARIETY_KW):
         return "variety"
     if any(k in n for k in _DOC_KW):
@@ -602,6 +604,28 @@ class Catalog:
         classes = raw.get("classes") or {}
         routes = raw.get("routes") or {}
         if not isinstance(classes, dict) or not isinstance(routes, dict):
+            return False
+        # 路由状态里的叶子按**当时的**关键词表归类；升级后关键词表可能演进
+        # （如新增/调整海外·动漫判定），旧盘态会把动漫类目一直错挂在
+        # 海外剧集（真机串分类根因）。这里对每个叶子重跑一次
+        # classify_source_class（纯内存、几千条目毫秒级），任何不一致
+        # 都整份作废、走全量重探。
+        try:
+            adult_by_src = {sid: bool((self._source_by_id(sid) or {}).get("adult"))
+                            for sid in classes}
+            for sid, cls in classes.items():
+                allowed = adult_by_src.get(sid, False)
+                for cl in (cls or []):
+                    want = classify_source_class(
+                        str(cl.get("type_name") or ""), allowed)
+                    if cl.get("cat") != want:
+                        _log.info(
+                            "route state stale after classify change: "
+                            "sid=%s type=%r saved=%s now=%s; re-probe all",
+                            sid, cl.get("type_name"), cl.get("cat"), want)
+                        return False
+        except Exception:  # noqa: BLE001
+            _log.debug("route state revalidate failed", exc_info=True)
             return False
         with self._lock:
             if generation != self._cache_generation or not self._route_state_loaded:

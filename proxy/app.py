@@ -7375,6 +7375,19 @@ async def _poster_upstream_get(request: Request, url: str,
     地址格式、JPEG 占位、纯透传均不动。
     """
     host = urllib.parse.urlsplit(url).netloc.lower()
+    # 部分图床（wsyzy 等）防盗链只认播放站 Referer，直抓/origin Referer 均
+    # 403，但提供 CDN 镜像域（adfilter.HOSTS_MIRROR）。命中镜像表时直接改抓
+    # 镜像地址——比 403 重试链路更早、更省；其余图床行为不变。
+    for _dom, _cdn in adfilter_mod.HOSTS_MIRROR:
+        if host == _dom or host.endswith("." + _dom):
+            try:
+                fixed = url.replace(host, _cdn, 1)
+                _log.info("poster mirror host=%s -> %s", host, _cdn)
+                url = fixed
+                host = urllib.parse.urlsplit(url).netloc.lower()
+            except Exception:  # noqa: BLE001
+                _log.debug("poster mirror replace failed", exc_info=True)
+            break
     headers = {**_poster_fetch_headers(url), **(extra_headers or {})}
     try:
         r = await ext_get_retry(request, url, headers=headers, tries=1)

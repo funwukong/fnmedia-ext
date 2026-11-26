@@ -421,7 +421,27 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="hint" id="extensionEnabledMsg"></div>
       </div>
 
+            <div class="card">
+        <div class="card-title">安装验收
+          <span class="muted sm" style="font-weight:400;margin-left:auto">
+            <button type="button" class="btn small" onclick="runInstallCheck()">运行检查</button>
+            <button type="button" class="btn small" onclick="startAcceptance()">开始播放验收</button>
+            <button type="button" class="btn small" onclick="downloadAcceptanceReport()">下载报告</button>
+            <button type="button" class="btn small" onclick="copyAcceptanceReport()">复制报告</button>
+          </span>
+        </div>
+        <p class="card-sub">装到 NAS 后先「运行检查」确认接管链路完整；再点「开始播放验收」，然后在电视/手机走一遍
+          首页→搜索→详情→起播→拖动→续播，最后「下载报告」即可一次性拿到本次验收记录。</p>
+        <pre id="installCheckResult" class="log" style="max-height:260px">尚未检查</pre>
+      </div>
+
       <div class="card">
+        <div class="card-title">虚拟媒体库</div>
+        <p class="card-sub">两个方向：① 各类目热门资源（豆瓣真实榜单，点击搜源播放）；② 海量片库（资源站分类深翻）。</p>
+        <div class="lib-grid" id="ovLibs"><div class="muted sm">加载中…</div></div>
+      </div>
+
+<div class="card">
         <div class="card-title">虚拟媒体库</div>
         <p class="card-sub">两个方向：① 各类目热门资源（豆瓣真实榜单，点击搜源播放）；② 海量片库（资源站分类深翻）。</p>
         <div class="lib-grid" id="ovLibs"><div class="muted sm">加载中…</div></div>
@@ -2860,6 +2880,76 @@ async function saveExtensionEnabled(){
     toast("服务开关保存失败","fail");
   }finally{control.disabled=false;}
 }
+
+/* ---------- 安装验收 ---------- */
+let ACCEPT_REPORT=null;
+function _installCheckText(d){
+  const c=d.checks||{},L=[];
+  L.push("构建: "+(d.build||"-"));
+  L.push("服务开关: "+((c.extension_enabled&&c.extension_enabled.value)?"开":"关"));
+  L.push("配置可读: "+(c.config_readable&&c.config_readable.ok?"是":"否"));
+  const st=c.store_readable||{};
+  L.push("缓存在线条目: "+(st.cached_titles!=null?st.cached_titles:"-"));
+  const src=c.sources||{};
+  L.push("资源站: "+(src.enabled||0)+" / "+(src.total||0)+" 启用");
+  const rt=c.required_routes||{};
+  L.push("核心路由: "+(rt.ok?"齐全":"缺 "+((rt.missing||[]).join(", ")||"-")));
+  L.push("后台任务: "+(((c.background_tasks||{}).running||[]).length)+" 个");
+  L.push("源健康条目: "+(((c.source_health||{}).sources)||0));
+  L.push("结论: "+(d.ok?"通过 ✓":"有问题 ✗"));
+  return L.join("\n");
+}
+async function runInstallCheck(){
+  const box=$("installCheckResult");
+  box.textContent="检查中…";
+  try{
+    const d=await jget("/v/api/ext/install-check",20000);
+    ACCEPT_REPORT=ACCEPT_REPORT||{};ACCEPT_REPORT.install_check=d;
+    box.textContent=_installCheckText(d);
+    toast(d.ok?"安装检查通过":"安装检查发现问题",d.ok?"ok":"fail");
+  }catch(e){box.textContent="检查失败："+e.message;toast("检查失败","fail");}
+}
+async function startAcceptance(){
+  if(!confirm("开始播放验收？\n\n将清空当前实时播放记录并打验收标记。\n之后请在电视/手机走一遍：首页→搜索→详情→起播→拖动→续播，再回来「下载报告」。"))return;
+  try{
+    const r=await jpost("/v/api/ext/install-check/acceptance/start",{});
+    if(r.code!==0)throw new Error(r.msg||"启动失败");
+    $("installCheckResult").textContent="验收已开始（会话 "+r.data.session+"）\n\n"
+      +"请在客户端依次完成：\n  1. 打开影视首页（媒体库列表出现在线库）\n  2. 搜索任意中文片名\n"
+      +"  3. 进详情 / 选集\n  4. 点击起播\n  5. 拖动进度条\n  6. 退出再进看续播\n\n完成后点「下载报告」。";
+    toast("播放验收已开始");
+  }catch(e){toast("启动失败："+e.message,"fail");}
+}
+async function _acceptanceReport(){
+  const d=await jget("/v/api/ext/install-check/report",20000);
+  try{const ck=await jget("/v/api/ext/install-check",20000);d.install_check=ck;}catch(e){}
+  return d;
+}
+async function downloadAcceptanceReport(){
+  try{
+    const d=await _acceptanceReport();
+    const ts=new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
+    const blob=new Blob([JSON.stringify(d,null,2)],{type:"application/json"});
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(blob);
+    a.download="fnmedia-acceptance-"+ts+".json";
+    document.body.appendChild(a);a.click();a.remove();
+    setTimeout(()=>URL.revokeObjectURL(a.href),3000);
+    $("installCheckResult").textContent=
+      "报告已导出。\n构建: "+(d.build||"-")
+      +"\n验收事件: "+(((d.live||{}).acceptance_events||[]).length)
+      +"\n设备: "+(((d.live||{}).devices||[]).length);
+    toast("报告已下载");
+  }catch(e){toast("导出失败："+e.message,"fail");}
+}
+async function copyAcceptanceReport(){
+  try{
+    const d=await _acceptanceReport();
+    await navigator.clipboard.writeText(JSON.stringify(d,null,2));
+    toast("报告已复制到剪贴板");
+  }catch(e){toast("复制失败："+e.message,"fail");}
+}
+
 async function init(){
   // 首个请求若在插件重启窗口内发出可能一直挂起（旧版无超时、无重试，
   // 页面会永远停在“检测中…”）：15 秒超时，失败重试 3 次，仍失败才报未接管。

@@ -75,6 +75,10 @@ BASELINE_ROUTES = [
     (('POST',), '/v/api/ext/admin/login'),
     (('POST',), '/v/api/ext/admin/token/rotate'),
     (('GET',), '/v/api/ext/config/export'),
+    (('GET',), '/v/api/ext/install-check'),
+    (('POST',), '/v/api/ext/install-check/acceptance/start'),
+    (('POST',), '/v/api/ext/install-check/acceptance/clear'),
+    (('GET',), '/v/api/ext/install-check/report'),
     (('GET',), '/v/api/ext/status'),
     (('GET',), '/v/api/ext/diag/resume'),
     (('GET',), '/v/api/ext/continue'),
@@ -209,7 +213,7 @@ def test_split_modules_import_standalone():
     import lib_inject
     assert admin_api.admin_router is not None
     assert len(hls_race.hls_router.routes) == 6
-    assert len(admin_api.admin_router.routes) == 116
+    assert len(admin_api.admin_router.routes) == 120  # +4 安装验收/播放验收会话
     assert panmatch._pan_match is appmod._pan_match
     assert lib_inject._all_virtual_lib_guids is appmod._all_virtual_lib_guids
     assert hls_race._ensure_playable is appmod._ensure_playable

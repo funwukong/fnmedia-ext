@@ -28,6 +28,29 @@ _LOCK = Lock()
 _DEVICES: "OrderedDict[str, dict]" = OrderedDict()
 _SEQ = 0
 
+# ---- 播放验收会话（内存标记）：管理页「开始播放验收」后，后续事件打上
+# 同一 tag，报告接口只取该会话内的事件，实现首页/搜索/详情/起播/拖动/
+# 续播的一次性隔离验收。不落盘、重启即清。
+_SESSION_TAG = ""
+
+
+def start_acceptance_session(tag: str = "") -> str:
+    """开启一次播放验收会话，返回本次会话 tag。"""
+    global _SESSION_TAG
+    _SESSION_TAG = (tag or f"acceptance-{int(time.time())}")[:80]
+    return _SESSION_TAG
+
+
+def acceptance_session() -> str:
+    """当前验收会话 tag；未开启时为空串。"""
+    return _SESSION_TAG
+
+
+def clear_acceptance_session() -> None:
+    """结束并清空验收会话标记。"""
+    global _SESSION_TAG
+    _SESSION_TAG = ""
+
 
 def _ua_fp(ua: str) -> str:
     """从 UA 取稳定短指纹（bundle/版本/机型关键片段），不做哈希碰撞安全用途。"""
@@ -79,6 +102,8 @@ def record(ua: str, ip: str, method: str, path: str, query: str,
               "p": (path + ("?" + query if query else ""))[:160],
               "status": status, "origin": origin,
               "stage": stage, "title": title[:80], "note": note[:120],
+              # 播放验收会话标记：仅在「开始播放验收」后非空，供报告按会话隔离
+              "acceptance_session": _SESSION_TAG,
               "err": is_err}
         _SEQ += 1
         dev["events"].append(ev)
