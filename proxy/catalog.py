@@ -347,6 +347,26 @@ def classify(name: str) -> str | None:
     return None
 
 
+def _excluded_cats_for(source_id) -> set[str]:
+    """该源被用户排除的分类集合（config.catalog_cat_exclude）。
+
+    值为 dict：source_id -> [cat, ...]；空/非法时返回空集合（不排除）。
+    """
+    sid = str(source_id or "")
+    if not sid:
+        return set()
+    try:
+        from config import config as _cfg
+        raw = _cfg.read("catalog_cat_exclude", {}) or {}
+        cats = raw.get(sid) if isinstance(raw, dict) else None
+        if isinstance(cats, (list, tuple, set)):
+            valid = set(CATS)
+            return {str(c) for c in cats if str(c) in valid}
+    except Exception:  # noqa: BLE001
+        _log.debug("_excluded_cats_for failed", exc_info=True)
+    return set()
+
+
 def filter_category_list(categories: list[dict]) -> list[dict]:
     """统一过滤分类列表：精确命中黑名单的类目不进入任何后续抓取/缓存。"""
     return [c for c in (categories or [])
@@ -615,7 +635,13 @@ class Catalog:
                             for sid in classes}
             for sid, cls in classes.items():
                 allowed = adult_by_src.get(sid, False)
+                excluded = _excluded_cats_for(sid)
                 for cl in (cls or []):
+                    # 用户后来排除了某一类 → 旧盘态里该类路由必须作废
+                    if cl.get("cat") in excluded:
+                        _log.info("route state stale: sid=%s cat=%s excluded",
+                                  sid, cl.get("cat"))
+                        return False
                     want = classify_source_class(
                         str(cl.get("type_name") or ""), allowed)
                     if cl.get("cat") != want:
@@ -903,6 +929,15 @@ class Catalog:
             except Exception:
                 _log.debug("_load_source_classes failed: source=%s", source, exc_info=True)
                 continue
+        # 分类排除：该源被标记为脏的类目直接不建路由（聚合与独立库都不受影响
+        # 之外的其它类），避免脏数据串到别的分类库。配置见 catalog_cat_exclude。
+        excluded = _excluded_cats_for(source.get("id"))
+        if excluded:
+            before = len(norm)
+            norm = [cl for cl in norm if cl.get("cat") not in excluded]
+            if len(norm) != before:
+                _log.info("catalog cat excluded sid=%s cats=%s dropped=%d",
+                          source.get("id"), sorted(excluded), before - len(norm))
         with self._lock:
             self._classes[source["id"]] = norm
 

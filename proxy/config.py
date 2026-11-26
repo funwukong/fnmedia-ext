@@ -276,6 +276,17 @@ DEFAULTS = {
     "poster_cache_mb": 64,      # 成功海报内存 LRU 字节上限
     # 成功海报磁盘缓存上限（MB）；0 = 关闭磁盘缓存（恢复纯透传行为）
     "poster_disk_cache_mb": 256,
+
+    # 海报防盗链镜像：命中左侧 host 的图片改抓右侧 CDN。内置表见
+    # adfilter.HOSTS_MIRROR（品牌词匹配，覆盖该品牌所有图床子域）；
+    # 这里放用户自己补充的 [["源host或品牌词","镜像域"], ...]。
+    "poster_mirror_hosts": [],
+
+    # 分类排除：{"<source_id>": ["<cat>", ...]}。
+    # 源站分类表里某个子类其实是脏数据（如把国产动漫挂在「海外剧」，条目
+    # 会串进海外剧集库）时，只排除该源的这一类，不必整源停用。
+    # cat 取值同 catalog.CATS（movie/tv/anime/variety/... 含 overseas 等）。
+    "catalog_cat_exclude": {},
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。

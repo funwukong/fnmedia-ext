@@ -399,6 +399,13 @@ async def ext_config_export(request: Request):
 # ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
+@admin_router.get("/v/api/ext/catalog-cat-exclude")
+async def ext_catalog_cat_exclude_get():
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    raw = config.read("catalog_cat_exclude", {}) or {}
+    return {"code": 0, "data": {"exclude": raw}}
+
+
 @admin_router.get("/v/api/ext/install-check")
 async def ext_install_check(request: Request):
     """装机后一次性验收：构建戳、配置/缓存可读、核心路由、后台任务、源健康。
@@ -1017,6 +1024,8 @@ async def ext_set_config(request: Request):
         # 内存缓存预算（v1.2.6）：档位 + 四个 MB 键，改后实时生效
         "cache_budget_profile", "agg_cache_mb", "playlist_cache_mb",
         "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
+        "poster_mirror_hosts",  # 海报防盗链镜像对
+        "catalog_cat_exclude",  # 分类排除：源 -> 脏分类
     }
     # >>> PRIVATE:CATVOD
     allowed.add("pan_lib_enabled")
@@ -1058,6 +1067,31 @@ async def ext_set_config(request: Request):
                 1, min(720, int(float(patch["pan_cache_ttl_hours"]))))
         except (TypeError, ValueError):
             patch.pop("pan_cache_ttl_hours", None)
+    if "catalog_cat_exclude" in patch:
+        raw_ex = patch["catalog_cat_exclude"]
+        clean: dict[str, list[str]] = {}
+        if isinstance(raw_ex, dict):
+            valid_cats = set(catalogmod.CATS)
+            for sid, cats in list(raw_ex.items())[:200]:
+                sid_s = str(sid or "").strip()
+                if not sid_s or not isinstance(cats, (list, tuple)):
+                    continue
+                keep = [str(c) for c in cats if str(c) in valid_cats]
+                if keep:
+                    clean[sid_s] = sorted(set(keep))
+        patch["catalog_cat_exclude"] = clean
+    if "poster_mirror_hosts" in patch:
+        pairs = []
+        raw_pairs = patch["poster_mirror_hosts"]
+        if not isinstance(raw_pairs, list):
+            raw_pairs = []
+        for item in raw_pairs[:50]:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                src = str(item[0] or "").strip().lower()
+                cdn = str(item[1] or "").strip()
+                if src and cdn and "://" not in src and "://" not in cdn:
+                    pairs.append([src, cdn])
+        patch["poster_mirror_hosts"] = pairs
     if "pan_cache_cleanup_enabled" in patch:
         patch["pan_cache_cleanup_enabled"] = bool(
             patch["pan_cache_cleanup_enabled"])
@@ -1191,6 +1225,13 @@ async def ext_set_config(request: Request):
         except Exception:
             _log.debug("ext_set_config failed", exc_info=True)
             pass
+    if "catalog_cat_exclude" in patch:
+        # 排除项变化：内存与盘上路由都必须重建，立即生效
+        try:
+            catalog.reset()
+        except Exception:
+            _log.debug("catalog reset after exclude failed", exc_info=True)
+        _schedule_routes_refresh()
     if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
         # 否则打开开关后扩展库卡要等下次路由过期才出现。

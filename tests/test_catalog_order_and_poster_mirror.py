@@ -33,23 +33,13 @@ def test_shortdrama_theater_unchanged():
 
 def test_poster_mirror_rewrites_wsyzy_hosts():
     import adfilter
-    import urllib.parse
-    mirror = dict(adfilter.HOSTS_MIRROR)
-    assert mirror, "镜像表丢失"
-
-    def mirror_url(url: str) -> str:
-        host = urllib.parse.urlsplit(url).netloc.lower()
-        for dom, cdn in adfilter.HOSTS_MIRROR:
-            if host == dom or host.endswith("." + dom):
-                return url.replace(host, cdn, 1)
-        return url
-
-    assert mirror_url("https://img1.wsyzy.org/2026/a.jpg") == \
+    assert adfilter.mirror_poster_url("https://img1.wsyzy.org/2026/a.jpg") == \
         "https://fan.cloudflare.182682.xyz/2026/a.jpg"
-    assert mirror_url("https://fiizvfck.top/x.png") == \
+    assert adfilter.mirror_poster_url("https://fiizvfck.top/x.png") == \
         "https://fan.cloudflare.182682.xyz/x.png"
     # 非镜像图床原样返回
-    assert mirror_url("https://douban.com/x.jpg") == "https://douban.com/x.jpg"
+    assert adfilter.mirror_poster_url("https://douban.com/x.jpg") == \
+        "https://douban.com/x.jpg"
 
 
 def test_app_poster_fetch_applies_mirror_before_upstream():
@@ -57,6 +47,6 @@ def test_app_poster_fetch_applies_mirror_before_upstream():
     src = (ROOT / "proxy" / "app.py").read_text(encoding="utf-8")
     i_upstream = src.index("async def _poster_upstream_get")
     body = src[i_upstream:i_upstream + 2500]
-    assert "HOSTS_MIRROR" in body
+    assert "mirror_poster_url" in body
     # 镜像替换应在第一次 ext_get_retry 之前
-    assert body.index("HOSTS_MIRROR") < body.index("ext_get_retry")
+    assert body.index("mirror_poster_url") < body.index("ext_get_retry")

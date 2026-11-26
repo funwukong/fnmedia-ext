@@ -650,6 +650,19 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
           <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
           <button class="small" onclick="cmsHealthCheck()" title="用热门词批量检测纯 CMS 源是否有效，失效写入健康画像触发熔断">CMS 批量体检</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
+        <div class="card" style="margin-top:12px">
+          <div class="card-title">分类排除（防脏数据串库）
+            <span class="muted sm" style="font-weight:400">某源某分类是脏数据（如国产动漫挂在「海外剧」）时，排除该源的这一类</span></div>
+          <div class="row">
+            <select id="catExSrc" style="max-width:220px"><option value="">— 选择资源站 —</option></select>
+            <select id="catExCat" multiple size="6" style="min-width:220px"></select>
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <button class="small primary" onclick="saveCatExclude()">保存排除</button>
+              <button class="small" onclick="clearCatExclude()">清除该源</button>
+            </div>
+          </div>
+          <div class="hint" id="catExMsg"></div>
+        </div>
           <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
           <label class="btn-sm" style="border-color:var(--ok);background:var(--ok-soft);color:var(--ok)" title="从 JSON 文件导入 CMS 源，自动去重">
             ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" class="file-input" onchange="importCmsFile(this)"/>
@@ -2505,6 +2518,44 @@ async function delSource(id,name){
   if(!confirm("确定删除资源站「"+name+"」？"))return;
   const r=await jpost("/v/api/ext/source/delete",{id});
   if(r.code===0){toast("已删除");await loadStatus();}else toast(r.msg||"删除失败","fail");
+}
+const CAT_EX_LABELS={movie:"电影",tv:"剧集",anime:"动漫",variety:"综艺",documentary:"纪录片",uhd:"4K",shortdrama:"短剧",overseas:"海外剧集",ai_comic:"AI漫剧",ted:"教育",sports:"体育",live:"直播",kids:"少儿",opera:"戏曲",music:"音乐MV"};
+let CAT_EX_CFG={};
+async function loadCatExclude(){
+  try{
+    const st=await jget("/v/api/ext/status");
+    const srcs=(st.data&&st.data.config&&st.data.config.sources)||[];
+    const sel=$("catExSrc");if(!sel)return;
+    sel.innerHTML='<option value="">— 选择资源站 —</option>'+srcs.map(s=>`<option value="${esc(s.id)}">${esc(s.name||s.id)}</option>`).join("");
+    const cfg=await jget("/v/api/ext/catalog-cat-exclude");
+    CAT_EX_CFG=(cfg.data&&cfg.data.exclude)||{};
+    sel.onchange=()=>renderCatExclude();
+    renderCatExclude();
+  }catch(e){}
+}
+function renderCatExclude(){
+  const sel=$("catExSrc"),multi=$("catExCat"),msg=$("catExMsg");
+  if(!sel||!multi)return;
+  const sid=sel.value;
+  const cur=(CAT_EX_CFG[sid])||[];
+  multi.innerHTML=Object.keys(CAT_EX_LABELS).map(c=>`<option value="${c}" ${cur.includes(c)?"selected":""}>${CAT_EX_LABELS[c]}</option>`).join("");
+  msg.textContent=sid?(cur.length?("已排除："+cur.map(c=>CAT_EX_LABELS[c]||c).join("、")):"该源无排除"):"";
+}
+async function saveCatExclude(){
+  const sid=$("catExSrc").value;if(!sid){toast("先选择资源站","fail");return;}
+  const cats=Array.from($("catExCat").selectedOptions).map(o=>o.value);
+  const cfg={...CAT_EX_CFG};
+  if(cats.length)cfg[sid]=cats;else delete cfg[sid];
+  const r=await jpost("/v/api/ext/config",{catalog_cat_exclude:cfg});
+  if(r.code===0){CAT_EX_CFG=cfg;renderCatExclude();toast("已保存，路由重建中");await loadStatus();renderSources();}
+  else toast(r.msg||"保存失败","fail");
+}
+async function clearCatExclude(){
+  const sid=$("catExSrc").value;if(!sid){toast("先选择资源站","fail");return;}
+  const cfg={...CAT_EX_CFG};delete cfg[sid];
+  const r=await jpost("/v/api/ext/config",{catalog_cat_exclude:cfg});
+  if(r.code===0){CAT_EX_CFG=cfg;renderCatExclude();toast("已清除");await loadStatus();renderSources();}
+  else toast(r.msg||"清除失败","fail");
 }
 async function restoreBuiltin(){
   const r=await jpost("/v/api/ext/source/restore",{});

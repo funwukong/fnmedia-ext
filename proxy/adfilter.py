@@ -48,12 +48,78 @@ KNOWN_AD_DURS = {5.48, 5.32, 4.00, 0.56, 3.36, 5.0, 4.5}
 _AD_TOL = 0.05
 MIN_MAIN_DUR = 60.0
 
-# 源站图床 -> CDN 镜像（绕防盗链）。图片 URL 含 dom 则替换成 cdn。
+# 源站图床 -> CDN 镜像（绕防盗链）。图片 URL 的 host 命中即替换成 CDN。
+# 匹配语义（见 mirror_poster_url）：完整域名相等 / 子域 / 品牌词。
+# 品牌词（不含点，如 "wsyzy"）命中该品牌的**所有**图床子域与换域名形态
+# （img1.wsyzy.org、img2.wsyzy.net…），源站换图床域名时不必再改代码。
 HOSTS_MIRROR = [
-    ("img1.wsyzy.org", "fan.cloudflare.182682.xyz"),
-    ("fiizvfck.top", "fan.cloudflare.182682.xyz"),
-    ("images.67c6c7a.com", "fan.cloudflare.182682.xyz"),
+    ("wsyzy", "fan.cloudflare.182682.xyz"),
+    ("fiizvfck", "fan.cloudflare.182682.xyz"),
+    ("67c6c7a", "fan.cloudflare.182682.xyz"),
 ]
+
+
+def _mirror_pairs() -> list[tuple[str, str]]:
+    """内置镜像表 + 配置追加（poster_mirror_hosts: [["src","cdn"], ...]）。
+
+    配置项让用户不必改代码就能补新的防盗链图床；格式非法项忽略。
+    """
+    pairs = list(HOSTS_MIRROR)
+    try:
+        import config as _c
+        extra = _c.config.read("poster_mirror_hosts", []) or []
+        for item in extra:
+            if isinstance(item, (list, tuple)) and len(item) == 2:
+                src, cdn = str(item[0] or "").strip().lower(), str(item[1] or "").strip()
+                if src and cdn and "://" not in src:
+                    pairs.append((src, cdn))
+    except Exception:  # noqa: BLE001
+        _log.debug("_mirror_pairs failed", exc_info=True)
+    return pairs
+
+
+def _host_hits_mirror(host: str, pattern: str) -> bool:
+    """host 是否命中镜像表条目。
+
+    - 完整域名：相等或以 "."+域名 结尾；
+    - 品牌词（不含 "."）：出现在 host 的某一级里（".wsyzy." 形式），
+      这样 img1.wsyzy.org / img2.wsyzy.net 都会命中，而 mywsyzy.com 不会。
+    """
+    h, p = (host or "").lower(), (pattern or "").lower()
+    if not h or not p:
+        return False
+    if h == p or h.endswith("." + p):
+        return True
+    if "." not in p:
+        # 品牌词（不含点）：必须作为注册域出现——host 以 ".品牌词.TLD" 结尾
+        # 或 host 恰为 "品牌词.TLD"。覆盖 img1.wsyzy.org / wsyzy.org /
+        # img2.wsyzy.net；不命中 mywsyzy.com（片段相连）与
+        # wsyzy.org.evil.com（品牌词不在 TLD 紧邻位）。TLD 集合宽松取
+        # 2~3 段常见形态，图床域名足够。
+        tlds = ("com", "net", "org", "top", "xyz", "cc", "tv", "me")
+        for tld in tlds:
+            if h == f"{p}.{tld}" or h.endswith(f".{p}.{tld}"):
+                return True
+        return False
+    return False
+
+
+def mirror_poster_url(url: str) -> str:
+    """命中镜像表的图片地址换成 CDN 镜像地址；未命中原样返回。
+
+    只换 host，path/query 保持不变（镜像域与源站同路径）。
+    """
+    try:
+        host = urlsplit(url).netloc.lower()
+        if not host:
+            return url
+        host_no_port = host.split(":", 1)[0]
+        for dom, cdn in _mirror_pairs():
+            if _host_hits_mirror(host_no_port, dom):
+                return url.replace(host_no_port, cdn, 1)
+    except Exception:  # noqa: BLE001
+        _log.debug("mirror_poster_url failed", exc_info=True)
+    return url
 
 _lock = threading.RLock()
 
