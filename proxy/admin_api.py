@@ -487,7 +487,8 @@ def _features_snapshot() -> dict:
         mirror_pairs = len(_af._mirror_pairs())
         mirror_hits = int(getattr(_af, "MIRROR_HITS", 0) or 0)
     except Exception:
-        pass
+        # 镜像统计只是报告附加信息，取不到就不显示（不影响验收判定）
+        _log.debug("features snapshot mirror stats failed", exc_info=True)
     return {
         "linepredict": {
             "enabled": bool(config.read("linepredict_enabled", True)),
