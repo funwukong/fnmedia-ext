@@ -287,6 +287,16 @@ DEFAULTS = {
     # 会串进海外剧集库）时，只排除该源的这一类，不必整源停用。
     # cat 取值同 catalog.CATS（movie/tv/anime/variety/... 含 overseas 等）。
     "catalog_cat_exclude": {},
+
+    # 源排序模式：auto=实测质量+健康度自动排序（默认）；user=用户拖拽顺序优先
+    # （source_user_order 列表里的源按序排，未列出的仍按 auto 排在后面）。
+    "source_sort_mode": "auto",
+    "source_user_order": [],
+
+    # 运行缓存自动定时清理：每 N 小时清一次搜索/榜单/海量库缓存并自动重建路由
+    # （与管理页「一键清理」同动作；titles 不清避免重启，health 保留防选源退化）。
+    "auto_cache_clear_enabled": True,
+    "auto_cache_clear_hours": 6,
     # 虚拟“热门榜单”四库媒体库（豆瓣真实周榜/标签榜）
     "hot_library_enabled": True,
     # 虚拟“海量分类”四库媒体库（苹果 CMS 分类深翻）。与热门榜单相互独立开关。

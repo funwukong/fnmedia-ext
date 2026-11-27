@@ -46,6 +46,8 @@ WHITELIST = {
     "pansou_src", "pansou_timeout", "pansou_limit",
     "pan_lib_enabled",
     "poster_mirror_hosts", "catalog_cat_exclude",
+    "source_sort_mode", "source_user_order",
+    "auto_cache_clear_enabled", "auto_cache_clear_hours",
     # 内存缓存预算（v1.2.6）：档位 + 四个 _mb 键
     "cache_budget_profile", "agg_cache_mb", "playlist_cache_mb",
     "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
@@ -148,7 +150,7 @@ def test_defaults_fully_classified():
     keys = set(config_mod.DEFAULTS)
     # 79 → 77：2026-11-12 upstream-merge 去 guard，删 guard_zone_enabled /
     # guard_native_enabled 两项默认配置。
-    assert len(keys) == 100
+    assert len(keys) == 104
     assert WHITELIST & DEDICATED == set()
     assert WHITELIST & NOT_WRITABLE == set()
     assert DEDICATED & NOT_WRITABLE == set()

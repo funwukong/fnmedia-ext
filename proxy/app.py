@@ -1207,6 +1207,45 @@ async def lifespan(app: FastAPI):
             pass
     app.state.pan_cache_task = _managed_task(_pan_cache_loop(), name="pan-cache-cleanup")
 
+    # 运行缓存自动定时清理（v1.2.10）：每 N 小时清一次搜索/榜单/海量库缓存
+    # 并自动重建路由与榜单（与管理页「一键清理」同动作；titles 不清避免重启）。
+    # 配置 auto_cache_clear_enabled / auto_cache_clear_hours（1-72h，默认 6）。
+    async def _auto_cache_clear_loop():
+        try:
+            await asyncio.sleep(120)  # 启动后等服务稳定再进入计时
+            while True:
+                interval_h = 6
+                try:
+                    interval_h = max(1, min(72,
+                                            int(config.read("auto_cache_clear_hours", 6))))
+                except Exception:
+                    pass
+                await asyncio.sleep(interval_h * 3600)
+                app.state.auto_cache_next_run = time.time() + interval_h * 3600
+                if not bool(config.read("auto_cache_clear_enabled", True)):
+                    app.state.auto_cache_next_run = None
+                    continue
+                started = time.monotonic()
+                try:
+                    _search_cache.clear()
+                    _AGG_CACHE.clear()
+                    chart_cache.reset()
+                    catalog.reset()
+                    await asyncio.wait_for(
+                        catalog.refresh_routes(config.enabled_sources()),
+                        timeout=90)
+                except Exception:
+                    _log.info("auto cache clear failed", exc_info=True)
+                    continue
+                app.state.auto_cache_last_run = time.time()
+                _log.info("auto cache clear done in %.1fs "
+                          "(search/charts/catalog rebuilt; next in %dh)",
+                          time.monotonic() - started, interval_h)
+        except asyncio.CancelledError:
+            pass
+    app.state.auto_cache_clear_task = _managed_task(
+        _auto_cache_clear_loop(), name="auto-cache-clear")
+
     # 方案B（上游 v0.2.69 chartbind）：persist 模式下从磁盘恢复榜单绑定（线路），
     # 重启后热门片无需重新全网搜源。恢复的绑定只作起播种子，起播仍走竞速。
     # （fork 的 ChartCache 在 import 时已从 state/charts.json 读盘，无需再 load。）
@@ -1264,6 +1303,11 @@ async def lifespan(app: FastAPI):
         app.state.hot_task.cancel()
         try:
             app.state.pan_cache_task.cancel()
+        except Exception:
+            _log.debug("lifespan failed", exc_info=True)
+            pass
+        try:
+            app.state.auto_cache_clear_task.cancel()
         except Exception:
             _log.debug("lifespan failed", exc_info=True)
             pass
@@ -2046,6 +2090,11 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
     auto_best = bool(config.read("auto_best_source",True))
     overrides = config.read("source_priority") or {}
     _now_h = time.time()
+    # 用户拖拽排序（source_sort_mode=user）：order 序号作为最优先键；
+    # 未列出的源拿 len(order) 兜底，仍按实测健康度排在已列源之后。
+    user_mode = config.read("source_sort_mode", "auto") == "user"
+    user_order = {sid: i for i, sid in
+                  enumerate(config.read("source_user_order", []) or [])}
 
     def _group_key(g) -> tuple:
         lines_n = sum(len(v) for v in g["lines"].values())
@@ -2060,7 +2109,20 @@ async def __aggregate_briefs_inner(keyword: str, maxn: int | None = None,
             sk = sourcehealth.source_key_of(any_line)
             grade, avg_lat, fail = sourcehealth.weight(sk, _now_h) if sk else (1, 5.0, 1.0)
             # 把健康档放在质量权重之后、直链数之前：高质量死源也不会排到健康源前太多
-            return (base[0], -grade, lines_n, -fail, -avg_lat)
+            key = (base[0], -grade, lines_n, -fail, -avg_lat)
+            if user_mode:
+                # user 模式：拖拽序号置顶优先；未列出的源追加一个大序号 +
+                # 健康档，保证它们仍按实测质量排在已列源之后
+                pos = user_order.get(g["rep"].provider)
+                if pos is None:
+                    return (-1, len(user_order) + key[0], -grade, lines_n,
+                            -fail, -avg_lat)
+                return (0, pos, lines_n)
+            return key
+        if user_mode:
+            pos = user_order.get(g["rep"].provider)
+            if pos is not None:
+                return (0, pos, lines_n)
         return base
 
     ordered = sorted(groups.values(), key=_group_key, reverse=True)[:maxn]

@@ -399,6 +399,62 @@ async def ext_config_export(request: Request):
 # ------------------------------------------------------- 扩展状态与诊断管理 API
 
 
+@admin_router.get("/v/api/ext/cache/auto-clear")
+async def ext_cache_auto_clear_status():
+    """自动定时清理状态：开关/间隔/上次与下次运行时间（供管理页显示）。"""
+    from app import app, config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    enabled = bool(config.read("auto_cache_clear_enabled", True))
+    interval = max(1, min(72, int(config.read("auto_cache_clear_hours", 6))))
+    last = getattr(app.state, "auto_cache_last_run", None)
+    next_at = getattr(app.state, "auto_cache_next_run", None)
+    return {"code": 0, "data": {
+        "enabled": enabled, "interval_hours": interval,
+        "last_run_at": last, "next_run_at": next_at}}
+
+
+@admin_router.get("/v/api/ext/source-quality")
+async def ext_source_quality():
+    """源质量标签：把实测画像（健康档/延迟/成功率）映射成用户可读标签与分数。
+
+    纯内存读取，零网络。分数 0~100：健康档 50 分起，延迟与成功率线性加减。
+    """
+    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
+    overrides = config.read("source_priority") or {}
+    snap = sourcehealth.snapshot()
+    out = []
+    for src in config.all_sources():
+        sid = str(src.get("id") or "")
+        st = snap.get(sid) or {}
+        grade = st.get("grade")
+        n = st.get("samples", 0) or 0
+        rate = st.get("success_rate")
+        lat = st.get("avg_latency")
+        if grade is None or n == 0:
+            label, score, cls = "未知", None, "muted"
+        else:
+            score = max(0, min(100, int(
+                50 + (30 if grade == 0 else 10 if grade == 1 else 0)
+                + (rate or 0) * 20 - min(20, (lat or 0) * 4))))
+            if grade == 3:
+                label, cls = "易失效", "bad"
+            elif grade == 2 or (rate is not None and rate < 0.8):
+                label, cls = "偶发卡顿", "bad"
+            elif (lat or 0) > 1.5:
+                label, cls = "偶发卡顿", "wait"
+            elif score >= 80:
+                label, cls = "流畅", "ok"
+            else:
+                label, cls = "可用", "wait"
+        pr = providers.source_priority({"id": sid}, overrides)
+        out.append({"id": sid, "name": src.get("name") or sid,
+                    "label": label, "score": score, "cls": cls,
+                    "grade": grade, "samples": n,
+                    "success_rate": rate, "avg_latency": lat,
+                    "priority": pr,
+                    "enabled": bool(src.get("enabled"))})
+    return {"code": 0, "data": {"sources": out}}
+
+
 @admin_router.get("/v/api/ext/catalog-cat-exclude")
 async def ext_catalog_cat_exclude_get():
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
@@ -1025,6 +1081,10 @@ async def ext_set_config(request: Request):
         "cache_budget_profile", "agg_cache_mb", "playlist_cache_mb",
         "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
         "poster_mirror_hosts",  # 海报防盗链镜像对
+        "source_sort_mode",  # 源排序模式 auto/user
+        "auto_cache_clear_enabled",  # 运行缓存自动定时清理
+        "auto_cache_clear_hours",  # 自动清理间隔（小时）
+        "source_user_order",  # 用户拖拽顺序（source_id 列表）
         "catalog_cat_exclude",  # 分类排除：源 -> 脏分类
     }
     # >>> PRIVATE:CATVOD
@@ -1080,6 +1140,27 @@ async def ext_set_config(request: Request):
                 if keep:
                     clean[sid_s] = sorted(set(keep))
         patch["catalog_cat_exclude"] = clean
+    if "auto_cache_clear_enabled" in patch:
+        patch["auto_cache_clear_enabled"] = bool(patch["auto_cache_clear_enabled"])
+    if "auto_cache_clear_hours" in patch:
+        try:
+            patch["auto_cache_clear_hours"] = max(
+                1, min(72, int(patch["auto_cache_clear_hours"])))
+        except (TypeError, ValueError):
+            patch.pop("auto_cache_clear_hours", None)
+    if "source_sort_mode" in patch:
+        mode = str(patch["source_sort_mode"] or "auto").strip().lower()
+        patch["source_sort_mode"] = mode if mode in ("auto", "user") else "auto"
+    if "source_user_order" in patch:
+        order_raw = patch["source_user_order"]
+        ids: list[str] = []
+        if isinstance(order_raw, list):
+            known = {str(x.get("id") or "") for x in config.all_sources()}
+            for sid in order_raw[:500]:
+                sid_s = str(sid or "").strip()
+                if sid_s in known and sid_s not in ids:
+                    ids.append(sid_s)
+        patch["source_user_order"] = ids
     if "poster_mirror_hosts" in patch:
         pairs = []
         raw_pairs = patch["poster_mirror_hosts"]

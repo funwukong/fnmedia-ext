@@ -373,6 +373,26 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
   #toast{bottom:calc(65px + env(safe-area-inset-bottom))}
 }
 @media(prefers-reduced-motion:reduce){#toast{transition:none}}
+/* ---- 源质量徽章（扁平低饱和，随主题变量） ---- */
+.qbadge{display:inline-flex;align-items:center;gap:4px;font-size:11px;
+  padding:2px 8px;border-radius:99px;border:1px solid var(--line);
+  background:var(--inset);color:var(--muted);white-space:nowrap}
+.qbadge.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,transparent);
+  background:color-mix(in srgb,var(--ok) 10%,transparent)}
+.qbadge.wait{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 35%,transparent);
+  background:color-mix(in srgb,var(--warn) 10%,transparent)}
+.qbadge.bad{color:var(--err);border-color:color-mix(in srgb,var(--err) 35%,transparent);
+  background:color-mix(in srgb,var(--err) 10%,transparent)}
+/* ---- 源行拖拽排序 ---- */
+#srcRows tr[data-id].dragging{opacity:.45;background:var(--accent-soft)}
+#srcRows tr[data-id].drag-over td{border-top:2px solid var(--accent)}
+#srcRows tr[data-id]{transition:background .15s ease}
+/* ---- 紧凑/宽松布局 ---- */
+html[data-layout=compact] .card{padding:10px 12px;margin-bottom:10px}
+html[data-layout=compact] .src-wrap td,.src-wrap td{padding:4px 7px;font-size:12px}
+/* ---- 质量分数标签显示开关 ---- */
+html[data-hide-score] .qbadge{font-size:10px}
+</style>
 </style>
 </head>
 <body>
@@ -419,6 +439,22 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <label class="switch-row"><input type="checkbox" id="extensionEnabled" onchange="saveExtensionEnabled()"/>
           <span>启用 fnmedia-ext 服务<span class="sub">关闭后影视请求由飞牛官方服务处理，管理页仍可用；重新开启会重载资源站路由与热门榜单。</span></span></label>
         <div class="hint" id="extensionEnabledMsg"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">界面与排序</div>
+        <label class="field"><span>源排序模式</span>
+          <select id="sortMode">
+            <option value="auto">实测质量 + 流畅度自动排序（推荐）</option>
+            <option value="user">手动排序（拖拽源行，优先级最高）</option>
+          </select>
+          <span class="sub">手动排序只改展示顺序；后台仍持续实测源健康，源失效自动下沉。</span></label>
+        <div class="row">
+          <label class="switch-row" style="flex:1;min-width:150px"><input type="checkbox" id="layoutCompact"/>
+            <span>紧凑布局</span></label>
+          <label class="switch-row" style="flex:1;min-width:150px"><input type="checkbox" id="hideScore"/>
+            <span>隐藏质量分数（仅显示标签）</span></label>
+        </div>
       </div>
 
             <div class="card">
@@ -681,7 +717,7 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         <div class="src-wrap" id="srcWrap" tabindex="0" role="region" aria-label="资源站列表">
         <table>
           <thead><tr><th style="width:42px">启用</th><th style="width:96px">选项</th><th>资源站</th>
-            <th style="width:130px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
+            <th style="width:92px">质量</th><th style="width:130px">连通性</th><th style="width:70px">测试</th><th style="width:44px"></th></tr></thead>
           <tbody id="srcRows"><tr><td colspan="6" class="muted">加载中…</td></tr></tbody>
         </table>
         </div>
@@ -1051,13 +1087,19 @@ pre.log{max-height:240px;overflow:auto;background:#0f1115;color:#d6dae0;border-r
         </div>
       </div>
 
-      <!-- 一键清理：只留一个按钮，分项管理已去掉（用户要求） -->
       <div class="card">
-        <div class="card-title">🗑 一键清理
-          <span class="hint" style="font-weight:400">清除搜索、榜单、海量库运行缓存，不重启服务；后续访问自动重建</span>
+        <div class="card-title">🗑 运行缓存清理
+          <span class="hint" style="font-weight:400">清除搜索、榜单、海量库缓存后自动重建路由与榜单，不重启服务</span>
+        </div>
+        <label class="switch-row"><input type="checkbox" id="autoCacheClear" onchange="saveAutoCacheClear()"/>
+          <span>自动定时清理<span class="sub">每 N 小时自动清一次运行缓存并重建，无需手动操作</span></span></label>
+        <div class="row" style="align-items:flex-end;gap:10px">
+          <label class="field" style="max-width:220px"><span>清理间隔（小时，1-72）</span>
+            <input type="number" id="autoCacheClearHours" min="1" max="72" onchange="saveAutoCacheClear()"/></label>
+          <span class="hint" style="font-weight:400;flex:1" id="autoCacheClearNext">-</span>
         </div>
         <div class="btn-row">
-          <button class="small danger" onclick="clearCaches(['search','charts','catalog'])">一键清理运行缓存</button>
+          <button class="small danger" onclick="clearCaches(['search','charts','catalog'])">手动清理运行缓存</button>
         </div>
       </div>
     </section>
@@ -1327,7 +1369,8 @@ async function switchPage(page){
   else{stopLivePoll();}
   if(page==="library"){loadLibs().then(renderLibrary);}
   if(page==="quality")renderQuality();
-  if(page==="search"){try{loadCacheMemory();}catch(e){}try{loadPosterDisk();}catch(e){}}
+  if(page==="search"){try{loadCacheMemory();
+  loadAutoCacheClear();}catch(e){}try{loadPosterDisk();}catch(e){}}
   if(page==="sources"){try{loadHealth();}catch(e){}try{initSrcProxy();}catch(e){}}
   if(page==="importsub"){try{if(!CFG)await loadStatus();}catch(e){}try{if(typeof initSubProxy==="function")initSubProxy();}catch(e){}try{loadAdfilter();}catch(e){}try{if(typeof loadDrpyMgmt==="function")loadDrpyMgmt();}catch(e){}}
   if(page==="about"){loadUpdate(false);try{loadAdminToken();}catch(e){}}
@@ -1995,7 +2038,7 @@ function srcRowHtml(src){
   // >>> PRIVATE:DDUO
   extraTag=(FEAT_DDUO&&src.xsrc)?'<span class="tag amber" title="非苹果CMS自研站，WASM实时解码">WASM</span>':'';
   // <<< PRIVATE:DDUO
-  return `<tr data-id="${src.id}">
+  return `<tr data-id="${src.id}" draggable="true">
       <td><input type="checkbox" class="en" ${src.enabled?"checked":""} style="accent-color:var(--accent);width:16px;height:16px"/></td>
       <td style="white:nowrap">
         <label title="把该资源站单独生成一张媒体库卡片" style="display:inline-flex;align-items:center;gap:2px;font-size:11px;cursor:pointer">
@@ -2009,6 +2052,7 @@ function srcRowHtml(src){
       <td class="src-name" title="${esc(src.api)}"><div style="font-weight:500">${esc(src.name)}${src.kind==="t4"?'<span class="tag">T4</span>':''}${extraTag}${src.builtin?'':'<span class="tag amber">自定义</span>'}${src.standalone?'<span class="tag">媒体库</span>':''}</div>
         <div class="meta">${esc(src.api)}</div></td>
       <td class="st wait" data-st>未测</td>
+      <td class="sq" data-sq="${src.id}">—</td>
       <td><button class="small" data-test>测试</button></td>
       <td><button class="del" data-del title="删除">✕</button></td>
     </tr>`;
@@ -2052,6 +2096,14 @@ function renderSources(){
     };
     if(srcsAll.length>SRC_FIRST)SRC_RAF=requestAnimationFrame(step);
   }
+  fetch("/v/api/ext/source-quality").then(r=>r.json()).then(j=>{
+    const map={};((j.data||{}).sources||[]).forEach(x=>{map[x.id]=x;});
+    $$("#srcRows td[data-sq]").forEach(td=>{
+      const x=map[td.dataset.sq];if(!x)return;
+      if(x.score==null){td.innerHTML='<span class="qbadge muted">未知</span>';return;}
+      td.innerHTML=`<span class="qbadge ${x.cls}" title="延迟 ${x.avg_latency??'-'}s · 成功率 ${x.success_rate!=null?Math.round(x.success_rate*100)+'%':'-'} · 分 ${x.score}">${x.label}</span>`;
+    });
+  }).catch(()=>{});
   // T4 远程源清单
   const t4=(CFG.sources||[]).filter(s=>s.kind==="t4");
   const t4c=$("t4Count");if(t4c)t4c.textContent=t4.length?(t4.length+" 个"):"";
@@ -2519,6 +2571,91 @@ async function delSource(id,name){
   const r=await jpost("/v/api/ext/source/delete",{id});
   if(r.code===0){toast("已删除");await loadStatus();}else toast(r.msg||"删除失败","fail");
 }
+/* ---------- 源排序模式 + 拖拽 ---------- */
+let SQ_ROWS=[];
+function applyLayoutPrefs(){
+  const compact=localStorage.getItem("ui_layout")==="compact";
+  const hide=localStorage.getItem("ui_hide_score")==="1";
+  document.documentElement.dataset.layout=compact?"compact":"normal";
+  if(hide)document.documentElement.dataset.hideScore="1";
+  else delete document.documentElement.dataset.hideScore;
+  const c=$("layoutCompact");if(c)c.checked=compact;
+  const h=$("hideScore");if(h)h.checked=hide;
+}
+document.addEventListener("change",e=>{
+  if(e.target.id==="layoutCompact"){
+    localStorage.setItem("ui_layout",e.target.checked?"compact":"normal");
+    applyLayoutPrefs();
+  }
+  if(e.target.id==="hideScore"){
+    localStorage.setItem("ui_hide_score",e.target.checked?"1":"0");
+    applyLayoutPrefs();
+  }
+});
+applyLayoutPrefs();
+async function loadSortMode(){
+  try{
+    const r=await jget("/v/api/ext/config");
+    const c=(r.data&&r.data.config)||{};
+    SQ_ROWS=(c.sources||[]).slice();
+    const mode=c.source_sort_mode||"auto";
+    const sel=$("sortMode");if(sel)sel.value=mode;
+    const tb=$("srcRows");
+    if(tb)tb.classList.toggle("user-drag",mode==="user");
+    applyUserOrder();
+    if(sel&&!sel.dataset.bound){sel.dataset.bound="1";sel.onchange=saveSortMode;}
+  }catch(e){}
+}
+function applyUserOrder(){
+  const order=(CFG&&CFG.source_user_order)||[];
+  if(!order.length)return;
+  const tb=$("srcRows");if(!tb)return;
+  const map={};order.forEach((id,i)=>map[id]=i);
+  const rows=Array.from(tb.querySelectorAll("tr[data-id]"));
+  rows.sort((a,b)=>(map[a.dataset.id]??999)-(map[b.dataset.id]??999));
+  rows.forEach(tr=>tb.appendChild(tr));
+}
+async function saveSortMode(){
+  const mode=$("sortMode")?$("sortMode").value:"auto";
+  const r=await jpost("/v/api/ext/config",{source_sort_mode:mode});
+  if(r.code===0){toast(mode==="user"?"已切换为手动排序（拖拽源行调整顺序）":"已切换为实测质量自动排序");await loadStatus();renderSources();loadSortMode();}
+  else toast(r.msg||"保存失败","fail");
+}
+function initSrcDrag(){
+  const tb=$("srcRows");if(!tb||tb.dataset.drag)return;
+  tb.dataset.drag="1";
+  let dragEl=null;
+  tb.addEventListener("dragstart",e=>{
+    const tr=e.target.closest("tr[data-id]");if(!tr)return;
+    dragEl=tr;tr.classList.add("dragging");
+    e.dataTransfer.effectAllowed="move";
+  });
+  tb.addEventListener("dragover",e=>{
+    if(!dragEl)return;
+    const tr=e.target.closest("tr[data-id]");
+    if(!tr||tr===dragEl)return;
+    e.preventDefault();
+    $$("#srcRows tr[data-id].drag-over").forEach(x=>x.classList.remove("drag-over"));
+    tr.classList.add("drag-over");
+  });
+  tb.addEventListener("drop",e=>{
+    if(!dragEl)return;e.preventDefault();
+    const tr=e.target.closest("tr[data-id]");
+    if(tr&&tr!==dragEl)tb.insertBefore(dragEl,tr);
+    tr&&tr.classList.remove("drag-over");
+  });
+  tb.addEventListener("dragend",async()=>{
+    $$("#srcRows tr[data-id].drag-over").forEach(x=>x.classList.remove("drag-over"));
+    if(dragEl)dragEl.classList.remove("dragging");
+    dragEl=null;
+    // 拖完立即按当前 DOM 顺序保存 user order
+    const ids=$$("#srcRows tr[data-id]").map(tr=>tr.dataset.id);
+    const r=await jpost("/v/api/ext/config",{source_user_order:ids});
+    if(r.code===0)toast("顺序已保存");
+    else toast("保存失败","fail");
+  });
+}
+/* ---------- 分类排除 ---------- */
 const CAT_EX_LABELS={movie:"电影",tv:"剧集",anime:"动漫",variety:"综艺",documentary:"纪录片",uhd:"4K",shortdrama:"短剧",overseas:"海外剧集",ai_comic:"AI漫剧",ted:"教育",sports:"体育",live:"直播",kids:"少儿",opera:"戏曲",music:"音乐MV"};
 let CAT_EX_CFG={};
 async function loadCatExclude(){
@@ -2590,6 +2727,32 @@ async function importCmsFile(input){
 }
 
 /* ---------- 搜索设置 / 噪音词 / 缓存（一键清理，2026-11-12 简化：分项管理已去掉） ---------- */
+let AUTO_CACHE_STATE=null;
+async function loadAutoCacheClear(){
+  try{
+    const r=await jget("/v/api/ext/cache/auto-clear");
+    if(r.code!==0)return;
+    const d=r.data||{};
+    AUTO_CACHE_STATE=d;
+    const en=$("autoCacheClear"),hrs=$("autoCacheClearHours"),nx=$("autoCacheClearNext");
+    if(en)en.checked=d.enabled!==false;
+    if(hrs&&document.activeElement!==hrs)hrs.value=d.interval_hours||6;
+    if(nx){
+      if(d.enabled===false){nx.textContent="自动清理已关闭";}
+      else{
+        const last=d.last_run_at?new Date(d.last_run_at*1000).toLocaleString():"尚未运行";
+        const next=d.next_run_at?new Date(d.next_run_at*1000).toLocaleString():"计算中";
+        nx.textContent=`上次：${last} · 下次：${next}`;
+      }
+    }
+  }catch(e){}
+}
+async function saveAutoCacheClear(){
+  const en=$("autoCacheClear"),hrs=parseInt($("autoCacheClearHours").value)||6;
+  const r=await jpost("/v/api/ext/config",{auto_cache_clear_enabled:en.checked,auto_cache_clear_hours:hrs});
+  if(r.code===0){toast("自动清理设置已保存");setTimeout(loadAutoCacheClear,600);}
+  else toast(r.msg||"保存失败","fail");
+}
 async function clearCaches(targets){
   const labels={titles:"在线资源缓存（会重启服务）",charts:"热门榜单",catalog:"海量库",search:"搜索缓存",health:"源健康画像"};
   const names=targets.map(t=>labels[t]||t).join("、");
@@ -3038,6 +3201,8 @@ async function init(){
   const gs=$("globalState");gs.textContent="接管运行中 · 已缓存 "+STATUS.cached_titles;gs.className="dot ok";
   const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
   loadOnline();
+  loadSortMode().then(()=>initSrcDrag()).catch(()=>{});
+  loadCatExclude().catch(()=>{});
   // >>> PRIVATE:CATVOD
   if(document.getElementById("page-xiaoya"))loadPriv();
   // <<< PRIVATE:CATVOD
