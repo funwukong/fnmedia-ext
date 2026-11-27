@@ -41,6 +41,9 @@ DEAD_COOLDOWN = 3 * 60           # 判死后冷却 3 分钟，之后给一次试
 # 取流级（上游 v0.2.70）：5 次失败 / 冷却 3 分钟。
 STREAM_DEAD_FAILS = 5
 STREAM_DEAD_COOLDOWN = 3 * 60
+# 指数退避上限：连续熔断越多次，冷却越长（3min → 6 → 12 → 24 → 48 → 60min 封顶），
+# 死源不再被每 3 分钟白探一次；上限 1 小时保证源站恢复后最多 1 小时内被重新启用。
+DEAD_COOLDOWN_MAX = 60 * 60
 DEGRADED_FAIL_RATE = 0.6         # 样本足够时，失败率高于此判差
 MIN_SAMPLES = 6                  # 低于此样本不做失败率判级，避免偶发误杀
 SLOW_LATENCY = 12.0              # 平均延迟超过此秒视为慢源
@@ -50,14 +53,17 @@ _MAX_KEYS = 2000
 def _blank() -> dict:
     return {"n": 0, "ok": 0, "lat": 0.0, "fails": 0,
             "last_ok": 0.0, "last_fail": 0.0, "dead_until": 0.0,
-            "stream_fails": 0, "stream_dead_until": 0.0}
+            "stream_fails": 0, "stream_dead_until": 0.0,
+            # 连续熔断次数：驱动指数退避。成功即清零，冷却到期不清零
+            # （保留退避级别，源站真恢复后靠一次成功归零）。
+            "dead_count": 0, "stream_dead_count": 0}
 
 
-# level -> (失败计数字段, 死亡截止字段, 触发阈值, 冷却秒数)
+# level -> (失败计数字段, 死亡截止字段, 触发阈值, 冷却秒数, 连熔计数键)
 _LEVELS = {
-    "search": ("fails", "dead_until", DEAD_FAILS, DEAD_COOLDOWN),
+    "search": ("fails", "dead_until", DEAD_FAILS, DEAD_COOLDOWN, "dead_count"),
     "stream": ("stream_fails", "stream_dead_until",
-               STREAM_DEAD_FAILS, STREAM_DEAD_COOLDOWN),
+               STREAM_DEAD_FAILS, STREAM_DEAD_COOLDOWN, "stream_dead_count"),
 }
 
 
@@ -110,7 +116,7 @@ def record(key: str, ok: bool, latency: float = 0.0,
            level: str = "search") -> None:
     """记一次结果。level="search"（默认）记搜索/API 域，level="stream" 记取流域；
     两级失败计数与死亡冷却互相独立，成功只复活本级。"""
-    fails_key, dead_key, threshold, cooldown = _level_fields(level)
+    fails_key, dead_key, threshold, cooldown, count_key = _level_fields(level)
     key = (key or "").strip()
     if not key:
         return
@@ -133,11 +139,16 @@ def record(key: str, ok: bool, latency: float = 0.0,
             s[fails_key] = 0
             s["last_ok"] = now
             s[dead_key] = 0.0
+            s[count_key] = 0            # 真恢复：退避级别归零
         else:
             s[fails_key] = int(s.get(fails_key, 0)) + 1
             s["last_fail"] = now
             if s[fails_key] >= threshold:
-                s[dead_key] = now + cooldown
+                # 连续熔断：冷却按 2 的幂递增，封顶 DEAD_COOLDOWN_MAX。
+                n_dead = int(s.get(count_key, 0)) + 1
+                s[count_key] = n_dead
+                backoff = cooldown * (2 ** min(n_dead - 1, 6))
+                s[dead_key] = now + min(backoff, DEAD_COOLDOWN_MAX)
 
 
 def stats(key: str) -> dict:
@@ -155,6 +166,7 @@ def stats(key: str) -> dict:
             "last_ok": s.get("last_ok", 0),
             "last_fail": s.get("last_fail", 0),
             "dead_until": s.get("dead_until", 0),
+            "dead_count": s.get("dead_count", 0),
         }
 
 
@@ -162,7 +174,7 @@ def is_dead(key: str, now: float | None = None,
             level: str = "search") -> bool:
     """本级死亡冷却窗内返回 True。level 默认为 "search"（搜索级 5 次/3 分钟）；
     取流熔断传 level="stream"（5 次/3 分钟）。"""
-    _, dead_key, _, _ = _level_fields(level)
+    _, dead_key, _, _, _ = _level_fields(level)
     now = now if now is not None else time.time()
     with _LOCK:
         s = _STATS.get(key)

@@ -710,7 +710,10 @@ html[data-hide-score] .qbadge{font-size:10px}
             <option value="all">全部状态</option>
             <option value="on">仅已启用</option>
             <option value="off">仅已停用</option>
+            <option value="suspect">疑似失效</option>
+            <option value="dead">熔断中</option>
           </select>
+          <button class="small" id="srcDeadBtn" onclick="disableSuspectSources()" title="把「从未成功且探过3次以上」的源批量停用（可随时再启用）" style="display:none">停用疑似失效</button>
           <span class="muted sm" id="srcPageInfo"></span>
           <button class="small" id="srcExpandBtn" onclick="toggleSrcExpand()">展开全部</button>
         </div>
@@ -1601,7 +1604,11 @@ async function loadLive(){
         <span class="muted">· ${LIVE_STAGE[sess.stage]||sess.stage} · ${ago((d.now||dv.seen)-sess.at)}前</span>
         ${sess.error?`<div class="sm" style="color:var(--err);margin-top:2px">⚠ ${esc(sess.error)}</div>`:""}
       </div>`:"";
-    const errBadge=dv.errors?` <span style="color:var(--err);font-weight:700">· ${dv.errors} 次错误</span>`:"";
+    // 主显「最近5分钟」错误：>0 = 此刻链路有问题；累计值只在悬停里看
+    const er=dv.errors_recent||0;
+    const errBadge=er
+      ? ` <span style="color:var(--err);font-weight:700" title="累计 ${dv.errors} 次（含历史切线失败/源站临时4xx）">· 最近错误 ${er}</span>`
+      : (dv.errors?` <span class="muted sm" title="全部发生在 5 分钟以前，当前链路正常">· 累计错 ${dv.errors}（当前正常）</span>`:"");
     const rows=(dv.events||[]).slice(0,8).map(e=>{
       const st=e.status;const col=st>=400?"var(--err)":(st>=300?"var(--violet)":"var(--ok)");
       return `<div class="live-row">
@@ -1682,7 +1689,7 @@ async function copyDiagnosis(){
     lines.push("服务: "+location.host+" · 设备数 "+devs.length);
     devs.forEach((dv,i)=>{
       lines.push("");
-      lines.push(`[${i+1}] ${dv.label} · ${dv.ip} · 请求${dv.reqs} 错误${dv.errors} · 最近${ago(dv.ago)}`);
+      lines.push(`[${i+1}] ${dv.label} · ${dv.ip} · 请求${dv.reqs} 错误${dv.errors}(近5分钟${dv.errors_recent||0}) · 最近${ago(dv.ago)}`);
       lines.push("UA: "+dv.ua);
       if(dv.session)lines.push("当前: "+(dv.session.title||"")+" · 环节"+(STAGE_NAME[dv.session.stage]||dv.session.stage)+(dv.session.error?(" · 异常 "+dv.session.error):" · 正常"));
       const f=diagnoseDevice(dv);
@@ -1994,11 +2001,23 @@ async function savePreferQ(){
 /* 资源站分页/筛选（P1-16）：纯前端分页/筛选，不改后端接口；CFG.sources
    已在页内。筛选或切换启用状态时回到第 1 页；列表缩短时 renderSources
    会把超出的页码夹回最后一页。 */
-let SRC_FILTER="",SRC_ENABLED="all",SRC_EXPANDED=false;
+let SRC_FILTER="",SRC_ENABLED="all",SRC_EXPANDED=false,SRC_Q={};
+/* 疑似失效：从没成功过（last_ok=0）且样本够 3 次 —— 一次失败就熔断的源（samples=1）
+   不算，避免误杀只是没被翻牌的源；熔断中：dead_until 还在将来。 */
+function srcSuspect(id){
+  const q=SRC_Q[id];if(!q)return false;
+  return q.samples!=null&&q.samples>=3&&(q.last_ok==null||q.last_ok===0);
+}
+function srcDeadNow(id){
+  const q=SRC_Q[id];if(!q)return false;
+  return (q.dead_until||0)>(Date.now()/1000);
+}
 function srcFiltered(){const q=SRC_FILTER.trim().toLowerCase();
   return (CFG.sources||[]).filter(s=>{
     if(SRC_ENABLED==="on"&&!s.enabled)return false;
     if(SRC_ENABLED==="off"&&s.enabled)return false;
+    if(SRC_ENABLED==="suspect"&&!srcSuspect(s.id))return false;
+    if(SRC_ENABLED==="dead"&&!srcDeadNow(s.id))return false;
     if(q&&!(String(s.name||"").toLowerCase().includes(q)
       ||String(s.api||"").toLowerCase().includes(q)))return false;
     return true;});}
@@ -2098,11 +2117,18 @@ function renderSources(){
   }
   fetch("/v/api/ext/source-quality").then(r=>r.json()).then(j=>{
     const map={};((j.data||{}).sources||[]).forEach(x=>{map[x.id]=x;});
+    SRC_Q=map;
     $$("#srcRows td[data-sq]").forEach(td=>{
       const x=map[td.dataset.sq];if(!x)return;
       if(x.score==null){td.innerHTML='<span class="qbadge muted">未知</span>';return;}
-      td.innerHTML=`<span class="qbadge ${x.cls}" title="延迟 ${x.avg_latency??'-'}s · 成功率 ${x.success_rate!=null?Math.round(x.success_rate*100)+'%':'-'} · 分 ${x.score}">${x.label}</span>`;
+      const dc=x.dead_count?` · 熔断${x.dead_count}次`:"";
+      td.innerHTML=`<span class="qbadge ${x.cls}" title="延迟 ${x.avg_latency??'-'}s · 成功率 ${x.success_rate!=null?Math.round(x.success_rate*100)+'%':'-'} · 分 ${x.score}${dc}">${x.label}</span>`;
     });
+    // 批量停用按钮：只在有疑似失效源时出现
+    const dead=(CFG.sources||[]).filter(x=>x.enabled&&srcSuspect(x.id));
+    const bb=$("srcDeadBtn");
+    if(bb){bb.style.display=dead.length?"inline-block":"none";
+      bb.textContent=`停用疑似失效(${dead.length})`;}
   }).catch(()=>{});
   // T4 远程源清单
   const t4=(CFG.sources||[]).filter(s=>s.kind==="t4");
@@ -2169,6 +2195,19 @@ async function refreshSources(){
   }
 }
 function srcName(id){const s=CFG.sources.find(x=>x.id===id);return s?s.name:id;}
+async function disableSuspectSources(){
+  const ids=(CFG.sources||[]).filter(x=>x.enabled&&srcSuspect(x.id)).map(x=>x.id);
+  if(!ids.length){toast("没有疑似失效的源","fail");return;}
+  if(!confirm(`把 ${ids.length} 个「从未成功且探过3次以上」的源批量停用？\n停用后不参与搜索与浏览，可随时再手动启用。`))return;
+  const sources=CFG.sources.map(s=>({id:s.id,enabled:ids.includes(s.id)?false:s.enabled}));
+  const r=await jpost("/v/api/ext/config",{sources});
+  if(r.code===0){
+    CFG.sources.forEach(s=>{if(ids.includes(s.id))s.enabled=false;});
+    $("srcCount").textContent=CFG.sources.filter(x=>x.enabled).length+"/"+CFG.sources.length+" 启用";
+    renderSources();
+    toast(`已停用 ${ids.length} 个疑似失效源`);
+  }else toast(r.msg||"批量停用失败","fail");
+}
 async function toggleEnable(id,on){
   const sources=CFG.sources.map(s=>({id:s.id,enabled:s.id===id?on:s.enabled}));
   let r;

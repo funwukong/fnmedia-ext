@@ -23,6 +23,9 @@ import client as clientmod
 MAX_EVENTS_PER_DEVICE = 60
 MAX_DEVICES = 32
 SESSION_TTL = 600
+# 错误滚动窗口：最近 5 分钟内的错误数（ERROR_WINDOW 秒）+ 时间戳队列上限
+ERROR_WINDOW = 300
+ERR_TS_MAXLEN = 64
 
 _LOCK = Lock()
 _DEVICES: "OrderedDict[str, dict]" = OrderedDict()
@@ -86,6 +89,10 @@ def record(ua: str, ip: str, method: str, path: str, query: str,
                    "ip": ip or "?", "ua": (ua or "")[:160],
                    "seen": now, "events": deque(maxlen=MAX_EVENTS_PER_DEVICE),
                    "errors": 0, "reqs": 0, "session": None,
+                   # 错误时间戳环形队列：用于「最近 N 分钟错误数」滚动窗口。
+                   # 累计 errors 会把历史（切线失败/源站临时 4xx）一直算在里面，
+                   # 排查时容易误判「正在出错」，窗口值才代表此刻有没有问题。
+                   "err_ts": deque(maxlen=ERR_TS_MAXLEN),
                    "last_status": 0, "last_path": ""}
             _DEVICES[dev_id] = dev
             if len(_DEVICES) > MAX_DEVICES:
@@ -98,6 +105,7 @@ def record(ua: str, ip: str, method: str, path: str, query: str,
         dev["last_path"] = path
         if is_err:
             dev["errors"] += 1
+            dev["err_ts"].append(now)
         ev = {"t": round(now, 3), "seq": _SEQ, "m": method,
               "p": (path + ("?" + query if query else ""))[:160],
               "status": status, "origin": origin,
@@ -153,6 +161,10 @@ def snapshot() -> dict:
                 "seen": round(dev["seen"], 1),
                 "ago": round(now - dev["seen"], 1),
                 "reqs": dev["reqs"], "errors": dev["errors"],
+                # errors_recent：最近 ERROR_WINDOW 秒内的错误数（0 = 此刻链路正常）
+                "errors_recent": sum(1 for t in dev["err_ts"]
+                                     if now - t <= ERROR_WINDOW),
+                "error_window_sec": ERROR_WINDOW,
                 "last_status": dev["last_status"], "last_path": dev["last_path"],
                 "active": active, "session": sess if active else None,
                 "events": list(dev["events"])[-30:][::-1],

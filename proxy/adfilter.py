@@ -104,11 +104,15 @@ def _host_hits_mirror(host: str, pattern: str) -> bool:
     return False
 
 
+MIRROR_HITS = 0  # 命中镜像表的次数（进程内累计，只读展示用）
+
+
 def mirror_poster_url(url: str) -> str:
     """命中镜像表的图片地址换成 CDN 镜像地址；未命中原样返回。
 
     只换 host，path/query 保持不变（镜像域与源站同路径）。
     """
+    global MIRROR_HITS
     try:
         host = urlsplit(url).netloc.lower()
         if not host:
@@ -116,6 +120,7 @@ def mirror_poster_url(url: str) -> str:
         host_no_port = host.split(":", 1)[0]
         for dom, cdn in _mirror_pairs():
             if _host_hits_mirror(host_no_port, dom):
+                MIRROR_HITS += 1
                 return url.replace(host_no_port, cdn, 1)
     except Exception:  # noqa: BLE001
         _log.debug("mirror_poster_url failed", exc_info=True)

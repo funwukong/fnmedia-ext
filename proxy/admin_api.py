@@ -412,6 +412,10 @@ async def ext_cache_auto_clear_status():
         "last_run_at": last, "next_run_at": next_at}}
 
 
+# 质量标签判级的最低样本数：低于此值一律「未知」（样本不足不足以判断质量）。
+MIN_QUALITY_SAMPLES = 2
+
+
 @admin_router.get("/v/api/ext/source-quality")
 async def ext_source_quality():
     """源质量标签：把实测画像（健康档/延迟/成功率）映射成用户可读标签与分数。
@@ -429,7 +433,10 @@ async def ext_source_quality():
         n = st.get("samples", 0) or 0
         rate = st.get("success_rate")
         lat = st.get("avg_latency")
-        if grade is None or n == 0:
+        # 样本门槛：只探过 1 次的源（大量启用源只在浏览/搜索时被打过一次，
+        # 一次失败就熔断，画像 n=1 却会被误标「易失效」）不足以判质量。
+        # 宁可标「未知」也不误导用户去停用一个其实能用的源。
+        if grade is None or n < MIN_QUALITY_SAMPLES:
             label, score, cls = "未知", None, "muted"
         else:
             score = max(0, min(100, int(
@@ -450,6 +457,9 @@ async def ext_source_quality():
                     "label": label, "score": score, "cls": cls,
                     "grade": grade, "samples": n,
                     "success_rate": rate, "avg_latency": lat,
+                    "last_ok": st.get("last_ok") or 0,
+                    "dead_until": st.get("dead_until") or 0,
+                    "dead_count": st.get("dead_count") or 0,
                     "priority": pr,
                     "enabled": bool(src.get("enabled"))})
     return {"code": 0, "data": {"sources": out}}
@@ -460,6 +470,42 @@ async def ext_catalog_cat_exclude_get():
     from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
     raw = config.read("catalog_cat_exclude", {}) or {}
     return {"code": 0, "data": {"exclude": raw}}
+
+
+def _features_snapshot() -> dict:
+    """优化开关快照：验收报告里直接看得到各优化是否生效（只读、零网络）。
+
+    汇总线预测/浏览探活/零竞速直出/分片直连/海报镜像/海报磁盘六项，
+    供远程排障时确认「功能到底开没开、有没有真的命中」。
+    """
+    from app import config  # noqa: E402,F401 延迟导入
+    import linepredict
+    mirror_pairs = 0
+    mirror_hits = 0
+    try:
+        import adfilter as _af
+        mirror_pairs = len(_af._mirror_pairs())
+        mirror_hits = int(getattr(_af, "MIRROR_HITS", 0) or 0)
+    except Exception:
+        pass
+    return {
+        "linepredict": {
+            "enabled": bool(config.read("linepredict_enabled", True)),
+            "browse_probe": bool(config.read("browse_probe", True)),
+            "zero_race": bool(config.read("linepredict_zero_race", True)),
+            "max_lines": int(config.read("linepredict_max_lines", 3) or 3),
+            "remembered": linepredict.count(),
+        },
+        "seg_direct": {
+            "enabled": bool(config.read("seg_direct_enabled", False)),
+            "hosts": len(config.read("seg_direct_hosts", []) or []),
+        },
+        "poster_mirror": {"pairs": mirror_pairs, "hits": mirror_hits},
+        "poster_disk": {
+            "enabled": bool(config.read("poster_disk_cache_mb", 256)),
+            "max_mb": int(config.read("poster_disk_cache_mb", 256) or 0),
+        },
+    }
 
 
 @admin_router.get("/v/api/ext/install-check")
@@ -494,6 +540,8 @@ async def ext_install_check(request: Request):
         "background_tasks": {"running": _background_task_snapshot(
             getattr(app.state, "background_tasks", set()))},
         "source_health": {"sources": len(sourcehealth.snapshot())},
+        "features": {"ok": True, "advisory": True,
+                     "value": _features_snapshot()},
     }
     passed = all(check.get("ok", True) for name, check in checks.items()
                  if not check.get("advisory"))
@@ -553,7 +601,8 @@ async def ext_acceptance_report(request: Request):
                         "sources_total": len(config.all_sources()),
                         "sources_enabled": len(config.enabled_sources()),
                         "background_tasks": _background_task_snapshot(
-                            getattr(app.state, "background_tasks", set()))},
+                            getattr(app.state, "background_tasks", set())),
+                        "features": _features_snapshot()},
             "source_health": sourcehealth.snapshot(),
             "live": {"devices": snapshot.get("devices", []),
                      "acceptance_events": events},
