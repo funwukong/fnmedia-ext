@@ -683,6 +683,7 @@ html[data-hide-score] .qbadge{font-size:10px}
           <button class="small primary" id="srcRefreshBtn" onclick="refreshSources()" title="重建分类路由、清空搜索缓存，把列表与运行时状态对齐到当前配置（不重启插件）">⟳ 刷新</button>
           <button class="small" style="margin-left:auto" onclick="testAll()">全部测速</button>
           <button class="small" id="srcProbeBtn" onclick="sourceProbeStart()">批量探活</button>
+          <button class="small" id="srcReviveBtn" onclick="sourceProbeStart('suspect')" title="只探「疑似失效」的源（从未成功且探过3次以上）；成功即恢复计分，失败继续退避，不删源">复活探测</button>
           <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
           <button class="small" onclick="cmsHealthCheck()" title="用热门词批量检测纯 CMS 源是否有效，失效写入健康画像触发熔断">CMS 批量体检</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
@@ -2259,9 +2260,14 @@ async function testAll(){
 /* ---------- CMS 源批量探活（移植上游 beta.3，B9） ----------
    并发 4、700ms 轮询进度、可中止；已完成结果保留在行内状态。 */
 let SRC_PROBE_TIMER=null;
-async function sourceProbeStart(){
+async function sourceProbeStart(scope){
   try{
-    await jpost("/v/api/ext/source/probe/start",{concurrency:4});
+    const r=await jpost("/v/api/ext/source/probe/start",{concurrency:4,scope:scope||"all"});
+    const d=(r&&r.data)||{};
+    if(scope==="suspect"&&(d.total||0)===0){
+      toast("没有疑似失效的源，无需复活探测");
+      return;
+    }
     $("srcProbeCancelBtn").style.display="";$("srcProbeProgress").style.display="";
     if(SRC_PROBE_TIMER)clearInterval(SRC_PROBE_TIMER);
     SRC_PROBE_TIMER=setInterval(sourceProbePoll,1000);await sourceProbePoll();
@@ -2287,6 +2293,10 @@ async function sourceProbePoll(){
     if(!d.running){
       if(SRC_PROBE_TIMER){clearInterval(SRC_PROBE_TIMER);SRC_PROBE_TIMER=null;}
       $("srcProbeCancelBtn").style.display="none";
+      // 探完立即联动：质量徽章/退避级/疑似失效按钮计数都来自 sourcehealth，
+      // 探活已把结果写进画像，重渲染即可看到最新质量与「停用疑似失效(N)」。
+      setTimeout(()=>{try{renderSources();}catch(e){}
+        try{loadHealth();}catch(e){}},600);
       if(rem)setTimeout(loadSources,600);
     }
   }catch(e){/* 单次轮询失败下轮再试，不清空已保留结果 */}

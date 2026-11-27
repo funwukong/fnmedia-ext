@@ -1889,6 +1889,21 @@ async def ext_source_probe_start(request: Request):
         concurrency = max(1, min(8, int(body.get("concurrency") or 4)))
     except (TypeError, ValueError):
         concurrency = 4
+    # scope=all 全源探活（默认，含已禁用源）；scope=suspect 只探「疑似失效」
+    # （从未成功且样本 >= 3）—— 2026-11-27 P2：全源探活 175 个源太慢且健康源
+    # 白探一遍；复活探测只打死源，成功即画像归零自动复活（源站换域名恢复的
+    # 情况下不用等 1 小时退避窗口）。复活探测不删源：失败只推进退避级别。
+    scope = str(body.get("scope") or "all").strip().lower()
+    if scope == "suspect":
+        snap = sourcehealth.snapshot()
+        suspects = {k for k, v in snap.items()
+                    if (v.get("samples") or 0) >= 3
+                    and not (v.get("last_ok") or 0)}
+        targets = [s for s in config.all_sources()
+                   if str(s.get("id") or "") in suspects]
+        return {"code": 0, "msg": "", "data": await _probe.start(
+            targets, concurrency=concurrency, limit=0,
+            disable_sink=None)}
     # 2026-11-13：探活覆盖【全部源】（含已禁用），不只纯 CMS ——
     # 原实现只挑 _is_pure_cms，spider/drpy/t4/catvod/xsrc 全被跳过，
     # 用户看到的「探活不全」即此。已禁用源也探，便于发现恢复可用的源。
