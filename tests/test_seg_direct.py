@@ -75,3 +75,30 @@ def test_hosts_parse_from_string_and_list():
     with patch("app.config", _cfg(seg_direct_enabled=True,
                                   seg_direct_hosts=["A.Test", "a.test"])):
         assert racemod._seg_direct_hosts() == ("a.test",)
+
+
+def test_hosts_cache_reused_and_invalidated_by_revision(tmp_path, monkeypatch):
+    """白名单 tuple 按配置代际缓存：每分片都要问一次，不能每次都 deepcopy+清洗。"""
+    import config as cfgmod
+    import app as appmod
+
+    monkeypatch.setattr(cfgmod, "_STATE", tmp_path / "config.json")
+    cfg = cfgmod.Config()
+    monkeypatch.setattr(appmod, "config", cfg)
+
+    cfg.save({"seg_direct_hosts": ["A.Example.com", "a.example.com"]})
+    assert racemod._seg_direct_hosts() == ("a.example.com",)
+    rev, cached = racemod._SEG_DIRECT_HOSTS_CACHE
+    assert rev == cfg.revision
+    assert racemod._seg_direct_hosts() is cached
+
+    cfg.save({"seg_direct_hosts": ["b.example.com"]})
+    assert racemod._seg_direct_hosts() == ("b.example.com",)
+
+
+def test_hosts_cache_bypassed_when_config_read_patched():
+    """测试/插件打了 config.read 补丁时必须不吃缓存，保持旧语义。"""
+    with patch("app.config", _cfg(seg_direct_hosts=["x.test"])):
+        assert racemod._seg_direct_hosts() == ("x.test",)
+    with patch("app.config", _cfg(seg_direct_hosts=["y.test"])):
+        assert racemod._seg_direct_hosts() == ("y.test",)

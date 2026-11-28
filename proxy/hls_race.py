@@ -1090,14 +1090,27 @@ _PLAYLIST_BYTES = 0                     # 当前总量（运行值）
 _PLAYLIST_FUT: dict[str, asyncio.Future] = {}
 
 
+def _playlist_ttl_cfg(key: str, fallback: float) -> float:
+    """读清单 TTL 配置并夹取（点播 60~3600 / 直播 30~600）；异常回落常量。"""
+    try:
+        from app import config as _c
+        v = float(_c.read(key, fallback))
+    except Exception:  # noqa: BLE001
+        _log.debug("_playlist_ttl_cfg failed", exc_info=True)
+        return fallback
+    lo, hi = (60.0, 3600.0) if key == "playlist_ttl_vod" else (30.0, 600.0)
+    return max(lo, min(hi, v))
+
+
 def _playlist_ttl_for(body) -> float:
     """按清单类型返回缓存 TTL：点播（ENDLIST）长、直播/未知短。
 
     只看 #EXT-X-ENDLIST 这一个结构特征——它由源站写在媒体清单尾部，
-    比按 URL 猜点播/直播可靠。"""
+    比按 URL 猜点播/直播可靠。TTL 每次实时读配置（可调；默认值与
+    原常量一致：点播 600 秒、直播 120 秒）。"""
     if isinstance(body, str) and "#EXT-X-ENDLIST" in body:
-        return _PLAYLIST_TTL_VOD
-    return _PLAYLIST_TTL
+        return _playlist_ttl_cfg("playlist_ttl_vod", _PLAYLIST_TTL_VOD)
+    return _playlist_ttl_cfg("playlist_ttl_live", _PLAYLIST_TTL)
 
 
 def _playlist_cache_drop(key: str) -> None:
@@ -2673,7 +2686,33 @@ def _seg_direct_enabled() -> bool:
         return False
 
 
+# 302 直连累计次数（进程内，供 install-check 展示「到底有没有生效」）
+_SEG_DIRECT_HITS = 0
+# 白名单 tuple 缓存：(config.revision, hosts)
+_SEG_DIRECT_HOSTS_CACHE: tuple[int, tuple[str, ...]] = (-1, ())
+
+
 def _seg_direct_hosts() -> tuple[str, ...]:
+    """直连 host 白名单（按配置代际缓存）。
+
+    每发一个分片都会问一次，而 ``config.read`` 对 list 会 deepcopy，再清洗
+    去重就是白烧。这里按 ``config.revision`` 缓存，配置一改立即失效。
+    测试里打了 ``config.read`` 补丁时（已非原方法）退化为不缓存，语义不变。
+    """
+    global _SEG_DIRECT_HOSTS_CACHE
+    rev = -1
+    try:
+        from app import config
+        from config import Config as _Config
+        if (getattr(type(config), "read", None) is _Config.read
+                and "read" not in getattr(config, "__dict__", {})):
+            rev = int(getattr(config, "revision", -1))
+        if rev >= 0:
+            cached_rev, cached = _SEG_DIRECT_HOSTS_CACHE
+            if cached_rev == rev:
+                return cached
+    except Exception:  # noqa: BLE001
+        _log.debug("_seg_direct_hosts cache probe failed", exc_info=True)
     try:
         from app import config
         raw = config.read("seg_direct_hosts", []) or []
@@ -2684,7 +2723,10 @@ def _seg_direct_hosts() -> tuple[str, ...]:
             h = str(item or "").strip().lower().lstrip(".")
             if h and "/" not in h:
                 out.append(h)
-        return tuple(dict.fromkeys(out))
+        hosts = tuple(dict.fromkeys(out))
+        if rev >= 0:
+            _SEG_DIRECT_HOSTS_CACHE = (rev, hosts)
+        return hosts
     except Exception:
         _log.debug("_seg_direct_hosts failed", exc_info=True)
         return ()
@@ -2772,6 +2814,8 @@ async def hls_seg(mg: str, request: Request):
             and not (picked or {}).get("t4")
             and not _dduo_strip_referer(picked)
             and _seg_direct_ok(src_url, headers, request)):
+        global _SEG_DIRECT_HITS
+        _SEG_DIRECT_HITS += 1
         return RedirectResponse(
             src_url, status_code=302,
             headers={"Cache-Control": "no-store",

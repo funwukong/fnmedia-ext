@@ -113,3 +113,32 @@ def test_admin_ui_has_acceptance_card():
                "downloadAcceptanceReport", "copyAcceptanceReport"):
         assert f"onclick=\"{fn}()\"" in ui, fn
     assert 'id="installCheckResult"' in ui
+
+
+def test_install_check_reports_feature_status(client):
+    """验收自检里的 features 段：优化开关是否真的生效（advisory，不参与判定）。"""
+    d = client.get("/v/api/ext/install-check").json()
+    feats = d["checks"]["features"]
+    assert feats["advisory"] is True, "开关状态只作提示，不参与总判定"
+    v = feats["value"]
+    assert {"seg_direct", "playlist_ttl", "poster_mirror", "poster_disk"} <= set(v)
+    # 默认：直连关 + 白名单空 → 明确标成「未生效」
+    assert v["seg_direct"]["enabled"] is False
+    assert v["seg_direct"]["effective"] is False
+    assert v["seg_direct"]["direct_hits"] == 0
+    # 默认 TTL 应被识别为默认值（提示还没按实测调过）
+    assert v["playlist_ttl"]["is_default"] is True
+
+
+def test_report_includes_feature_status(client):
+    d = client.get("/v/api/ext/install-check/report").json()
+    assert "features" in d["install"]
+    assert "playlist_ttl" in d["install"]["features"]
+
+
+def test_admin_ui_shows_feature_lines():
+    ui = (ROOT / "proxy" / "assets" / "admin.html").read_text(encoding="utf-8")
+    assert "分片直连: " in ui
+    assert "清单缓存: 点播 " in ui
+    assert "白名单为空（等于没开）" in ui
+    assert 'id="playlistTtlVod"' in ui

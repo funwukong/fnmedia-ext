@@ -199,6 +199,8 @@ def test_domain_heal_pure_functions():
     assert domain_heal.is_challenge_page(200, long_invalid) is False
 
 
+@pytest.mark.skipif(not hasattr(socket, "AF_UNIX"),
+                    reason="Windows 无 AF_UNIX，无法起 UDS 假服务端")
 def test_fnmedia_authx_call_json_fallback_and_boom(tmp_path, monkeypatch, boom_json):
     sock_path = str(tmp_path / "authx.sock")
 

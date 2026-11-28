@@ -1,4 +1,4 @@
-"""海报镜像可配置 + 分类排除回归。"""
+"""海报镜像可配置回归（分类排除已按用户要求移除）。"""
 from __future__ import annotations
 
 import sys
@@ -6,9 +6,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "proxy"))
-
-import catalog  # noqa: E402
-
 
 def test_mirror_brand_word_matches_all_subdomains():
     import adfilter
@@ -54,30 +51,6 @@ def test_host_hits_mirror_semantics():
     assert adfilter._host_hits_mirror("a.example.com", "example.com") is True
     assert adfilter._host_hits_mirror("example.com", "example.com") is True
     assert adfilter._host_hits_mirror("notexample.com", "example.com") is False
-
-
-def test_cat_exclude_filters_source_classes(tmp_path, monkeypatch):
-    import config as config_mod
-    monkeypatch.setattr(config_mod, "_STATE", tmp_path / "config.json")
-    cfg = config_mod.Config()
-    cfg.save({"catalog_cat_exclude": {"dirty_src": ["overseas"]}})
-    monkeypatch.setattr(catalog, "_excluded_cats_for",
-                        lambda sid: {"overseas"} if sid == "dirty_src" else set())
-
-    # 模拟 _load_source_classes 的过滤段：dirty_src 的 overseas 叶子被剔除
-    classes = [
-        {"type_id": 1, "type_name": "海外剧", "cat": "overseas"},
-        {"type_id": 2, "type_name": "玄幻动漫", "cat": "anime"},
-    ]
-    excluded = catalog._excluded_cats_for("dirty_src")
-    kept = [c for c in classes if c["cat"] not in excluded]
-    assert [c["type_id"] for c in kept] == [2]
-
-
-def test_cat_exclude_config_validation():
-    src = (ROOT / "proxy" / "admin_api.py").read_text(encoding="utf-8")
-    assert '"catalog_cat_exclude"' in src
-    assert "valid_cats = set(catalogmod.CATS)" in src
 
 
 def test_mirror_config_validation():

@@ -23,6 +23,13 @@ import client as clientmod
 MAX_EVENTS_PER_DEVICE = 60
 MAX_DEVICES = 32
 SESSION_TTL = 600
+
+# 验收会话期间每设备额外保留的「按 stage 保底」事件数：分片（seg）一次
+# 起播就是几十条，60 条环形缓冲很快被刷穿，把 play/info、play/play、
+# 搜索、详情这些关键阶段事件冲掉（真机 2026-11-26 验收报告实测）。
+_ACCEPTANCE_PER_STAGE_KEEP = 6
+_ACCEPTANCE_STAGES = ("library", "search", "detail", "play", "media",
+                      "hls", "seg", "direct", "live")
 # 错误滚动窗口：最近 5 分钟内的错误数（ERROR_WINDOW 秒）+ 时间戳队列上限
 ERROR_WINDOW = 300
 ERR_TS_MAXLEN = 64
@@ -50,9 +57,12 @@ def acceptance_session() -> str:
 
 
 def clear_acceptance_session() -> None:
-    """结束并清空验收会话标记。"""
+    """结束并清空验收会话标记与按 stage 保底队列。"""
     global _SESSION_TAG
     _SESSION_TAG = ""
+    with _LOCK:
+        for dev in _DEVICES.values():
+            dev.pop("_acc_keep", None)
 
 
 def _ua_fp(ua: str) -> str:
@@ -115,6 +125,12 @@ def record(ua: str, ip: str, method: str, path: str, query: str,
               "err": is_err}
         _SEQ += 1
         dev["events"].append(ev)
+        # 验收会话进行中：按 stage 各保底一份（浅拷贝），防止环形缓冲被
+        # 高频 stage（seg/direct）刷穿后报告丢关键阶段事件。
+        if _SESSION_TAG and stage in _ACCEPTANCE_STAGES:
+            keep = dev.setdefault("_acc_keep", {})
+            dq = keep.setdefault(stage, deque(maxlen=_ACCEPTANCE_PER_STAGE_KEEP))
+            dq.append(dict(ev))
         # 维护“当前播放会话”：出现播放/分片类请求即更新；记录片名与最后活跃时间。
         is_play_stage = stage in ("play", "media", "hls", "seg", "direct")
         if title and is_play_stage:
@@ -145,6 +161,44 @@ def record(ua: str, ip: str, method: str, path: str, query: str,
                     sess.pop("error", None)
 
 
+def _merged_events(dev: dict) -> list[dict]:
+    """设备最近 30 条事件（新→旧），验收会话期间把按 stage 保底的条目并入。
+
+    无会话时与旧行为完全一致；有会话时环形缓冲里已有的条目优先（它包含
+    全部 stage 的真实时序），缺的 stage 用保底队列补——同一 seq 只算一条。
+    首页/搜索往往发生在起播前几分钟、早已滚出 60 条环形窗口，而验收报告
+    恰恰需要看到这些早期关键阶段（真机 2026-11-26 的教训）。
+    """
+    # 会话已结束（clear 清掉 _acc_keep）：与旧行为完全一致。
+    if not _SESSION_TAG or not (dev.get("_acc_keep") or {}):
+        return list(dev["events"])[-30:][::-1]
+    seen: set[int] = set(e.get("seq", -1) for e in dev["events"])
+    merged: list[dict] = list(dev["events"])
+    for stage_dq in (dev.get("_acc_keep") or {}).values():
+        for ev in stage_dq:
+            if ev.get("seq", -1) not in seen:
+                merged.append(ev)
+                seen.add(ev.get("seq", -1))
+    merged.sort(key=lambda e: e.get("seq", 0))
+    if len(merged) > 30:
+        # 截断时先保证「每个 stage 各留 1 条最新」，再按 seq 新→旧补足。
+        by_stage: dict[str, dict] = {}
+        for ev in merged:
+            by_stage.setdefault(ev.get("stage", ""), {})[ev.get("seq", 0)] = ev
+        picked: list[dict] = []
+        picked_seqs: set[int] = set()
+        for seqmap in by_stage.values():
+            top = max(seqmap)
+            picked.append(seqmap[top])
+            picked_seqs.add(top)
+        rest = [e for e in merged if e.get("seq", 0) not in picked_seqs]
+        rest.sort(key=lambda e: e.get("seq", 0), reverse=True)
+        picked.extend(rest[:30 - len(picked)])
+        picked.sort(key=lambda e: e.get("seq", 0))
+        return picked[::-1]
+    return merged[::-1]
+
+
 def snapshot() -> dict:
     """返回给管理台的实时快照。"""
     now = time.time()
@@ -167,7 +221,7 @@ def snapshot() -> dict:
                 "error_window_sec": ERROR_WINDOW,
                 "last_status": dev["last_status"], "last_path": dev["last_path"],
                 "active": active, "session": sess if active else None,
-                "events": list(dev["events"])[-30:][::-1],
+                "events": _merged_events(dev),
             })
     out.sort(key=lambda d: d["seen"], reverse=True)
     return {"now": round(now, 1), "devices": out}

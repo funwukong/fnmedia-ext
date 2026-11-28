@@ -1,4 +1,4 @@
-"""源质量标签 / 排序模式 / 分类排除 / 镜像 —— 后端回归。"""
+"""源质量标签 / 排序模式 / 镜像 —— 后端回归。"""
 from __future__ import annotations
 
 import sys
@@ -44,7 +44,6 @@ def test_defaults_present():
     assert cfgmod.DEFAULTS["source_sort_mode"] == "auto"
     assert cfgmod.DEFAULTS["source_user_order"] == []
     assert cfgmod.DEFAULTS["poster_mirror_hosts"] == []
-    assert cfgmod.DEFAULTS["catalog_cat_exclude"] == {}
 
 
 def test_ui_sort_and_drag_present():

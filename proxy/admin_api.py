@@ -465,11 +465,14 @@ async def ext_source_quality():
     return {"code": 0, "data": {"sources": out}}
 
 
-@admin_router.get("/v/api/ext/catalog-cat-exclude")
-async def ext_catalog_cat_exclude_get():
-    from app import config  # noqa: E402,F401 延迟导入：避免与 app.py 循环导入
-    raw = config.read("catalog_cat_exclude", {}) or {}
-    return {"code": 0, "data": {"exclude": raw}}
+def _seg_direct_hits() -> int:
+    """分片 302 直连累计命中数（hls_race 进程内计数，取不到返回 0）。"""
+    try:
+        import hls_race as _hr
+        return int(getattr(_hr, "_SEG_DIRECT_HITS", 0) or 0)
+    except Exception:  # noqa: BLE001
+        _log.debug("seg direct hits read failed", exc_info=True)
+        return 0
 
 
 def _features_snapshot() -> dict:
@@ -500,6 +503,14 @@ def _features_snapshot() -> dict:
         "seg_direct": {
             "enabled": bool(config.read("seg_direct_enabled", False)),
             "hosts": len(config.read("seg_direct_hosts", []) or []),
+            "effective": bool(config.read("seg_direct_hosts", []) or []),
+            "direct_hits": _seg_direct_hits(),
+        },
+        "playlist_ttl": {
+            "vod": int(config.read("playlist_ttl_vod", 600) or 600),
+            "live": int(config.read("playlist_ttl_live", 120) or 120),
+            "is_default": (int(config.read("playlist_ttl_vod", 600) or 600) == 600
+                           and int(config.read("playlist_ttl_live", 120) or 120) == 120),
         },
         "poster_mirror": {"pairs": mirror_pairs, "hits": mirror_hits},
         "poster_disk": {
@@ -1132,10 +1143,10 @@ async def ext_set_config(request: Request):
         "hls_reg_cache_mb", "poster_cache_mb", "poster_disk_cache_mb",
         "poster_mirror_hosts",  # 海报防盗链镜像对
         "source_sort_mode",  # 源排序模式 auto/user
+        "playlist_ttl_vod", "playlist_ttl_live",  # 播放清单缓存 TTL（秒）
         "auto_cache_clear_enabled",  # 运行缓存自动定时清理
         "auto_cache_clear_hours",  # 自动清理间隔（小时）
         "source_user_order",  # 用户拖拽顺序（source_id 列表）
-        "catalog_cat_exclude",  # 分类排除：源 -> 脏分类
     }
     # >>> PRIVATE:CATVOD
     allowed.add("pan_lib_enabled")
@@ -1177,19 +1188,14 @@ async def ext_set_config(request: Request):
                 1, min(720, int(float(patch["pan_cache_ttl_hours"]))))
         except (TypeError, ValueError):
             patch.pop("pan_cache_ttl_hours", None)
-    if "catalog_cat_exclude" in patch:
-        raw_ex = patch["catalog_cat_exclude"]
-        clean: dict[str, list[str]] = {}
-        if isinstance(raw_ex, dict):
-            valid_cats = set(catalogmod.CATS)
-            for sid, cats in list(raw_ex.items())[:200]:
-                sid_s = str(sid or "").strip()
-                if not sid_s or not isinstance(cats, (list, tuple)):
-                    continue
-                keep = [str(c) for c in cats if str(c) in valid_cats]
-                if keep:
-                    clean[sid_s] = sorted(set(keep))
-        patch["catalog_cat_exclude"] = clean
+    for _ttl_key, _lo, _hi, _dflt in (
+            ("playlist_ttl_vod", 60, 3600, 600),
+            ("playlist_ttl_live", 30, 600, 120)):
+        if _ttl_key in patch:
+            try:
+                patch[_ttl_key] = max(_lo, min(_hi, int(float(patch[_ttl_key]))))
+            except (TypeError, ValueError):
+                patch[_ttl_key] = _dflt
     if "auto_cache_clear_enabled" in patch:
         patch["auto_cache_clear_enabled"] = bool(patch["auto_cache_clear_enabled"])
     if "auto_cache_clear_hours" in patch:
@@ -1356,13 +1362,6 @@ async def ext_set_config(request: Request):
         except Exception:
             _log.debug("ext_set_config failed", exc_info=True)
             pass
-    if "catalog_cat_exclude" in patch:
-        # 排除项变化：内存与盘上路由都必须重建，立即生效
-        try:
-            catalog.reset()
-        except Exception:
-            _log.debug("catalog reset after exclude failed", exc_info=True)
-        _schedule_routes_refresh()
     if sources_changed or "welfare_library_enabled" in patch:
         # 扩展库独立开关切换 → 立即重建分类路由（开=补建 ADULT 池，关=清掉），
         # 否则打开开关后扩展库卡要等下次路由过期才出现。

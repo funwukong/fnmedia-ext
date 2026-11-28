@@ -49,6 +49,8 @@ class PansouFallbackTests(unittest.TestCase):
 
     def setUp(self):
         self.app = (PROXY / "app.py").read_text(encoding="utf-8")
+        # 播放链已拆到 play_proxy.py：涉及播放菜单/载荷的断言需合并扫描
+        self.play = (PROXY / "play_proxy.py").read_text(encoding="utf-8")
         self.hls = (PROXY / "hls_race.py").read_text(encoding="utf-8")
         self.pansou = (PROXY / "pansou.py").read_text(encoding="utf-8")
 
@@ -58,7 +60,7 @@ class PansouFallbackTests(unittest.TestCase):
 
     def test_pansou_still_in_playback_menu(self):
         """播放页线路菜单保留网盘线（用户可手动切）。"""
-        self.assertIn('"label": PANSOU_LABEL', self.app)
+        self.assertIn('"label": PANSOU_LABEL', self.app + self.play)
 
     def test_fallback_only_after_real_lines_fail(self):
         self.assertIn("async def _pansou_fallback_target", self.hls)

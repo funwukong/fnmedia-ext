@@ -42,7 +42,8 @@ for p in sorted(root.rglob("*.py")):
                 c+=1
                 if has_log(node): l+=1
     if c:
-        per[str(p)] = (c,l)
+        # 统一成正斜杠：Windows 下 str(p) 是反斜杠，测试按 "proxy/app.py" 取表会 KeyError
+        per[p.as_posix()] = (c,l)
         total+=c; logged+=l
 print(f"TOTAL broad-except: {total}  with-log: {logged}  logged-ratio: {logged/total*100:.1f}%")
 for k,(c,l) in sorted(per.items(), key=lambda kv:-kv[1][0]):

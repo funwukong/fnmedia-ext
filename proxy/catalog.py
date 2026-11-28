@@ -347,26 +347,6 @@ def classify(name: str) -> str | None:
     return None
 
 
-def _excluded_cats_for(source_id) -> set[str]:
-    """该源被用户排除的分类集合（config.catalog_cat_exclude）。
-
-    值为 dict：source_id -> [cat, ...]；空/非法时返回空集合（不排除）。
-    """
-    sid = str(source_id or "")
-    if not sid:
-        return set()
-    try:
-        from config import config as _cfg
-        raw = _cfg.read("catalog_cat_exclude", {}) or {}
-        cats = raw.get(sid) if isinstance(raw, dict) else None
-        if isinstance(cats, (list, tuple, set)):
-            valid = set(CATS)
-            return {str(c) for c in cats if str(c) in valid}
-    except Exception:  # noqa: BLE001
-        _log.debug("_excluded_cats_for failed", exc_info=True)
-    return set()
-
-
 def filter_category_list(categories: list[dict]) -> list[dict]:
     """统一过滤分类列表：精确命中黑名单的类目不进入任何后续抓取/缓存。"""
     return [c for c in (categories or [])
@@ -453,6 +433,61 @@ async def _fetch_category_page(client: httpx.AsyncClient, source: dict,
     if not isinstance(j, dict) or j.get("code") not in (1, "1"):
         return [], 0
     return (j.get("list") or []), int(j.get("pagecount") or 0)
+
+
+
+def revalidate_route_classes(classes: dict, source_by_id) -> tuple[int, int]:
+    """就地修正盘上路由分类，返回 ``(改写数, 丢弃数)``。
+
+    盘上的叶子是按**当时**的关键词表/福利开关归类的；升级或改开关后旧值会
+    一直把错误分类端回来（真机串分类根因）。这里逐叶子重跑
+    ``classify_source_class``（纯内存，几千条目毫秒级），与旧实现
+    「任一不一致就整份作废→全量重探」相比：
+
+    - 只改写不一致的叶子，其余路由原样保留，大库升级后不必重探一轮；
+    - ``shortdrama`` 叶子不复算——父类信息没有落盘（只存叶子），复算会
+      把「都市」这类子分类判成 tv/movie，旧实现因此每次启动都整份作废；
+    - 复算结果为 ``None``：命中红线/黑名单的丢弃，其余保留原判，
+      不因规则收紧而误删源站分类。
+    """
+    fixed = dropped = 0
+    for sid, leaves in list(classes.items()):
+        if not isinstance(leaves, list):
+            continue
+        try:
+            allowed = bool((source_by_id(sid) or {}).get("adult"))
+        except Exception:  # noqa: BLE001
+            _log.debug("revalidate: adult flag lookup failed", exc_info=True)
+            allowed = False
+        kept: list[dict] = []
+        for cl in leaves:
+            if not isinstance(cl, dict):
+                dropped += 1
+                continue
+            name = str(cl.get("type_name") or "")
+            saved = cl.get("cat")
+            if saved == "shortdrama":
+                kept.append(cl)
+                continue
+            try:
+                want = classify_source_class(name, allowed)
+            except Exception:  # noqa: BLE001
+                _log.debug("revalidate: classify failed: %r", name, exc_info=True)
+                kept.append(cl)
+                continue
+            if want is None:
+                if not name or is_redline(name) or name in _BAN_CATEGORIES:
+                    dropped += 1
+                    continue
+                kept.append(cl)
+                continue
+            if want != saved:
+                cl["cat"] = want
+                fixed += 1
+            kept.append(cl)
+        if len(kept) != len(leaves):
+            classes[sid] = kept
+    return fixed, dropped
 
 
 class Catalog:
@@ -626,33 +661,23 @@ class Catalog:
         if not isinstance(classes, dict) or not isinstance(routes, dict):
             return False
         # 路由状态里的叶子按**当时的**关键词表归类；升级后关键词表可能演进
-        # （如新增/调整海外·动漫判定），旧盘态会把动漫类目一直错挂在
-        # 海外剧集（真机串分类根因）。这里对每个叶子重跑一次
-        # classify_source_class（纯内存、几千条目毫秒级），任何不一致
-        # 都整份作废、走全量重探。
+        # （如新增/调整海外·动漫判定），旧盘态会把动漫类目一直错挂在海外剧集
+        # （真机串分类根因）。这里逐叶子复算并**就地改写**不一致的条目，
+        # 修完顺手落盘；不再整份作废触发全量重探（大库升级后每次启动都要
+        # 重探一轮，且短剧叶子因父类信息未落盘会永远判不一致）。
+        _t0 = time.perf_counter()
         try:
-            adult_by_src = {sid: bool((self._source_by_id(sid) or {}).get("adult"))
-                            for sid in classes}
-            for sid, cls in classes.items():
-                allowed = adult_by_src.get(sid, False)
-                excluded = _excluded_cats_for(sid)
-                for cl in (cls or []):
-                    # 用户后来排除了某一类 → 旧盘态里该类路由必须作废
-                    if cl.get("cat") in excluded:
-                        _log.info("route state stale: sid=%s cat=%s excluded",
-                                  sid, cl.get("cat"))
-                        return False
-                    want = classify_source_class(
-                        str(cl.get("type_name") or ""), allowed)
-                    if cl.get("cat") != want:
-                        _log.info(
-                            "route state stale after classify change: "
-                            "sid=%s type=%r saved=%s now=%s; re-probe all",
-                            sid, cl.get("type_name"), cl.get("cat"), want)
-                        return False
+            fixed, dropped = revalidate_route_classes(classes, self._source_by_id)
         except Exception:  # noqa: BLE001
             _log.debug("route state revalidate failed", exc_info=True)
-            return False
+            fixed = dropped = 0
+        _elapsed_ms = (time.perf_counter() - _t0) * 1000.0
+        repaired = bool(fixed or dropped)
+        if repaired:
+            _log.info("route state repaired: %d reclassified, %d dropped (%.1fms)",
+                      fixed, dropped, _elapsed_ms)
+        else:
+            _log.debug("route state revalidated: %.1fms", _elapsed_ms)
         with self._lock:
             if generation != self._cache_generation or not self._route_state_loaded:
                 return False
@@ -661,6 +686,9 @@ class Catalog:
             self._updated = float(raw.get("updated") or time.time())
             self._route_state_signature = signature
         _log.info("catalog routes restored from disk: %d routes", len(routes))
+        if repaired:
+            # 修好的盘态写回去，下次启动不用再复算一遍。
+            await self._persist_route_state(sources, generation)
         return bool(routes)
 
     @staticmethod
@@ -705,7 +733,8 @@ class Catalog:
                     return
             self._write_route_state(data)
 
-    async def refresh_routes(self, sources: list[dict]) -> dict[str, Any]:
+    async def refresh_routes(self, sources: list[dict],
+                             force: bool = False) -> dict[str, Any]:
         # 只有苹果 CMS 源能走分类表深翻；T4 与 spider/drpy/catvod/xsrc
         # 均非 CMS 协议（spider:// 等），当成 CMS 请求只会报 UnsupportedProtocol
         # 且独立库恒为空，故在入口一并排除。
@@ -715,7 +744,9 @@ class Catalog:
         # follower can race ahead and launch another route refresh.
         if self._refreshing and self._refresh_future is not None:
             return await asyncio.shield(self._refresh_future)
-        if await self._load_route_state(sources):
+        # force=True：不走盘上路由的快速恢复（定时清理/手动重建时用），
+        # 直接全量重探；失败时旧路由仍留在内存里继续服务，绝不先清空。
+        if not force and await self._load_route_state(sources):
             return self.status()
         if self._refreshing and self._refresh_future is not None:
             return await asyncio.shield(self._refresh_future)
@@ -929,15 +960,6 @@ class Catalog:
             except Exception:
                 _log.debug("_load_source_classes failed: source=%s", source, exc_info=True)
                 continue
-        # 分类排除：该源被标记为脏的类目直接不建路由（聚合与独立库都不受影响
-        # 之外的其它类），避免脏数据串到别的分类库。配置见 catalog_cat_exclude。
-        excluded = _excluded_cats_for(source.get("id"))
-        if excluded:
-            before = len(norm)
-            norm = [cl for cl in norm if cl.get("cat") not in excluded]
-            if len(norm) != before:
-                _log.info("catalog cat excluded sid=%s cats=%s dropped=%d",
-                          source.get("id"), sorted(excluded), before - len(norm))
         with self._lock:
             self._classes[source["id"]] = norm
 

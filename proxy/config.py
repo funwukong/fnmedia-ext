@@ -226,6 +226,11 @@ DEFAULTS = {
     "seg_direct_enabled": False,
     # 允许直连的 host 后缀白名单（如 "cdn.example.com"、"example.com" 命中子域）。
     "seg_direct_hosts": [],
+    # 播放清单缓存 TTL（秒）：点播清单带 #EXT-X-ENDLIST、内容不可变，缓存可
+    # 放长；直播清单必须短。分片 URL 多带时效签名，TTL 必须明显短于签名
+    # 有效期——默认 600/120 与拆分前常量一致，实测后再按源调整。
+    "playlist_ttl_vod": 600,
+    "playlist_ttl_live": 120,
     # 自动选最快线时最多参与竞速的候选线路数（控制起播开销）
     "line_fastest_max": 6,
     # 竞速超时预算（秒）：超时未响应的线路本轮判慢，不阻塞起播
@@ -281,12 +286,6 @@ DEFAULTS = {
     # adfilter.HOSTS_MIRROR（品牌词匹配，覆盖该品牌所有图床子域）；
     # 这里放用户自己补充的 [["源host或品牌词","镜像域"], ...]。
     "poster_mirror_hosts": [],
-
-    # 分类排除：{"<source_id>": ["<cat>", ...]}。
-    # 源站分类表里某个子类其实是脏数据（如把国产动漫挂在「海外剧」，条目
-    # 会串进海外剧集库）时，只排除该源的这一类，不必整源停用。
-    # cat 取值同 catalog.CATS（movie/tv/anime/variety/... 含 overseas 等）。
-    "catalog_cat_exclude": {},
 
     # 源排序模式：auto=实测质量+健康度自动排序（默认）；user=用户拖拽顺序优先
     # （source_user_order 列表里的源按序排，未列出的仍按 auto 排在后面）。
@@ -449,6 +448,9 @@ class Config:
         self._cfg: dict = {}
         self._mtime = 0
         self._last_stat_check = 0.0
+        # 配置代际：每次 load()/_persist() 成功后 +1。热路径上的派生值
+        # （如 hls_race 的直连白名单 tuple）按它缓存，改配置立即失效。
+        self._rev = 0
         self.load()
 
 
@@ -780,6 +782,12 @@ class Config:
             _backup_config()
         self._cfg = cfg
         self._mtime = _STATE.stat().st_mtime
+        self._rev += 1
+
+    @property
+    def revision(self) -> int:
+        """配置代际号（load/save 成功后自增），供热路径缓存失效判断。"""
+        return self._rev
 
     @staticmethod
     def make_custom_id(api: str) -> str:

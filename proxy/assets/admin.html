@@ -687,19 +687,6 @@ html[data-hide-score] .qbadge{font-size:10px}
           <button class="small ghost" id="srcProbeCancelBtn" style="display:none" onclick="sourceProbeCancel()">中止</button>
           <button class="small" onclick="cmsHealthCheck()" title="用热门词批量检测纯 CMS 源是否有效，失效写入健康画像触发熔断">CMS 批量体检</button>
           <button class="small" onclick="restoreBuiltin()">恢复内置源</button>
-        <div class="card" style="margin-top:12px">
-          <div class="card-title">分类排除（防脏数据串库）
-            <span class="muted sm" style="font-weight:400">某源某分类是脏数据（如国产动漫挂在「海外剧」）时，排除该源的这一类</span></div>
-          <div class="row">
-            <select id="catExSrc" style="max-width:220px"><option value="">— 选择资源站 —</option></select>
-            <select id="catExCat" multiple size="6" style="min-width:220px"></select>
-            <div style="display:flex;flex-direction:column;gap:6px">
-              <button class="small primary" onclick="saveCatExclude()">保存排除</button>
-              <button class="small" onclick="clearCatExclude()">清除该源</button>
-            </div>
-          </div>
-          <div class="hint" id="catExMsg"></div>
-        </div>
           <button class="small" onclick="exportCmsSources()" title="导出当前纯 CMS 源为 JSON 备份">⬇ 导出</button>
           <label class="btn-sm" style="border-color:var(--ok);background:var(--ok-soft);color:var(--ok)" title="从 JSON 文件导入 CMS 源，自动去重">
             ⬆ 导入<input type="file" id="cmsImportFile" accept=".json,application/json" class="file-input" onchange="importCmsFile(this)"/>
@@ -1009,6 +996,10 @@ html[data-hide-score] .qbadge{font-size:10px}
           <span>分片 CDN 直连<span class="sub">白名单内的源，分片请求直接 302 到 CDN，服务器不再转发字节（省带宽/CPU）。只对不需要 Referer/Cookie 的源生效；打开前请先在小范围源验证播放正常</span></span></label>
         <label class="field" style="max-width:420px"><span>直连白名单（host，逗号分隔）</span>
           <input type="text" id="segDirectHosts" placeholder="cdn.example.com, another.example.com" style="width:100%"/><span class="sub">填 CDN 域名或后缀；子域自动命中（example.com 命中 a.example.com）</span></label>
+        <label class="field" style="max-width:220px"><span>点播清单缓存（秒）</span>
+          <input type="number" id="playlistTtlVod" min="60" max="3600" style="width:100%"/><span class="sub">带 ENDLIST 的点播清单缓存时长；默认 600。分片 URL 带时效签名的源调大前先实测签名有效期</span></label>
+        <label class="field" style="max-width:220px"><span>直播清单缓存（秒）</span>
+          <input type="number" id="playlistTtlLive" min="30" max="600" style="width:100%"/><span class="sub">直播清单缓存时长；默认 120，一般不需要调</span></label>
         <label class="switch-row"><input type="checkbox" id="midPlaybackSwitch"/>
           <span>播放中静默换线<span class="sub">自动起播的线路在播放中变慢时，按已实测的分片耗时/吞吐静默切到同集更快的线，不打断播放；手动选线不受影响，30 秒内最多换一次</span></span></label>
         <label class="switch-row"><input type="checkbox" id="skipIntroEnabled"/>
@@ -2704,45 +2695,6 @@ function initSrcDrag(){
     else toast("保存失败","fail");
   });
 }
-/* ---------- 分类排除 ---------- */
-const CAT_EX_LABELS={movie:"电影",tv:"剧集",anime:"动漫",variety:"综艺",documentary:"纪录片",uhd:"4K",shortdrama:"短剧",overseas:"海外剧集",ai_comic:"AI漫剧",ted:"教育",sports:"体育",live:"直播",kids:"少儿",opera:"戏曲",music:"音乐MV"};
-let CAT_EX_CFG={};
-async function loadCatExclude(){
-  try{
-    const st=await jget("/v/api/ext/status");
-    const srcs=(st.data&&st.data.config&&st.data.config.sources)||[];
-    const sel=$("catExSrc");if(!sel)return;
-    sel.innerHTML='<option value="">— 选择资源站 —</option>'+srcs.map(s=>`<option value="${esc(s.id)}">${esc(s.name||s.id)}</option>`).join("");
-    const cfg=await jget("/v/api/ext/catalog-cat-exclude");
-    CAT_EX_CFG=(cfg.data&&cfg.data.exclude)||{};
-    sel.onchange=()=>renderCatExclude();
-    renderCatExclude();
-  }catch(e){}
-}
-function renderCatExclude(){
-  const sel=$("catExSrc"),multi=$("catExCat"),msg=$("catExMsg");
-  if(!sel||!multi)return;
-  const sid=sel.value;
-  const cur=(CAT_EX_CFG[sid])||[];
-  multi.innerHTML=Object.keys(CAT_EX_LABELS).map(c=>`<option value="${c}" ${cur.includes(c)?"selected":""}>${CAT_EX_LABELS[c]}</option>`).join("");
-  msg.textContent=sid?(cur.length?("已排除："+cur.map(c=>CAT_EX_LABELS[c]||c).join("、")):"该源无排除"):"";
-}
-async function saveCatExclude(){
-  const sid=$("catExSrc").value;if(!sid){toast("先选择资源站","fail");return;}
-  const cats=Array.from($("catExCat").selectedOptions).map(o=>o.value);
-  const cfg={...CAT_EX_CFG};
-  if(cats.length)cfg[sid]=cats;else delete cfg[sid];
-  const r=await jpost("/v/api/ext/config",{catalog_cat_exclude:cfg});
-  if(r.code===0){CAT_EX_CFG=cfg;renderCatExclude();toast("已保存，路由重建中");await loadStatus();renderSources();}
-  else toast(r.msg||"保存失败","fail");
-}
-async function clearCatExclude(){
-  const sid=$("catExSrc").value;if(!sid){toast("先选择资源站","fail");return;}
-  const cfg={...CAT_EX_CFG};delete cfg[sid];
-  const r=await jpost("/v/api/ext/config",{catalog_cat_exclude:cfg});
-  if(r.code===0){CAT_EX_CFG=cfg;renderCatExclude();toast("已清除");await loadStatus();renderSources();}
-  else toast(r.msg||"清除失败","fail");
-}
 async function restoreBuiltin(){
   const r=await jpost("/v/api/ext/source/restore",{});
   if(r.code===0){toast("已恢复内置源");await loadStatus();}else toast("失败","fail");
@@ -2911,7 +2863,9 @@ async function saveLines(){
     skip_outro_seconds:Math.max(0,Math.min(300,parseInt($("skipOutroSeconds").value)||0)),
     poster_speed_badge:$("posterSpeedBadge").checked,
     seg_direct_enabled:$("segDirectEnabled").checked,
-    seg_direct_hosts:$("segDirectHosts").value};
+    seg_direct_hosts:$("segDirectHosts").value,
+    playlist_ttl_vod:Math.max(60,Math.min(3600,parseInt($("playlistTtlVod").value)||600)),
+    playlist_ttl_live:Math.max(30,Math.min(600,parseInt($("playlistTtlLive").value)||120))};
   const r=await jpost("/v/api/ext/config",body);
   if(r.code===0){toast("已保存");Object.assign(CFG,body);}else toast("保存失败 "+r.msg,"fail");
 }
@@ -3159,6 +3113,13 @@ function _installCheckText(d){
   L.push("核心路由: "+(rt.ok?"齐全":"缺 "+((rt.missing||[]).join(", ")||"-")));
   L.push("后台任务: "+(((c.background_tasks||{}).running||[]).length)+" 个");
   L.push("源健康条目: "+(((c.source_health||{}).sources)||0));
+  const f=(c.features&&c.features.value)||d.features||{};
+  const sd=f.seg_direct||{};
+  L.push("分片直连: "+(sd.enabled?(sd.hosts?("开 / "+sd.hosts+" 个 host / 命中 "+(sd.direct_hits||0)+" 次"):"开，但白名单为空（等于没开）"):"关"));
+  const tt=f.playlist_ttl||{};
+  L.push("清单缓存: 点播 "+tt.vod+"s / 直播 "+tt.live+"s"+(tt.is_default?"（默认值，未按实测调整）":""));
+  const pm=f.poster_mirror||{},pd=f.poster_disk||{};
+  L.push("海报镜像: "+(pm.pairs||0)+" 条映射 / 命中 "+(pm.hits||0)+" 次；磁盘缓存: "+(pd.enabled?("开 "+pd.max_mb+"MB"):"关"));
   L.push("结论: "+(d.ok?"通过 ✓":"有问题 ✗"));
   return L.join("\n");
 }
@@ -3235,6 +3196,8 @@ async function init(){
   $("midPlaybackSwitch").checked=CFG.mid_playback_switch!==false;
   $("segDirectEnabled").checked=CFG.seg_direct_enabled===true;
   $("segDirectHosts").value=(CFG.seg_direct_hosts||[]).join(", ");
+  $("playlistTtlVod").value=CFG.playlist_ttl_vod??600;
+  $("playlistTtlLive").value=CFG.playlist_ttl_live??120;
   $("skipIntroEnabled").checked=CFG.skip_intro_enabled===true;
   $("skipIntroSeconds").value=CFG.skip_intro_seconds||0;
   $("skipOutroEnabled").checked=CFG.skip_outro_enabled===true;
@@ -3251,7 +3214,6 @@ async function init(){
   const ed=$("aboutEdition");if(ed)ed.textContent=(FEAT_DDUO?"完整版（本地全功能）":"公开版")+" · 在飞牛原生搜索与媒体库中注入在线影视";
   loadOnline();
   loadSortMode().then(()=>initSrcDrag()).catch(()=>{});
-  loadCatExclude().catch(()=>{});
   // >>> PRIVATE:CATVOD
   if(document.getElementById("page-xiaoya"))loadPriv();
   // <<< PRIVATE:CATVOD

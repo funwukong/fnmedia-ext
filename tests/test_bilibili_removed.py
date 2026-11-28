@@ -62,6 +62,7 @@ class CommonEnhancementsKeptTests(unittest.TestCase):
     """通用增强必须保留：网盘 / 播放优化 / 竞速 / 换线 / 重置 / 条目展开。"""
 
     def setUp(self):
+        self.play = (PROXY / "play_proxy.py").read_text(encoding="utf-8")
         self.app = (PROXY / "app.py").read_text(encoding="utf-8")
         self.hls = (PROXY / "hls_race.py").read_text(encoding="utf-8")
         self.ui = (PROXY / "assets" / "admin.html").read_text(encoding="utf-8")
@@ -96,7 +97,7 @@ class CommonEnhancementsKeptTests(unittest.TestCase):
         self.assertNotIn("_vod_line_folder pansou card failed", self.app)
 
     def test_pansou_still_in_playback_menu(self):
-        self.assertIn('"label": PANSOU_LABEL', self.app)
+        self.assertIn('"label": PANSOU_LABEL', self.app + (self.play or ""))
 
     # —— 播放优化 / 竞速 ——
     def test_race_and_switch_kept(self):
